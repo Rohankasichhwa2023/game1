@@ -59,6 +59,123 @@ lifeDisplay.style.fontFamily = 'Arial, sans-serif';
 lifeDisplay.innerHTML = `Life: ${playerLife}`;
 document.body.appendChild(lifeDisplay);
 
+// ---------------- HUD: Gold Coins Display ----------------
+let goldCount = 0;
+const goldDisplay = document.createElement('div');
+goldDisplay.style.position = 'absolute';
+goldDisplay.style.top = '10px';
+goldDisplay.style.right = '10px';
+goldDisplay.style.color = 'gold';
+goldDisplay.style.fontSize = '24px';
+goldDisplay.style.fontFamily = 'Arial, sans-serif';
+goldDisplay.innerHTML = `Gold: ${goldCount}/5`;
+document.body.appendChild(goldDisplay);
+
+// ---------------- Gun System ----------------
+// Default gun: damage 1.
+let currentGun = { name: "default", damage: 1 };
+const gunPickups = [];
+
+function createGunPickup(gunType) {
+  const group = new THREE.Group();
+
+  // Gun body: a rectangular box.
+  const bodyGeometry = new THREE.BoxGeometry(1, 0.3, 0.2);
+  let bodyMaterial;
+  if (gunType === "rifle") {
+    bodyMaterial = new THREE.MeshPhongMaterial({ color: 0x0000ff }); // Blue for rifle.
+  } else if (gunType === "shotgun") {
+    bodyMaterial = new THREE.MeshPhongMaterial({ color: 0x00ff00 }); // Green for shotgun.
+  }
+  const bodyMesh = new THREE.Mesh(bodyGeometry, bodyMaterial);
+  group.add(bodyMesh);
+
+  // Gun barrel: a cylinder that represents the barrel.
+  const barrelGeometry = new THREE.CylinderGeometry(0.05, 0.05, 0.8, 8);
+  const barrelMaterial = new THREE.MeshPhongMaterial({ color: 0x333333 });
+  const barrelMesh = new THREE.Mesh(barrelGeometry, barrelMaterial);
+  barrelMesh.rotation.z = Math.PI / 2;
+  barrelMesh.position.set(0.6, 0, 0);
+  group.add(barrelMesh);
+
+  // Create text sprite for gun type
+  const textSprite = createTextSprite(gunType.charAt(0).toUpperCase() + gunType.slice(1));
+  textSprite.position.set(0, 0.5, 0); // Position above the gun
+  group.add(textSprite);
+
+  // Attach the gun type for later identification.
+  group.userData.gunType = gunType;
+  group.scale.set(0.5, 0.5, 0.5);
+
+  return group;
+}
+function createTextSprite(message) {
+  const canvas = document.createElement("canvas");
+  const context = canvas.getContext("2d");
+  canvas.width = 256;
+  canvas.height = 128;
+  
+  // Set text properties
+  context.fillStyle = "white";
+  context.font = "40px Arial";
+  context.textAlign = "center";
+  context.fillText(message, canvas.width / 2, 80);
+
+  // Create texture from canvas
+  const texture = new THREE.CanvasTexture(canvas);
+  const material = new THREE.SpriteMaterial({ map: texture, transparent: true });
+  const sprite = new THREE.Sprite(material);
+  sprite.scale.set(3, 3, 3); // Adjust size of text
+
+  return sprite;
+}
+
+
+
+function scatterGunPickups() {
+  // Scatter a rifle pickup.
+  let rifle = createGunPickup("rifle");
+  let distance = 100 + Math.random() * 100;
+
+  let angle = Math.random() * 2 * Math.PI;
+  let x = player.position.x + distance * Math.cos(angle);
+  let z = player.position.z + distance * Math.sin(angle);
+  rifle.position.set(x, 0.5, z);
+  scene.add(rifle);
+  gunPickups.push(rifle);
+  
+  // Scatter a shotgun pickup.
+  let shotgun = createGunPickup("shotgun");
+  distance = 200 + Math.random() * 200;
+  angle = Math.random() * 2 * Math.PI;
+  x = player.position.x + distance * Math.cos(angle);
+  z = player.position.z + distance * Math.sin(angle);
+  shotgun.position.set(x, 0.5, z);
+  scene.add(shotgun);
+  gunPickups.push(shotgun);
+}
+
+function updateGunPickups() {
+  let gunPowerText = document.getElementById("gunPowerDisplay");
+  // Check if the player collects a gun pickup (within 2 units).
+  for (let i = gunPickups.length - 1; i >= 0; i--) {
+    const gunMesh = gunPickups[i];
+    if (player.position.distanceTo(gunMesh.position) < 2) {
+      const newGunType = gunMesh.userData.gunType;
+      if (newGunType === "rifle") {
+        currentGun = { name: "rifle", damage: 2 };
+        gunPowerText.textContent = " Rifle Damage: 2";
+      } else if (newGunType === "shotgun") {
+        currentGun = { name: "shotgun", damage: 5 };
+        gunPowerText.textContent = "ShotGun Damage: 5";
+      }
+      console.log("Picked up " + currentGun.name);
+      scene.remove(gunMesh);
+      gunPickups.splice(i, 1);
+    }
+  }
+}
+
 // ---------------- Object Arrays for Collisions & Bullets ----------------
 const treeBoxes = [];
 const buildingBoxes = [];
@@ -354,6 +471,8 @@ function updateMovement() {
     velocity.y = 0;
     isJumping = false;
   }
+
+
 }
 
 function updateBullets() {
@@ -371,7 +490,8 @@ function updateBullets() {
       const enemy = enemies[j];
       const enemyBox = new THREE.Box3().setFromObject(enemy.mesh);
       if (enemyBox.containsPoint(bullet.position)) {
-        enemy.life -= 1;
+        // Use the damage of the current gun (default is 1, rifle = 2, shotgun = 5)
+        enemy.life -= currentGun.damage;
         scene.remove(bullet);
         bullets.splice(i, 1);
         returnBullet(bullet, false);
@@ -510,6 +630,123 @@ function updateEnemies() {
   }
 }
 
+// ------------- Create a Small Heart Lifeline Geometry -------------
+function createSmallHeartGeometry() {
+  const x = 0, y = 0;
+  const heartShape = new THREE.Shape();
+  // Define the heart shape (similar to a classic heart curve)
+  heartShape.moveTo(x + 5, y + 5);
+  heartShape.bezierCurveTo(x + 5, y + 5, x + 4, y, x, y);
+  heartShape.bezierCurveTo(x - 6, y, x - 6, y + 7, x - 6, y + 7);
+  heartShape.bezierCurveTo(x - 6, y + 11, x - 3, y + 15.4, x + 5, y + 19);
+  heartShape.bezierCurveTo(x + 12, y + 15.4, x + 16, y + 11, x + 16, y + 7);
+  heartShape.bezierCurveTo(x + 16, y + 7, x + 16, y, x + 10, y);
+  heartShape.bezierCurveTo(x + 7, y, x + 5, y + 5, x + 5, y + 5);
+  
+  // Extrude the 2D shape into 3D; settings can be tweaked as needed
+  const extrudeSettings = {
+    depth: 2,
+    bevelEnabled: true,
+    bevelSegments: 2,
+    steps: 2,
+    bevelSize: 1,
+    bevelThickness: 1
+  };
+  const geometry = new THREE.ExtrudeGeometry(heartShape, extrudeSettings);
+  geometry.center(); // Center the geometry so positioning is easier
+  
+  // Scale down the heart so it's smaller than your boxes.
+  geometry.scale(0.03, 0.03, 0.03);
+  
+  return geometry;
+}
+
+const smallHeartGeometry = createSmallHeartGeometry();
+const heartMaterial = new THREE.MeshPhongMaterial({ color: 0xff0000 });
+
+// Array to store lifeline hearts
+const lifelines = [];
+
+// ------------- Function to Create a Single Heart Lifeline -------------
+// Each heart is positioned at a random angle and distance (within given min/max ranges) from the player.
+function createHeartLifeline(distanceMin, distanceMax) {
+  const distance = distanceMin + Math.random() * (distanceMax - distanceMin);
+  const angle = Math.random() * 2 * Math.PI;
+  const x = player.position.x + distance * Math.cos(angle);
+  const z = player.position.z + distance * Math.sin(angle);
+  const heartMesh = new THREE.Mesh(smallHeartGeometry, heartMaterial);
+  
+  // Keep the heart vertical and rotate about Z to fix the upside-down orientation.
+  heartMesh.rotation.z = Math.PI; // 180° rotation
+  
+  // Position the heart in the scene. Adjust y if needed.
+  heartMesh.position.set(x, 1, z);
+  scene.add(heartMesh);
+  lifelines.push(heartMesh);
+}
+
+// Create three hearts with increasing distance ranges
+createHeartLifeline(50, 100);   // Closer lifeline
+createHeartLifeline(100, 150);  // Middle lifeline
+createHeartLifeline(150, 200);  // Furthest lifeline
+
+// ------------- Update Function to Check for Lifeline Collection -------------
+function updateLifelines() {
+  // Check each lifeline; if the player is within a threshold distance, collect the heart.
+  for (let i = lifelines.length - 1; i >= 0; i--) {
+    const heart = lifelines[i];
+    if (player.position.distanceTo(heart.position) < 3) {
+      // Increase player's life (here, add 2 points)
+      playerLife += 2;
+      lifeDisplay.innerHTML = `Life: ${playerLife}`;
+      scene.remove(heart);
+      lifelines.splice(i, 1);
+    }
+  }
+}
+
+// ---------------- Gold Coin Creation ----------------
+const goldCoinGeometry = new THREE.CylinderGeometry(0.5, 0.5, 0.1, 32);
+const goldCoinMaterial = new THREE.MeshPhongMaterial({ color: 0xffd700 });
+const goldCoins = [];
+
+function createGoldCoin(minDistance, maxDistance) {
+  const distance = minDistance + Math.random() * (maxDistance - minDistance);
+  const angle = Math.random() * 2 * Math.PI;
+  const x = player.position.x + distance * Math.cos(angle);
+  const z = player.position.z + distance * Math.sin(angle);
+  const coinMesh = new THREE.Mesh(goldCoinGeometry, goldCoinMaterial);
+  // Rotate so the coin lies flat (its face is upward)
+  coinMesh.rotation.x = Math.PI / 2;
+  // Position the coin slightly above the ground
+  coinMesh.position.set(x, 0.5, z);
+  scene.add(coinMesh);
+  goldCoins.push(coinMesh);
+}
+
+// Create 5 gold coins scattered far from the player
+for (let i = 0; i < 5; i++) {
+  createGoldCoin(250, 400);
+}
+
+function updateGoldCoins() {
+  // Check each coin for collision with the player (using a threshold of 2 units)
+  for (let i = goldCoins.length - 1; i >= 0; i--) {
+    const coin = goldCoins[i];
+    if (player.position.distanceTo(coin.position) < 2) {
+      goldCount++;
+      goldDisplay.innerHTML = `Gold: ${goldCount}/5`;
+      scene.remove(coin);
+      goldCoins.splice(i, 1);
+      
+      // If collected 5 coins, the player wins
+      if (goldCount >= 5) {
+        triggerGameOver("You win! You collected all gold coins.");
+      }
+    }
+  }
+}
+
 // ---------------- Game Over Function ----------------
 function triggerGameOver(message) {
   if (gameOver) return;
@@ -562,6 +799,10 @@ document.body.appendChild(pointer);
 // ---------------- Set Initial Camera Position ----------------
 camera.position.set(player.position.x, player.position.y + 2, player.position.z);
 
+// ---------------- Scatter Gun Pickups ----------------
+// Call this after the player is created.
+scatterGunPickups();
+
 // ---------------- Animation Loop ----------------
 function animate() {
   requestAnimationFrame(animate);
@@ -569,6 +810,9 @@ function animate() {
   updateBullets();
   updateEnemyBullets();
   updateEnemies();
+  updateLifelines();
+  updateGoldCoins();
+  updateGunPickups(); // Check for gun pickup collection
   renderer.render(scene, camera);
 }
 

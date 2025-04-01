@@ -1,3 +1,15 @@
+// Wait for the document to load.
+document.addEventListener('DOMContentLoaded', () => {
+  const overlay = document.getElementById('instructionsOverlay');
+  
+  // Add a click listener to remove the overlay.
+  overlay.addEventListener('click', () => {
+    overlay.style.display = 'none';
+    // Optionally, call any additional startGame() function here if needed.
+    // For example: startGame();
+  });
+});
+
 import * as THREE from 'three';
 import { PointerLockControls } from 'three/examples/jsm/controls/PointerLockControls.js';
 
@@ -72,6 +84,8 @@ const ground = new THREE.Mesh(groundGeometry, groundMaterial);
 ground.rotation.x = -Math.PI / 2;
 ground.receiveShadow = true;
 scene.add(ground);
+
+
 
 // ---------------- HUD: Life & Gold Displays ----------------
 let playerLife = 10;
@@ -326,11 +340,12 @@ function createEnemy(x, z) {
   return { mesh: enemyMesh, life: 10, lastShot: Date.now(), shootInterval: 2000 };
 }
 
-for (let i = 0; i < 5; i++) {
+for (let i = 0; i < 6; i++) {
   const x = Math.random() * groundSize - groundSize / 2;
   const z = Math.random() * groundSize - groundSize / 2;
   enemies.push(createEnemy(x, z));
 }
+
 
 // ---------------- Player Setup ----------------
 const playerGeometry = new THREE.BoxGeometry(1, 2, 1);
@@ -729,7 +744,9 @@ function checkObstaclesCollision(box) {
 
 function updateEnemies() {
   const playerBox = new THREE.Box3().setFromObject(player);
-  for (const enemy of enemies) {
+  // Update normal enemies.
+  for (let i = enemies.length - 1; i >= 0; i--) {
+    const enemy = enemies[i];
     const directChaseDir = new THREE.Vector3().subVectors(player.position, enemy.mesh.position).normalize();
     const enemySpeed = 0.1;
     let bestVector = directChaseDir.clone().multiplyScalar(enemySpeed);
@@ -754,13 +771,6 @@ function updateEnemies() {
         alternatives.sort((a, b) => a.distance - b.distance);
         bestVector = alternatives[0].vector;
         canMove = true;
-      } else {
-        bestVector = new THREE.Vector3((Math.random() - 0.5) * enemySpeed, 0, (Math.random() - 0.5) * enemySpeed);
-        if (!checkObstaclesCollision(enemyBox.clone().translate(bestVector))) {
-          canMove = true;
-        } else {
-          canMove = false;
-        }
       }
     }
     
@@ -779,6 +789,21 @@ function updateEnemies() {
       shootEnemyBullet(enemy);
     }
   }
+  
+  // If all normal enemies have been defeated and the boss hasn't spawned yet, spawn the boss.
+  if (enemies.length === 0 && !bossSpawned && !bossEnemy) {
+    bossSpawned = true;
+    // Spawn boss enemy near the player for easier testing.
+    const offset = 20; // 20 world units away from the player
+    const angle = Math.random() * 2 * Math.PI; // Random direction
+    const bossX = player.position.x + offset * Math.cos(angle);
+    const bossZ = player.position.z + offset * Math.sin(angle);
+    bossEnemy = createBossEnemy(bossX, bossZ);
+    console.log("Boss enemy spawned near the player!");
+  }
+  
+  // Update the boss enemy if it exists.
+  updateBossEnemy();
 }
 
 // ------------- Create a Small Heart Lifeline Geometry -------------
@@ -875,6 +900,147 @@ function updateGoldCoins() {
     }
   }
 }
+let bossSpawned = false;
+let bossEnemy = null;
+let goldenGateSpawned = false;
+let goldenGateDoor = null;
+
+// --------------- Boss Enemy Implementation ---------------
+function createBossEnemy(x, z) {
+  // Create a larger enemy with distinct color (e.g., purple) and higher life.
+  const bossGeometry = new THREE.BoxGeometry(4, 4, 4);
+  const bossMaterial = new THREE.MeshPhongMaterial({ color: 0x800080 }); // purple
+  const bossMesh = new THREE.Mesh(bossGeometry, bossMaterial);
+  bossMesh.castShadow = true;
+  bossMesh.receiveShadow = true;
+  bossMesh.position.set(x, 2, z);
+  scene.add(bossMesh);
+  
+  // Return an object with boss properties.
+  return { mesh: bossMesh, life: 100, lastShot: Date.now(), shootInterval: 1000, isBoss: true };
+}
+
+
+// --------------- Update Boss Enemy in the Game Loop ---------------
+function updateBossEnemy() {
+  if (!bossEnemy) return;
+  
+  const playerBox = new THREE.Box3().setFromObject(player);
+  const enemyBox = new THREE.Box3().setFromObject(bossEnemy.mesh);
+  
+  // Simple chase behavior toward the player.
+  const directChaseDir = new THREE.Vector3().subVectors(player.position, bossEnemy.mesh.position).normalize();
+  const bossSpeed = 0.05; // slightly slower than normal enemies, if desired
+  const moveVector = directChaseDir.clone().multiplyScalar(bossSpeed);
+  
+  // Check collision with obstacles using a similar check as for normal enemies.
+  const enemyBoxAfterMove = enemyBox.clone().translate(moveVector);
+  if (!checkObstaclesCollision(enemyBoxAfterMove)) {
+    bossEnemy.mesh.position.add(moveVector);
+  }
+  
+  // Check collision with player.
+  const updatedEnemyBox = new THREE.Box3().setFromObject(bossEnemy.mesh);
+  if (updatedEnemyBox.intersectsBox(playerBox)) {
+    triggerGameOver("The boss caught you.");
+    return;
+  }
+  
+  // Shooting logic (faster than normal enemies).
+  if (Date.now() - bossEnemy.lastShot > bossEnemy.shootInterval) {
+    bossEnemy.lastShot = Date.now();
+    shootEnemyBullet(bossEnemy);
+  }
+  
+  // (Optional) Update boss health display or effects.
+  
+  // Check if boss is defeated.
+ if (bossEnemy.life <= 0) {
+    // Capture the boss's defeat position.
+    const bossDefeatPosition = bossEnemy.mesh.position.clone();
+    scene.remove(bossEnemy.mesh);
+    bossEnemy = null;
+    
+    // Spawn the portal exactly where the boss was defeated.
+    if (!goldenGateSpawned) spawnPortal(bossDefeatPosition);
+  }
+
+}
+function spawnPortal(spawnPosition) {
+  // Define portal dimensions.
+  const innerRadius = 4;
+  const outerRadius = 6;
+  const segments = 32;
+  
+  // Create a ring geometry for the outer edge of the portal.
+  const portalRingGeometry = new THREE.RingGeometry(innerRadius, outerRadius, segments);
+  const portalRingMaterial = new THREE.MeshBasicMaterial({
+    color: 0x0000ff,       // Deep blue color.
+    side: THREE.DoubleSide,
+    transparent: true,
+    opacity: 0.8
+  });
+  const portalRing = new THREE.Mesh(portalRingGeometry, portalRingMaterial);
+  
+  // Position the portal ring at the boss's location.
+  portalRing.position.copy(spawnPosition);
+  // Set the vertical position; you can adjust this if needed.
+  portalRing.position.y = outerRadius; 
+  // Rotate to make it stand vertically.
+  portalRing.rotation.x = Math.PI / 2;
+  
+  // Create an inner circle for the glowing vortex effect.
+  const innerCircleGeometry = new THREE.CircleGeometry(innerRadius, segments);
+  const innerCircleMaterial = new THREE.MeshBasicMaterial({
+    color: 0x00aaff,       // Lighter blue for the vortex.
+    side: THREE.DoubleSide,
+    transparent: true,
+    opacity: 0.6
+  });
+  const innerCircle = new THREE.Mesh(innerCircleGeometry, innerCircleMaterial);
+  innerCircle.position.copy(portalRing.position);
+  innerCircle.rotation.x = Math.PI / 2;
+  
+  // Group both elements together to form the portal.
+  const portalGroup = new THREE.Group();
+  portalGroup.add(portalRing);
+  portalGroup.add(innerCircle);
+  
+  // Calculate a bounding box for collision detection.
+  portalGroup.userData.box = new THREE.Box3().setFromObject(portalGroup);
+  
+  scene.add(portalGroup);
+  goldenGateSpawned = true;      // Reusing the same flag.
+  goldenGateDoor = portalGroup;  // Reusing the same variable.
+  
+  console.log("Blue wormhole portal spawned at boss location!");
+}
+
+
+// --------------- Update Door Collision (Golden Gate) ---------------
+function updatePortalCollision() {
+  if (!goldenGateSpawned || !goldenGateDoor) return;
+  
+  // Update the portal group's bounding box.
+  goldenGateDoor.userData.box.setFromObject(goldenGateDoor);
+  const playerBox = new THREE.Box3().setFromObject(player);
+  
+  if (playerBox.intersectsBox(goldenGateDoor.userData.box)) {
+    if (goldCount >= 5) {
+      console.log("Portal activated!");
+      triggerGameOver("You win! You passed through the portal with all 5 gold coins.");
+    } else {
+      console.log("You need 5 gold coins to activate the portal.");
+    }
+  }
+}
+
+function animatePortal() {
+  if (!goldenGateSpawned || !goldenGateDoor) return;
+  goldenGateDoor.rotation.y += 0.01; // Slow rotation for a dynamic effect.
+}
+
+
 
 // ---------------- Game Over Function ----------------
 function triggerGameOver(message) {
@@ -1018,10 +1184,11 @@ function animate() {
   updateLifelines();
   updateGoldCoins();
   updateGunPickups();
+  updatePortalCollision(); // Check for portal collision.
+  animatePortal();   
   renderer.render(scene, camera);
   updateMinimap();
 }
-
 animate();
 
 // ---------------- Resize Handling ----------------
@@ -1029,4 +1196,23 @@ window.addEventListener('resize', () => {
   camera.aspect = window.innerWidth / window.innerHeight;
   camera.updateProjectionMatrix();
   renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+document.addEventListener('keydown', (event) => {
+  if (event.key === 't' || event.key === 'T') {
+    goldCount = 5;
+    goldDisplay.innerHTML = `Gold: ${goldCount}/5`;
+    console.log("Debug: goldCount set to 5");
+  }
+});
+// Debug: Press 'Y' to simulate the boss enemy being defeated.
+document.addEventListener('keydown', (event) => {
+  if (event.key === 'y' || event.key === 'Y') {
+    if (bossEnemy) {
+      bossEnemy.life = 0;
+      console.log("Debug: Boss enemy defeated");
+    } else {
+      console.log("Debug: No boss enemy present.");
+    }
+  }
 });

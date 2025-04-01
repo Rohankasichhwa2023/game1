@@ -19,20 +19,65 @@
 </head>
 
 <body>
+    <!-- Instructions Overlay -->
+    <div id="instructionsOverlay" style="
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      background-color: rgba(0,0,0,0.85);
+      color: white;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      align-items: center;
+      z-index: 1000;
+      text-align: center;
+      padding: 20px;
+      font-family: Arial, sans-serif;
+    ">
+        <h1>How to Play</h1>
+        <p>
+            <strong>Controls:</strong><br>
+            - Move: W, A, S, D<br>
+            - Jump: Space (Double-tap Space for jumping in the building roof, go near the building)<br>
+            - Shoot: Left Click<br>
+            - Sniper Mode: Right Click (hold then release to shoot)<br>
+        </p>
+        <p>
+            <strong>Objective:</strong><br>
+            - Defeat enemies and collect 5 gold coins.<br>
+            - After defeating all normal enemies, a boss will appear.<br>
+            - Defeat the boss to spawn a portal.<br>
+            - Step through the portal with 5 gold coins to win the game.
+        </p>
+        <p>
+            <strong>Tools:</strong><br>
+            - Life lines ❤️<br>
+            - Gold coins 🪙<br>
+            - Three guns scattered in the ground<br>
+        </p>
+        <p style="font-size: 24px; margin-top: 30px; cursor: pointer;">
+            Click to Play
+        </p>
+    </div>
+
+    <!-- Your other HTML elements, including the gunPowerDisplay div -->
     <div id="gunPowerDisplay" style="
-        position: absolute;
-        top: 10px;
-        left: 50%;
-        transform: translateX(-50%);
-        font-size: 20px;
-        font-weight: bold;
-        color: white;
-       
-        padding: 5px 10px;
-        border-radius: 5px;
-    ">Normal Gun Damage: 1</div>
+      position: absolute;
+      top: 10px;
+      left: 50%;
+      transform: translateX(-50%);
+      font-size: 20px;
+      font-weight: bold;
+      color: white;
+      padding: 5px 10px;
+      border-radius: 5px;
+  ">Normal Gun Damage: 1</div>
 
     <script type="module" src="script.js"></script>
 </body>
+
 
 </html>

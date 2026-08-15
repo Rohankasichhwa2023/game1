@@ -5,19 +5,62 @@ import * as THREE from 'three';
 import { state } from './state.js';
 
 function generateGrassTexture() {
+  const size = 1024;
   const canvas = document.createElement('canvas');
-  canvas.width = 512;
-  canvas.height = 512;
+  canvas.width = size;
+  canvas.height = size;
   const ctx = canvas.getContext('2d');
-  ctx.fillStyle = '#228B22';
-  ctx.fillRect(0, 0, canvas.width, canvas.height);
-  for (let i = 0; i < 5000; i++) {
-    const x = Math.floor(Math.random() * canvas.width);
-    const y = Math.floor(Math.random() * canvas.height);
-    const shade = 220 + Math.floor(Math.random() * 35);
-    ctx.fillStyle = `rgb(0, ${shade}, 0)`;
+
+  // Base grass green.
+  ctx.fillStyle = '#3f7a2e';
+  ctx.fillRect(0, 0, size, size);
+
+  // Soft mottled patches for large-scale, natural variation.
+  for (let i = 0; i < 220; i++) {
+    const x = Math.random() * size;
+    const y = Math.random() * size;
+    const r = 40 + Math.random() * 160;
+    const light = Math.random();
+    const rgb = light > 0.5 ? '90, 170, 65' : '40, 90, 30';
+    const alpha = 0.04 + Math.random() * 0.08;
+    const grad = ctx.createRadialGradient(x, y, 0, x, y, r);
+    grad.addColorStop(0, `rgba(${rgb}, ${alpha})`);
+    grad.addColorStop(1, 'rgba(0, 0, 0, 0)');
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.arc(x, y, r, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // Individual grass blades: short vertical strokes in varied greens.
+  for (let i = 0; i < 40000; i++) {
+    const x = Math.random() * size;
+    const y = Math.random() * size;
+    const bladeW = 1 + Math.random() * 1.5;
+    const bladeH = 2 + Math.random() * 4;
+    const green = 85 + Math.floor(Math.random() * 75); // 85..159
+    const red = 35 + Math.floor(Math.random() * 30);
+    const blue = 25 + Math.floor(Math.random() * 25);
+    ctx.fillStyle = `rgb(${red}, ${green}, ${blue})`;
+    ctx.fillRect(x, y, bladeW, bladeH);
+  }
+
+  // Fine darker soil/specks.
+  for (let i = 0; i < 3000; i++) {
+    const x = Math.random() * size;
+    const y = Math.random() * size;
+    ctx.fillStyle = `rgba(60, 45, 25, ${0.1 + Math.random() * 0.25})`;
     ctx.fillRect(x, y, 1, 1);
   }
+
+  // Tiny light highlights (sunlit tips / dew).
+  for (let i = 0; i < 3000; i++) {
+    const x = Math.random() * size;
+    const y = Math.random() * size;
+    ctx.fillStyle = `rgba(200, 220, 120, ${0.05 + Math.random() * 0.1})`;
+    ctx.fillRect(x, y, 1, 1);
+  }
+
   return canvas;
 }
 
@@ -155,7 +198,11 @@ export function initWorld() {
   const grassTexture = new THREE.CanvasTexture(grassTextureCanvas);
   grassTexture.wrapS = THREE.RepeatWrapping;
   grassTexture.wrapT = THREE.RepeatWrapping;
-  grassTexture.repeat.set(groundSize / 50, groundSize / 50);
+  // Tile every ~5 world units so the grass stays crisp up close.
+  grassTexture.repeat.set(groundSize / 5, groundSize / 5);
+  grassTexture.colorSpace = THREE.SRGBColorSpace;
+  // Anisotropic filtering keeps the ground sharp at grazing angles.
+  grassTexture.anisotropy = Math.min(16, state.renderer.capabilities.getMaxAnisotropy());
 
   const groundMaterial = new THREE.MeshPhongMaterial({ map: grassTexture, side: THREE.DoubleSide });
   const ground = new THREE.Mesh(groundGeometry, groundMaterial);

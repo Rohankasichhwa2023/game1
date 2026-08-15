@@ -1,13 +1,13 @@
 // enemies.js
 // Normal enemy and boss enemy creation, AI, and per-frame updates.
 
-import * as THREE from 'three';
-import { state } from './state.js';
-import { createHumanFigure, makeBox } from './character.js';
-import { findClearSpawnPosition } from './world.js';
-import { shootEnemyBullet } from './bullets.js';
-import { triggerGameOver } from './ui.js';
-import { spawnPortal } from './portal.js';
+import * as THREE from "three";
+import { state } from "./state.js";
+import { createHumanFigure, makeBox } from "./character.js";
+import { findClearSpawnPosition } from "./world.js";
+import { shootEnemyBullet } from "./bullets.js";
+import { triggerGameOver } from "./ui.js";
+import { spawnPortal } from "./portal.js";
 
 function createEnemy(x, z) {
   const enemyMesh = createHumanFigure({
@@ -20,7 +20,7 @@ function createEnemy(x, z) {
 
   return {
     mesh: enemyMesh,
-    life: 10,
+    life: 5,
     lastShot: Date.now(),
     shootInterval: 2000,
     halfWidth: 0.6,
@@ -57,7 +57,7 @@ function rotateVectorY(vector, angle) {
   return new THREE.Vector3(
     vector.x * cos - vector.z * sin,
     vector.y,
-    vector.x * sin + vector.z * cos
+    vector.x * sin + vector.z * cos,
   );
 }
 
@@ -85,9 +85,16 @@ function updateBossEnemy(dt) {
   if (!state.bossEnemy) return;
 
   const playerBox = makeBox(state.player.position, 0.5, 1, 0.5);
-  const enemyBox = makeBox(state.bossEnemy.mesh.position, state.bossEnemy.halfWidth, state.bossEnemy.halfHeight, state.bossEnemy.halfDepth);
+  const enemyBox = makeBox(
+    state.bossEnemy.mesh.position,
+    state.bossEnemy.halfWidth,
+    state.bossEnemy.halfHeight,
+    state.bossEnemy.halfDepth,
+  );
 
-  const directChaseDir = new THREE.Vector3().subVectors(state.player.position, state.bossEnemy.mesh.position).normalize();
+  const directChaseDir = new THREE.Vector3()
+    .subVectors(state.player.position, state.bossEnemy.mesh.position)
+    .normalize();
   const bossSpeed = 0.05;
   const moveVector = directChaseDir.clone().multiplyScalar(bossSpeed * dt);
 
@@ -97,11 +104,19 @@ function updateBossEnemy(dt) {
   }
 
   // Face the player.
-  state.bossEnemy.mesh.rotation.y = Math.atan2(directChaseDir.x, directChaseDir.z);
+  state.bossEnemy.mesh.rotation.y = Math.atan2(
+    directChaseDir.x,
+    directChaseDir.z,
+  );
 
-  const updatedEnemyBox = makeBox(state.bossEnemy.mesh.position, state.bossEnemy.halfWidth, state.bossEnemy.halfHeight, state.bossEnemy.halfDepth);
+  const updatedEnemyBox = makeBox(
+    state.bossEnemy.mesh.position,
+    state.bossEnemy.halfWidth,
+    state.bossEnemy.halfHeight,
+    state.bossEnemy.halfDepth,
+  );
   if (updatedEnemyBox.intersectsBox(playerBox)) {
-    triggerGameOver('The boss caught you.');
+    triggerGameOver("The boss caught you.");
     return;
   }
 
@@ -124,17 +139,28 @@ export function updateEnemies(dt) {
 
   for (let i = state.enemies.length - 1; i >= 0; i--) {
     const enemy = state.enemies[i];
-    const directChaseDir = new THREE.Vector3().subVectors(state.player.position, enemy.mesh.position).normalize();
+    const directChaseDir = new THREE.Vector3()
+      .subVectors(state.player.position, enemy.mesh.position)
+      .normalize();
     const enemySpeed = 0.1;
     let bestVector = directChaseDir.clone().multiplyScalar(enemySpeed * dt);
 
-    const enemyBox = makeBox(enemy.mesh.position, enemy.halfWidth, enemy.halfHeight, enemy.halfDepth);
+    const enemyBox = makeBox(
+      enemy.mesh.position,
+      enemy.halfWidth,
+      enemy.halfHeight,
+      enemy.halfDepth,
+    );
     const newEnemyBox = enemyBox.clone().translate(bestVector);
     let canMove = !checkObstaclesCollision(newEnemyBox);
 
     if (!canMove) {
       const alternatives = [];
-      for (let angle = -Math.PI / 2; angle <= Math.PI / 2; angle += Math.PI / 12) {
+      for (
+        let angle = -Math.PI / 2;
+        angle <= Math.PI / 2;
+        angle += Math.PI / 12
+      ) {
         const altDir = rotateVectorY(directChaseDir, angle);
         const altVector = altDir.clone().multiplyScalar(enemySpeed * dt);
         const altBox = enemyBox.clone().translate(altVector);
@@ -158,9 +184,14 @@ export function updateEnemies(dt) {
     // Face the player.
     enemy.mesh.rotation.y = Math.atan2(directChaseDir.x, directChaseDir.z);
 
-    const updatedEnemyBox = makeBox(enemy.mesh.position, enemy.halfWidth, enemy.halfHeight, enemy.halfDepth);
+    const updatedEnemyBox = makeBox(
+      enemy.mesh.position,
+      enemy.halfWidth,
+      enemy.halfHeight,
+      enemy.halfDepth,
+    );
     if (updatedEnemyBox.intersectsBox(playerBox)) {
-      triggerGameOver('An enemy caught you.');
+      triggerGameOver("An enemy caught you.");
       return;
     }
 
@@ -176,10 +207,16 @@ export function updateEnemies(dt) {
     const offset = 20;
     const angle = Math.random() * 2 * Math.PI;
     const boundary = state.groundSize / 2 - 2;
-    const bossX = Math.max(-boundary, Math.min(boundary, state.player.position.x + offset * Math.cos(angle)));
-    const bossZ = Math.max(-boundary, Math.min(boundary, state.player.position.z + offset * Math.sin(angle)));
+    const bossX = Math.max(
+      -boundary,
+      Math.min(boundary, state.player.position.x + offset * Math.cos(angle)),
+    );
+    const bossZ = Math.max(
+      -boundary,
+      Math.min(boundary, state.player.position.z + offset * Math.sin(angle)),
+    );
     state.bossEnemy = createBossEnemy(bossX, bossZ);
-    console.log('Boss enemy spawned near the player!');
+    console.log("Boss enemy spawned near the player!");
   }
 
   updateBossEnemy(dt);

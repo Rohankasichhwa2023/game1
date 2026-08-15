@@ -1,0 +1,138 @@
+// state.js
+// Core THREE bootstrap and the single shared mutable game state object.
+// Every module imports `state` from here so they can read/write the same values.
+
+import * as THREE from 'three';
+import { PointerLockControls } from 'three/examples/jsm/controls/PointerLockControls.js';
+
+// ---------------- Scene, Camera, Renderer ----------------
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0xcfe8f5); // horizon haze (fallback behind the sky dome)
+scene.fog = new THREE.Fog(0xcfe8f5, 250, 1100);
+
+const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 3000);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+document.body.appendChild(renderer.domElement);
+
+// ---------------- Sky dome (vertical gradient) ----------------
+{
+  const skyGeometry = new THREE.SphereGeometry(1500, 32, 16);
+  const canvas = document.createElement('canvas');
+  canvas.width = 16;
+  canvas.height = 512;
+  const ctx = canvas.getContext('2d');
+  const grad = ctx.createLinearGradient(0, 0, 0, 512);
+  grad.addColorStop(0.0, '#2e6bd0');
+  grad.addColorStop(0.45, '#6fb4ea');
+  grad.addColorStop(0.75, '#b7dcf5');
+  grad.addColorStop(1.0, '#eaf6fc');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, 16, 512);
+  const skyTexture = new THREE.CanvasTexture(canvas);
+  skyTexture.colorSpace = THREE.SRGBColorSpace;
+  const skyMaterial = new THREE.MeshBasicMaterial({
+    map: skyTexture,
+    side: THREE.BackSide,
+    depthWrite: false,
+    fog: false,
+  });
+  const sky = new THREE.Mesh(skyGeometry, skyMaterial);
+  sky.renderOrder = -1;
+  sky.frustumCulled = false;
+  scene.add(sky);
+}
+
+// ---------------- Player ----------------
+const playerGeometry = new THREE.BoxGeometry(1, 2, 1);
+const playerMaterial = new THREE.MeshPhongMaterial({ color: 0xff0000 });
+const player = new THREE.Mesh(playerGeometry, playerMaterial);
+player.castShadow = true;
+player.receiveShadow = true;
+player.position.y = 1;
+scene.add(player);
+
+// ---------------- Sun & Ambient Light ----------------
+const sun = new THREE.DirectionalLight(0xfff2d9, 1.4);
+sun.position.set(120, 200, 120);
+sun.castShadow = true;
+sun.shadow.mapSize.set(2048, 2048);
+sun.shadow.camera.near = 1;
+sun.shadow.camera.far = 600;
+sun.shadow.camera.left = -70;
+sun.shadow.camera.right = 70;
+sun.shadow.camera.top = 70;
+sun.shadow.camera.bottom = -70;
+sun.shadow.bias = -0.0004;
+sun.shadow.normalBias = 0.02;
+scene.add(sun);
+scene.add(sun.target);
+
+const hemisphereLight = new THREE.HemisphereLight(0xcfe4ff, 0x3a6b3a, 0.6);
+scene.add(hemisphereLight);
+
+// ---------------- Controls ----------------
+export const controls = new PointerLockControls(camera, document.body);
+// Re-lock the pointer on click only while the game is running (not paused).
+document.addEventListener('click', () => {
+  if (!state.paused) controls.lock();
+});
+
+// ---------------- HUD: Life & Gold Displays ----------------
+const lifeDisplay = document.createElement('div');
+lifeDisplay.id = 'lifeDisplay';
+lifeDisplay.textContent = 'Life: 10';
+document.body.appendChild(lifeDisplay);
+
+const goldDisplay = document.createElement('div');
+goldDisplay.id = 'goldDisplay';
+goldDisplay.textContent = 'Gold: 0/5';
+document.body.appendChild(goldDisplay);
+
+// ---------------- Shared game state ----------------
+export const state = {
+  // Core THREE objects.
+  scene,
+  camera,
+  renderer,
+  player,
+  sun,
+
+  // HUD elements.
+  lifeDisplay,
+  goldDisplay,
+
+  // Mutable player stats.
+  playerLife: 10,
+  goldCount: 0,
+
+  // Currently equipped gun.
+  currentGun: { name: 'default', damage: 1 },
+
+  // Collision boxes for the static world.
+  treeBoxes: [],
+  buildingBoxes: [],
+  wallBoxes: [],
+
+  // Dynamic entities.
+  enemies: [],
+  bullets: [],
+  gameOver: false,
+
+  // Flow-control flags.
+  started: false,
+  paused: false,
+
+  // Boss / portal lifecycle flags.
+  bossSpawned: false,
+  bossEnemy: null,
+  goldenGateSpawned: false,
+  goldenGateDoor: null,
+
+  // Shared constant.
+  groundSize: 1000,
+};

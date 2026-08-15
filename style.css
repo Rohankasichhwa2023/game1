@@ -1,0 +1,262 @@
+/* ---------- Instructions overlay ---------- */
+#instructionsOverlay {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(8, 12, 20, 0.86);
+  backdrop-filter: blur(6px);
+  z-index: 1000;
+  padding: 24px;
+  font-family: Arial, sans-serif;
+}
+
+#instructionsOverlay .panel {
+  max-width: 620px;
+  width: 100%;
+  max-height: 90vh;
+  overflow-y: auto;
+  background: linear-gradient(180deg, #1b2432, #10161f);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 16px;
+  padding: 28px 30px;
+  color: #eef2f7;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+  text-align: left;
+}
+
+#instructionsOverlay h1 {
+  margin: 0 0 4px;
+  font-size: 30px;
+  letter-spacing: 0.5px;
+  color: #ffd75e;
+  text-align: center;
+}
+
+#instructionsOverlay .tagline {
+  margin: 0 0 20px;
+  text-align: center;
+  color: #b9c4d4;
+  font-size: 14px;
+}
+
+#instructionsOverlay section {
+  margin-bottom: 16px;
+}
+
+#instructionsOverlay h2 {
+  font-size: 14px;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: #8fd3ff;
+  margin: 0 0 8px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+  padding-bottom: 6px;
+}
+
+#instructionsOverlay .steps {
+  margin: 0;
+  padding-left: 22px;
+  line-height: 1.8;
+  color: #dbe3ee;
+  font-size: 14px;
+}
+
+#instructionsOverlay ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+#instructionsOverlay .controls-list li,
+#instructionsOverlay .pickups-list li {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 0;
+  font-size: 14px;
+  color: #dbe3ee;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+#instructionsOverlay .controls-list li:last-child,
+#instructionsOverlay .pickups-list li:last-child {
+  border-bottom: none;
+}
+
+#instructionsOverlay .controls-list li > span {
+  min-width: 150px;
+  flex-shrink: 0;
+}
+
+kbd {
+  display: inline-block;
+  min-width: 24px;
+  padding: 3px 7px;
+  text-align: center;
+  background: #2a3547;
+  border: 1px solid #4a5a72;
+  border-bottom-width: 3px;
+  border-radius: 6px;
+  color: #fff;
+  font-size: 12px;
+  font-weight: 700;
+  font-family: inherit;
+  box-shadow: 0 1px 0 rgba(0, 0, 0, 0.3);
+}
+
+.play-button {
+  display: block;
+  width: 100%;
+  margin-top: 22px;
+  padding: 14px;
+  font-size: 17px;
+  font-weight: 700;
+  color: #14202b;
+  background: linear-gradient(180deg, #ffd75e, #f5b52c);
+  border: none;
+  border-radius: 10px;
+  cursor: pointer;
+  transition: transform 0.06s ease;
+}
+
+.play-button:hover {
+  transform: translateY(-1px);
+}
+
+.play-button:active {
+  transform: translateY(1px);
+}
+
+/* ---------- Pause overlay ---------- */
+#pauseOverlay {
+  position: fixed;
+  inset: 0;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  background: rgba(8, 12, 20, 0.7);
+  backdrop-filter: blur(4px);
+  z-index: 900;
+  font-family: Arial, sans-serif;
+}
+
+#pauseOverlay .pause-panel {
+  text-align: center;
+  background: linear-gradient(180deg, #1b2432, #10161f);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 16px;
+  padding: 34px 44px;
+  color: #eef2f7;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+}
+
+#pauseOverlay h1 {
+  margin: 0 0 10px;
+  color: #ffd75e;
+  font-size: 28px;
+}
+
+#pauseOverlay p {
+  margin: 0 0 16px;
+  color: #b9c4d4;
+  font-size: 14px;
+}
+
+#pauseOverlay .pause-hint {
+  margin-top: 16px;
+  margin-bottom: 0;
+  color: #9aa7b8;
+  font-size: 12px;
+}
+
+#pauseOverlay button {
+  padding: 12px 36px;
+  font-size: 16px;
+  font-weight: 700;
+  color: #14202b;
+  background: linear-gradient(180deg, #8fd3ff, #4ea8e0);
+  border: none;
+  border-radius: 10px;
+  cursor: pointer;
+}
+
+/* ---------- In-game HUD ---------- */
+#gunPowerDisplay {
+  position: absolute;
+  top: 10px;
+  left: 50%;
+  transform: translateX(-50%);
+  font-size: 20px;
+  font-weight: bold;
+  color: white;
+  padding: 5px 10px;
+  border-radius: 5px;
+}
+
+#lifeDisplay {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  color: red;
+  font-size: 24px;
+  font-family: Arial, sans-serif;
+}
+
+#goldDisplay {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  color: gold;
+  font-size: 24px;
+  font-family: Arial, sans-serif;
+}
+
+#crosshair {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 40px;
+  height: 40px;
+  background-color: rgba(255, 0, 0, 0.4);
+  border-radius: 50%;
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+}
+
+#crosshair .line {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 16px;
+  height: 2px;
+  background-color: red;
+}
+
+#crosshair .line--a {
+  transform: translate(-50%, -50%) rotate(45deg);
+}
+
+#crosshair .line--b {
+  transform: translate(-50%, -50%) rotate(-45deg);
+}
+
+#minimap {
+  position: absolute;
+  bottom: 10px;
+  right: 10px;
+  border: 2px solid black;
+  border-radius: 50%;
+}
+
+.game-over-overlay {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  background-color: rgba(0, 0, 0, 0.8);
+  color: white;
+  padding: 20px;
+  font-size: 32px;
+}

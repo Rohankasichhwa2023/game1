@@ -5,9 +5,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Game One</title>
-    <style>
-
-    </style>
+    <link rel="stylesheet" href="style.css">
     <script type="importmap">
         {
             "imports": {
@@ -20,64 +18,52 @@
 
 <body>
     <!-- Instructions Overlay -->
-    <div id="instructionsOverlay" style="
-      position: fixed;
-      top: 0;
-      left: 0;
-      width: 100%;
-      height: 100%;
-      background-color: rgba(0,0,0,0.85);
-      color: white;
-      display: flex;
-      flex-direction: column;
-      justify-content: center;
-      align-items: center;
-      z-index: 1000;
-      text-align: center;
-      padding: 20px;
-      font-family: Arial, sans-serif;
-    ">
-        <h1>How to Play</h1>
-        <p>
-            <strong>Controls:</strong><br>
-            - Move: W, A, S, D<br>
-            - Jump: Space (Double-tap Space for jumping in the building roof, go near the building)<br>
-            - Shoot: Left Click<br>
-            - Sniper Mode: Right Click (hold then release to shoot)<br>
-        </p>
-        <p>
-            <strong>Objective:</strong><br>
-            - Defeat enemies and collect 5 gold coins.<br>
-            - After defeating all normal enemies, a boss will appear.<br>
-            - Defeat the boss to spawn a portal.<br>
-            - Step through the portal with 5 gold coins to win the game.
-        </p>
-        <p>
-            <strong>Tools:</strong><br>
-            - Life lines ❤️<br>
-            - Gold coins 🪙<br>
-            - Three guns scattered in the ground<br>
-        </p>
-        <p style="font-size: 24px; margin-top: 30px; cursor: pointer;">
-            Click to Play
-        </p>
+    <div id="instructionsOverlay">
+        <div class="panel">
+            <h1>Game One</h1>
+            <p class="tagline">Clear the map, grab the gold, and escape through the portal.</p>
+
+            <section>
+                <h2>🎯 Objective</h2>
+                <ol class="steps">
+                    <li>Defeat the <strong>6 enemies</strong> roaming the map.</li>
+                    <li>Collect <strong>5 gold coins</strong> 🪙 scattered around.</li>
+                    <li>When the last enemy falls, a <strong>boss</strong> appears.</li>
+                    <li>Defeat the boss to open a <strong>portal</strong>.</li>
+                    <li>Walk into the portal <em>with 5 coins</em> to win.</li>
+                </ol>
+            </section>
+
+            <section>
+                <h2>🕹️ Controls</h2>
+                <ul class="controls-list">
+                    <li><span><kbd>W</kbd> <kbd>A</kbd> <kbd>S</kbd> <kbd>D</kbd></span> Move</li>
+                    <li><span><kbd>Space</kbd></span> Jump</li>
+                    <li><span><kbd>Space</kbd> <kbd>Space</kbd></span> Double-tap near a building to jump to its roof</li>
+                    <li><span><kbd>Left Click</kbd></span> Shoot</li>
+                    <li><span><kbd>Right Click</kbd></span> Hold to aim, release to snipe</li>
+                    <li><span><kbd>Esc</kbd></span> Pause / Resume</li>
+                </ul>
+            </section>
+
+            <section>
+                <h2>🧰 Pickups</h2>
+                <ul class="pickups-list">
+                    <li>❤️ <strong>Lifeline</strong> — restores 2 life</li>
+                    <li>🪙 <strong>Gold coin</strong> — collect 5 to win</li>
+                    <li>🔫 <strong>Rifle</strong> (blue) — 2 damage</li>
+                    <li>🔫 <strong>Shotgun</strong> (green) — 5 damage</li>
+                </ul>
+            </section>
+
+            <button id="playButton" class="play-button" type="button">▶ Click to Play</button>
+        </div>
     </div>
 
-    <!-- Your other HTML elements, including the gunPowerDisplay div -->
-    <div id="gunPowerDisplay" style="
-      position: absolute;
-      top: 10px;
-      left: 50%;
-      transform: translateX(-50%);
-      font-size: 20px;
-      font-weight: bold;
-      color: white;
-      padding: 5px 10px;
-      border-radius: 5px;
-  ">Normal Gun Damage: 1</div>
+    <!-- Gun power display -->
+    <div id="gunPowerDisplay">Normal Gun Damage: 1</div>
 
-    <script type="module" src="script.js"></script>
+    <script type="module" src="js/main.js"></script>
 </body>
-
 
 </html>

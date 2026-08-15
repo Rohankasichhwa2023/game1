@@ -1,8 +1,8 @@
 // main.js
 // Entry point: wires up all modules, bootstraps the world, and runs the game loop.
 
-import { state, updateGoldHud } from './state.js';
-import { initWorld, findClearSpawnPosition } from './world.js';
+import { state, updateGoldHud, isPlayerIndoors } from './state.js';
+import { initWorld, findClearSpawnPosition, updateDoors } from './world.js';
 import { initEnemies, updateEnemies } from './enemies.js';
 import { initPlayer, updateMovement, updateCamera } from './player.js';
 import { updateBullets, updateEnemyBullets } from './bullets.js';
@@ -48,6 +48,8 @@ function animate(now) {
 
   if (state.started && !state.paused) {
     updateMovement(dt);
+    state.playerIndoors = isPlayerIndoors();
+    updateDoors();
     updateBullets(dt);
     updateEnemyBullets(dt);
     updateEnemies(dt);

@@ -33,6 +33,9 @@ const cameraUpOffset = new THREE.Vector3();
 
 // ---------------- Building Jump ----------------
 function jumpToBuilding() {
+  // Don't teleport to the roof while inside a hollow building (stay safe).
+  if (state.playerIndoors) return;
+
   let candidateBuilding = null;
   let minDistance = Infinity;
   const margin = 2;

@@ -111,7 +111,7 @@ export function updateEnemyBullets(dt) {
       continue;
     }
 
-    if (playerBox.containsPoint(bullet.position)) {
+    if (!state.playerIndoors && playerBox.containsPoint(bullet.position)) {
       state.playerLife -= 1;
       updateLifeHud();
       state.scene.remove(bullet);

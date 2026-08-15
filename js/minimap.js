@@ -31,11 +31,23 @@ export function updateMinimap() {
   minimapContext.closePath();
   minimapContext.clip();
 
-  minimapContext.fillStyle = '#333';
+  minimapContext.fillStyle = '#4a4f55';
   minimapContext.fillRect(0, 0, minimapCanvas.width, minimapCanvas.height);
 
   const px = state.player.position.x;
   const pz = state.player.position.z;
+
+  // Roads (dark) drawn first so the street network shows through.
+  minimapContext.fillStyle = '#22262b';
+  for (const road of state.roads) {
+    const w = (road.maxX - road.minX) * minimapScale;
+    const h = (road.maxZ - road.minZ) * minimapScale;
+    const cx = (road.minX + road.maxX) / 2;
+    const cz = (road.minZ + road.maxZ) / 2;
+    const x = halfWidth + (cx - px) * minimapScale;
+    const y = halfHeight - (cz - pz) * minimapScale;
+    minimapContext.fillRect(x - w / 2, y - h / 2, w, h);
+  }
 
   // Trees as green circles.
   minimapContext.fillStyle = '#008000';

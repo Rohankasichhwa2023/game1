@@ -135,6 +135,9 @@ function updateBossEnemy(dt) {
 }
 
 export function updateEnemies(dt) {
+  // While the player is safely inside a building, enemies stop chasing/shooting.
+  if (state.playerIndoors) return;
+
   const playerBox = makeBox(state.player.position, 0.5, 1, 0.5);
 
   for (let i = state.enemies.length - 1; i >= 0; i--) {

@@ -1,9 +1,27 @@
 // world.js
-// Ground, trees, buildings and walls that make up the game world.
+// Procedural GTA-style city:
+//   road network → city blocks → sidewalks → building lots → buildings.
+// Collision boxes (buildings/trees) are stored on `state` so the existing
+// collision, minimap, and spawning systems keep working unchanged.
 
 import * as THREE from 'three';
 import { state } from './state.js';
 
+const CITY_SEED = 20240815;
+
+// Deterministic PRNG (mulberry32) so the same seed always produces the same city.
+function mulberry32(seed) {
+  let a = seed >>> 0;
+  return function () {
+    a |= 0;
+    a = (a + 0x6D2B79F5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+// ---------------- Textures ----------------
 function generateGrassTexture() {
   const size = 1024;
   const canvas = document.createElement('canvas');
@@ -11,11 +29,9 @@ function generateGrassTexture() {
   canvas.height = size;
   const ctx = canvas.getContext('2d');
 
-  // Base grass green.
   ctx.fillStyle = '#3f7a2e';
   ctx.fillRect(0, 0, size, size);
 
-  // Soft mottled patches for large-scale, natural variation.
   for (let i = 0; i < 220; i++) {
     const x = Math.random() * size;
     const y = Math.random() * size;
@@ -32,20 +48,18 @@ function generateGrassTexture() {
     ctx.fill();
   }
 
-  // Individual grass blades: short vertical strokes in varied greens.
   for (let i = 0; i < 40000; i++) {
     const x = Math.random() * size;
     const y = Math.random() * size;
     const bladeW = 1 + Math.random() * 1.5;
     const bladeH = 2 + Math.random() * 4;
-    const green = 85 + Math.floor(Math.random() * 75); // 85..159
+    const green = 85 + Math.floor(Math.random() * 75);
     const red = 35 + Math.floor(Math.random() * 30);
     const blue = 25 + Math.floor(Math.random() * 25);
     ctx.fillStyle = `rgb(${red}, ${green}, ${blue})`;
     ctx.fillRect(x, y, bladeW, bladeH);
   }
 
-  // Fine darker soil/specks.
   for (let i = 0; i < 3000; i++) {
     const x = Math.random() * size;
     const y = Math.random() * size;
@@ -53,7 +67,6 @@ function generateGrassTexture() {
     ctx.fillRect(x, y, 1, 1);
   }
 
-  // Tiny light highlights (sunlit tips / dew).
   for (let i = 0; i < 3000; i++) {
     const x = Math.random() * size;
     const y = Math.random() * size;
@@ -68,8 +81,7 @@ function clamp255(value) {
   return Math.min(255, Math.max(0, value));
 }
 
-// Generates a seamless facade tile: a wall-colored panel with a framed,
-// sky-reflecting window. Tiled across each building it reads as a window grid.
+// Seamless facade tile: a wall-colored panel with a framed, sky-reflecting window.
 function generateBuildingTexture(baseColor) {
   const size = 128;
   const canvas = document.createElement('canvas');
@@ -81,11 +93,9 @@ function generateBuildingTexture(baseColor) {
   const g = (baseColor >> 8) & 0xff;
   const b = baseColor & 0xff;
 
-  // Wall background.
   ctx.fillStyle = `rgb(${r}, ${g}, ${b})`;
   ctx.fillRect(0, 0, size, size);
 
-  // Subtle per-pixel noise for a concrete/brick texture feel.
   for (let i = 0; i < 900; i++) {
     const nx = Math.floor(Math.random() * size);
     const ny = Math.floor(Math.random() * size);
@@ -94,7 +104,6 @@ function generateBuildingTexture(baseColor) {
     ctx.fillRect(nx, ny, 1, 1);
   }
 
-  // Horizontal floor separation lines (drawn at tile edges so they stay seamless).
   ctx.strokeStyle = 'rgba(0, 0, 0, 0.3)';
   ctx.lineWidth = 1;
   ctx.beginPath();
@@ -104,7 +113,6 @@ function generateBuildingTexture(baseColor) {
   ctx.lineTo(size, size - 1);
   ctx.stroke();
 
-  // Window frame (dark trim).
   const margin = 22;
   const wx = margin;
   const wy = margin;
@@ -113,7 +121,6 @@ function generateBuildingTexture(baseColor) {
   ctx.fillStyle = '#2f2f2f';
   ctx.fillRect(wx - 3, wy - 3, ww + 6, wh + 6);
 
-  // Glass with a vertical sky-reflection gradient.
   const glass = ctx.createLinearGradient(0, wy, 0, wy + wh);
   glass.addColorStop(0, '#bfe6f7');
   glass.addColorStop(0.45, '#7cb9d8');
@@ -122,7 +129,6 @@ function generateBuildingTexture(baseColor) {
   ctx.fillStyle = glass;
   ctx.fillRect(wx, wy, ww, wh);
 
-  // Diagonal reflection streaks.
   ctx.strokeStyle = 'rgba(255, 255, 255, 0.35)';
   ctx.lineWidth = 4;
   ctx.beginPath();
@@ -132,7 +138,6 @@ function generateBuildingTexture(baseColor) {
   ctx.lineTo(wx + ww * 0.85, wy);
   ctx.stroke();
 
-  // Window crossbars (mullions).
   ctx.strokeStyle = '#2f2f2f';
   ctx.lineWidth = 3;
   ctx.beginPath();
@@ -149,15 +154,43 @@ function generateBuildingTexture(baseColor) {
   return texture;
 }
 
-function createBuilding(x, z, width, height, depth) {
-  const buildingColors = [
-    0x808080, 0xa0a0a0, 0xc0c0c0, 0xdcdcdc, 0xaaaaaa, 0xffffff,
-    0x7f3300, 0x993d00, 0x5c3c1e, 0x4a2c2a,
-    0x1f3c88, 0x2a4d69, 0x556b2f, 0x228b22, 0xb22222,
-  ];
-  const baseColor = buildingColors[Math.floor(Math.random() * buildingColors.length)];
+// ---------------- Districts ----------------
+const DISTRICT = {
+  downtown: {
+    lotW: 18, lotD: 18, gap: 8, fill: 0.7,
+    minH: 60, maxH: 200,
+    colors: [
+      0x6b7280, 0x4b5563, 0x9ca3af, 0x374151, 0x1f2937,
+      0x7c8899, 0x5b7a9d, 0x8a97a8,
+      0x7a5a4a, 0x5a7a5a, 0x9a5a4a, 0x9a8a5a,
+    ],
+  },
+  commercial: {
+    lotW: 22, lotD: 22, gap: 10, fill: 0.5,
+    minH: 24, maxH: 70,
+    colors: [
+      0x9c8a6a, 0x8a9a9a, 0x7a8a9a, 0xa0a0a0, 0x8f7f6f,
+      0x5f7f8f, 0x9a8a8a, 0x6a8a8a,
+      0xb06a4a, 0x6a9a6a, 0xb0a050, 0x8a6a4a,
+    ],
+  },
+  residential: {
+    lotW: 16, lotD: 18, gap: 8, fill: 0.4,
+    minH: 8, maxH: 22,
+    colors: [0xd9c7a7, 0xc7b795, 0xb0a890, 0xd2b48c, 0xc7c0b0, 0xbfae8a],
+  },
+  industrial: {
+    lotW: 30, lotD: 30, gap: 12, fill: 0.45,
+    minH: 12, maxH: 30,
+    colors: [0x8a8f95, 0x6f7478, 0x9aa0a6, 0x7f7f6f, 0x6a6f75],
+  },
+};
 
-  // One window tile roughly every 5 world units, scaled to the building's size.
+// ---------------- Building ----------------
+function createBuilding(x, z, width, height, depth, palette) {
+  const colors = palette || [0x808080, 0xa0a0a0, 0xc0c0c0, 0xdcdcdc, 0xaaaaaa, 0xffffff];
+  const baseColor = colors[Math.floor(Math.random() * colors.length)];
+
   const facadeTexture = generateBuildingTexture(baseColor);
   facadeTexture.repeat.set(
     Math.max(1, Math.round(width / 5)),
@@ -166,7 +199,6 @@ function createBuilding(x, z, width, height, depth) {
 
   const group = new THREE.Group();
 
-  // Main body with the baked-in window-grid texture.
   const baseGeometry = new THREE.BoxGeometry(width, height, depth);
   const baseMaterial = new THREE.MeshPhongMaterial({ map: facadeTexture, shininess: 10 });
   const base = new THREE.Mesh(baseGeometry, baseMaterial);
@@ -175,7 +207,6 @@ function createBuilding(x, z, width, height, depth) {
   base.position.set(x, height / 2, z);
   group.add(base);
 
-  // Flat roof cap (parapet) that covers the top face.
   const roofGeometry = new THREE.BoxGeometry(width + 1.5, 1.5, depth + 1.5);
   const roofMaterial = new THREE.MeshPhongMaterial({ color: 0x777777, shininess: 10 });
   const roof = new THREE.Mesh(roofGeometry, roofMaterial);
@@ -189,19 +220,656 @@ function createBuilding(x, z, width, height, depth) {
   return new THREE.Box3().setFromObject(group);
 }
 
+// ---------------- Hollow (enterable) buildings ----------------
+// Residential houses and industrial warehouses are hollow: walls with a door
+// opening, a floor, and a roof. Their parts are collected here and built as
+// instanced meshes after generation for performance.
+
+const hollowWalls = [];  // { cx, cy, cz, w, h, d }
+const hollowFloors = [];
+const hollowRoofs = [];
+const hollowWindows = [];
+
+const HOLLOW_WALL_T = 0.4;
+const HOLLOW_DOOR_W = 2.2;
+const HOLLOW_DOOR_H = 2.5;
+const WINDOW_W = 1.2;
+const WINDOW_H = 1.5;
+const WINDOW_Y = 1.8;
+
+// Wall palettes for hollow buildings (houses vs warehouses).
+const HOUSE_COLORS = [
+  0xb05a4a, // reddish
+  0x6a9a5a, // green
+  0xc9b04a, // yellow
+  0x8a5a3a, // brown
+  0x8a8a8a, // grey
+  0x5a7a9a, // blue
+  0xa86a3a, // orange-brown
+  0xd8d0c0, // cream
+];
+const INDUSTRIAL_COLORS = [
+  0x8a8a8a, 0x9a9aa0, 0x6a6a6a, 0x7a5a4a, 0x8a6a5a, 0x5a5a5a,
+];
+
+function createHollowBuilding(x, z, width, height, depth, doorSide, wallColor) {
+  const wallT = HOLLOW_WALL_T;
+  const doorW = HOLLOW_DOOR_W;
+  const doorH = HOLLOW_DOOR_H;
+  const halfW = width / 2;
+  const halfD = depth / 2;
+
+  // Floor (visual).
+  hollowFloors.push({
+    cx: x, cy: 0.15, cz: z,
+    w: width - wallT * 2, h: 0.3, d: depth - wallT * 2,
+  });
+
+  // Roof (visual + collision; also lets the player stand on top).
+  hollowRoofs.push({
+    cx: x, cy: height + 0.5, cz: z,
+    w: width + 0.5, h: 1, d: depth + 0.5,
+  });
+  state.buildingBoxes.push(new THREE.Box3(
+    new THREE.Vector3(x - (width + 0.5) / 2, height, z - (depth + 0.5) / 2),
+    new THREE.Vector3(x + (width + 0.5) / 2, height + 1, z + (depth + 0.5) / 2)
+  ));
+
+  // Interior footprint (used as the "safe zone" while inside).
+  state.buildingInteriors.push({
+    minX: x - halfW + wallT,
+    maxX: x + halfW - wallT,
+    minZ: z - halfD + wallT,
+    maxZ: z + halfD - wallT,
+    minY: 0,
+    maxY: height,
+  });
+
+  // Add a wall segment (axis 'x' = runs along X, 'z' = runs along Z).
+  const addWallSegment = (axis, fixed, a, b, y0, y1) => {
+    const cy = (y0 + y1) / 2, h = y1 - y0;
+    if (axis === 'x') {
+      hollowWalls.push({ cx: (a + b) / 2, cy, cz: fixed, w: b - a, h, d: wallT, color: wallColor });
+      state.buildingBoxes.push(new THREE.Box3(
+        new THREE.Vector3(a, y0, fixed - wallT / 2),
+        new THREE.Vector3(b, y1, fixed + wallT / 2)
+      ));
+    } else {
+      hollowWalls.push({ cx: fixed, cy, cz: (a + b) / 2, w: wallT, h, d: b - a, color: wallColor });
+      state.buildingBoxes.push(new THREE.Box3(
+        new THREE.Vector3(fixed - wallT / 2, y0, a),
+        new THREE.Vector3(fixed + wallT / 2, y1, b)
+      ));
+    }
+  };
+
+  // Add windows along a wall run.
+  const addWindows = (axis, fixed, a, b, withDoor, doorCenter) => {
+    const winD = wallT + 0.2;
+    const step = 3.2;
+    for (let pos = a + step / 2; pos < b - WINDOW_W / 2; pos += step) {
+      if (withDoor && Math.abs(pos - doorCenter) < doorW / 2 + WINDOW_W) continue;
+      if (axis === 'x') {
+        hollowWindows.push({ cx: pos, cy: WINDOW_Y, cz: fixed, w: WINDOW_W, h: WINDOW_H, d: winD });
+      } else {
+        hollowWindows.push({ cx: fixed, cy: WINDOW_Y, cz: pos, w: winD, h: WINDOW_H, d: WINDOW_W });
+      }
+    }
+  };
+
+  // Add a door (dark frame + panel + brass knob) on the front wall.
+  const addDoor = (axis, fixed, center) => {
+    const cx = axis === 'x' ? center : fixed;
+    const cz = axis === 'x' ? fixed : center;
+    // Panel is slightly proud of the wall so it reads as a real door.
+    const panelW = axis === 'x' ? doorW : wallT + 0.15;
+    const panelD = axis === 'x' ? wallT + 0.15 : doorW;
+    const frameW = axis === 'x' ? doorW + 0.4 : wallT;
+    const frameD = axis === 'x' ? wallT : doorW + 0.4;
+
+    const mesh = new THREE.Mesh(
+      new THREE.BoxGeometry(panelW, doorH, panelD),
+      new THREE.MeshPhongMaterial({ color: 0x7a4a2a, shininess: 12 })
+    );
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+    mesh.position.set(cx, doorH / 2, cz);
+
+    // Dark trim around the opening (child so it hides when the door opens).
+    const frame = new THREE.Mesh(
+      new THREE.BoxGeometry(frameW, doorH + 0.4, frameD),
+      new THREE.MeshPhongMaterial({ color: 0x33302a, shininess: 6 })
+    );
+    mesh.add(frame);
+
+    // Brass knob near the latch edge.
+    const knob = new THREE.Mesh(
+      new THREE.SphereGeometry(0.05, 8, 8),
+      new THREE.MeshPhongMaterial({ color: 0xd4a017, shininess: 40 })
+    );
+    if (axis === 'x') {
+      knob.position.set(panelW / 2 - 0.18, -0.1, panelD / 2 + 0.02);
+    } else {
+      knob.position.set(panelD / 2 + 0.02, -0.1, panelW / 2 - 0.18);
+    }
+    mesh.add(knob);
+
+    state.scene.add(mesh);
+
+    const box = new THREE.Box3(
+      new THREE.Vector3(cx - panelW / 2, 0, cz - panelD / 2),
+      new THREE.Vector3(cx + panelW / 2, doorH, cz + panelD / 2)
+    );
+    state.wallBoxes.push(box); // closed initially
+
+    state.doors.push({ mesh, box, cx, cz, open: false });
+  };
+
+  // Build the four walls; the front wall gets a door + lintel.
+  const buildSide = (axis, fixed, a, b, isDoorSide) => {
+    const center = (a + b) / 2;
+    if (isDoorSide) {
+      const d0 = center - doorW / 2;
+      const d1 = center + doorW / 2;
+      if (d0 > a + 0.1) addWallSegment(axis, fixed, a, d0, 0, height);
+      if (d1 < b - 0.1) addWallSegment(axis, fixed, d1, b, 0, height);
+      if (height > doorH) addWallSegment(axis, fixed, d0, d1, doorH, height); // lintel
+      addDoor(axis, fixed, center);
+    } else {
+      addWallSegment(axis, fixed, a, b, 0, height);
+    }
+    addWindows(axis, fixed, a, b, isDoorSide, center);
+  };
+
+  buildSide('x', z + halfD, x - halfW, x + halfW, doorSide === 'north');
+  buildSide('x', z - halfD, x - halfW, x + halfW, doorSide === 'south');
+  buildSide('z', x + halfW, z - halfD, z + halfD, doorSide === 'east');
+  buildSide('z', x - halfW, z - halfD, z + halfD, doorSide === 'west');
+}
+
+// Build the collected hollow-building parts as instanced meshes.
+function buildInstancedBoxes(rects, color) {
+  if (!rects.length) return;
+  const mesh = new THREE.InstancedMesh(
+    new THREE.BoxGeometry(1, 1, 1),
+    new THREE.MeshPhongMaterial({ color, shininess: 5 }),
+    rects.length
+  );
+  mesh.castShadow = true;
+  mesh.receiveShadow = true;
+  mesh.frustumCulled = false;
+
+  const m = new THREE.Matrix4();
+  const q = new THREE.Quaternion();
+  const p = new THREE.Vector3();
+  const s = new THREE.Vector3();
+  for (let i = 0; i < rects.length; i++) {
+    const r = rects[i];
+    p.set(r.cx, r.cy, r.cz);
+    s.set(r.w, r.h, r.d);
+    m.compose(p, q, s);
+    mesh.setMatrixAt(i, m);
+  }
+  mesh.instanceMatrix.needsUpdate = true;
+  state.scene.add(mesh);
+}
+
+function buildInstancedWalls(rects) {
+  if (!rects.length) return;
+  const mesh = new THREE.InstancedMesh(
+    new THREE.BoxGeometry(1, 1, 1),
+    new THREE.MeshPhongMaterial({ color: 0xffffff, shininess: 5 }),
+    rects.length
+  );
+  mesh.castShadow = true;
+  mesh.receiveShadow = true;
+  mesh.frustumCulled = false;
+
+  const m = new THREE.Matrix4();
+  const q = new THREE.Quaternion();
+  const p = new THREE.Vector3();
+  const s = new THREE.Vector3();
+  const c = new THREE.Color();
+  for (let i = 0; i < rects.length; i++) {
+    const r = rects[i];
+    p.set(r.cx, r.cy, r.cz);
+    s.set(r.w, r.h, r.d);
+    m.compose(p, q, s);
+    mesh.setMatrixAt(i, m);
+    mesh.setColorAt(i, c.setHex(r.color));
+  }
+  mesh.instanceMatrix.needsUpdate = true;
+  if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+  state.scene.add(mesh);
+}
+
+function buildHollowInstances() {
+  buildInstancedWalls(hollowWalls);              // per-building wall colors
+  buildInstancedBoxes(hollowWindows, 0x7fb8d8); // sky-blue glass
+  buildInstancedBoxes(hollowFloors, 0x9c7a4c);  // wood floor
+  buildInstancedBoxes(hollowRoofs, 0x666666);   // dark roof/ceiling
+}
+
+// Auto open/close doors based on the player's proximity.
+export function updateDoors() {
+  const p = state.player.position;
+  for (const door of state.doors) {
+    const dist = Math.hypot(p.x - door.cx, p.z - door.cz);
+    if (dist < 2.0 && !door.open) {
+      door.open = true;
+      door.mesh.visible = false;
+      const i = state.wallBoxes.indexOf(door.box);
+      if (i !== -1) state.wallBoxes.splice(i, 1);
+    } else if (dist > 3.5 && door.open) {
+      door.open = false;
+      door.mesh.visible = true;
+      state.wallBoxes.push(door.box);
+    }
+  }
+}
+
+// ---------------- Road network ----------------
+function buildRoadNetwork() {
+  const half = state.groundSize / 2;
+
+  // Hierarchy: arterial (widest), secondary, local streets.
+  const verticals = [
+    { x: -360, width: 18, type: 'secondary' },
+    { x: -240, width: 12, type: 'local' },
+    { x: -120, width: 12, type: 'local' },
+    { x: 0, width: 38, type: 'arterial' },
+    { x: 120, width: 12, type: 'local' },
+    { x: 240, width: 12, type: 'local' },
+    { x: 360, width: 18, type: 'secondary' },
+  ];
+  const horizontals = [
+    { z: -360, width: 18, type: 'secondary' },
+    { z: -240, width: 12, type: 'local' },
+    { z: -120, width: 12, type: 'local' },
+    { z: 0, width: 38, type: 'arterial' },
+    { z: 120, width: 12, type: 'local' },
+    { z: 240, width: 12, type: 'local' },
+    { z: 360, width: 18, type: 'secondary' },
+  ];
+
+  const roads = [];
+  for (const v of verticals) {
+    roads.push({ minX: v.x - v.width / 2, maxX: v.x + v.width / 2, minZ: -half, maxZ: half, type: v.type });
+  }
+  for (const h of horizontals) {
+    roads.push({ minX: -half, maxX: half, minZ: h.z - h.width / 2, maxZ: h.z + h.width / 2, type: h.type });
+  }
+
+  return { roads, verticals, horizontals };
+}
+
+// Bands (clear areas) between roads along one axis.
+function buildBands(centers, half) {
+  const sorted = [...centers].sort((a, b) => a.pos - b.pos);
+  const bands = [];
+  let prev = -half;
+  for (const c of sorted) {
+    const left = c.pos - c.width / 2;
+    const right = c.pos + c.width / 2;
+    if (left - prev >= 1) bands.push({ lo: prev, hi: left });
+    prev = right;
+  }
+  if (half - prev >= 1) bands.push({ lo: prev, hi: half });
+  return bands;
+}
+
+function buildBlocks(verticals, horizontals) {
+  const half = state.groundSize / 2;
+  const vCenters = verticals.map((v) => ({ pos: v.x, width: v.width }));
+  const hCenters = horizontals.map((h) => ({ pos: h.z, width: h.width }));
+  const xBands = buildBands(vCenters, half);
+  const zBands = buildBands(hCenters, half);
+
+  const blocks = [];
+  for (const xb of xBands) {
+    for (const zb of zBands) {
+      blocks.push({ x0: xb.lo, x1: xb.hi, z0: zb.lo, z1: zb.hi });
+    }
+  }
+  return blocks;
+}
+
+function districtFor(cx, cz) {
+  // A grass park band in the north-east.
+  if (cx > 120 && cx < 368 && cz > 240) return 'park';
+  const dist = Math.hypot(cx, cz);
+  if (dist < 150) return 'downtown';
+  if (cx > 120 && cz < -120) return 'industrial';
+  if (dist > 320) return 'residential';
+  return 'commercial';
+}
+
+function placeTree(x, z, treePositions) {
+  treePositions.push({ x, z });
+  state.treeBoxes.push(new THREE.Box3(
+    new THREE.Vector3(x - 0.5, 0, z - 0.5),
+    new THREE.Vector3(x + 0.5, 5, z + 0.5)
+  ));
+}
+
+function generateBlockBuildings(block, district, rand, treePositions) {
+  const sidewalk = 5; // sidewalk inset around the block
+  const x0 = block.x0 + sidewalk, x1 = block.x1 - sidewalk;
+  const z0 = block.z0 + sidewalk, z1 = block.z1 - sidewalk;
+  const bw = x1 - x0, bd = z1 - z0;
+  if (bw < 8 || bd < 8) return;
+
+  const cfg = DISTRICT[district];
+  const cols = Math.max(1, Math.floor(bw / (cfg.lotW + cfg.gap)));
+  const rows = Math.max(1, Math.floor(bd / (cfg.lotD + cfg.gap)));
+  const cw = bw / cols, cd = bd / rows;
+
+  for (let i = 0; i < cols; i++) {
+    for (let j = 0; j < rows; j++) {
+      const lx0 = x0 + i * cw, lx1 = lx0 + cw;
+      const lz0 = z0 + j * cd, lz1 = lz0 + cd;
+
+      // Empty lot / plaza: plant a tree so the ground doesn't look bare.
+      if (rand() > cfg.fill) {
+        if (rand() < 0.9) {
+          const tx = (lx0 + lx1) / 2 + (rand() - 0.5) * cw * 0.4;
+          const tz = (lz0 + lz1) / 2 + (rand() - 0.5) * cd * 0.4;
+          placeTree(tx, tz, treePositions);
+        }
+        continue;
+      }
+
+      const margin = 1.5;
+      const maxW = (lx1 - lx0) - margin * 2;
+      const maxD = (lz1 - lz0) - margin * 2;
+      if (maxW < 3 || maxD < 3) continue;
+
+      const w = Math.max(3, Math.min(maxW, cfg.lotW * (0.6 + rand() * 0.5)));
+      const d = Math.max(3, Math.min(maxD, cfg.lotD * (0.6 + rand() * 0.5)));
+      const cx = lx0 + margin + (maxW - w) / 2 + (rand() - 0.5) * 2;
+      const cz = lz0 + margin + (maxD - d) / 2 + (rand() - 0.5) * 2;
+      const h = cfg.minH + rand() * (cfg.maxH - cfg.minH);
+
+      if (district === 'residential' || district === 'industrial') {
+        // Door faces the nearest road (block edge).
+        const edges = [
+          { side: 'south', d: cz - block.z0 },
+          { side: 'north', d: block.z1 - cz },
+          { side: 'west', d: cx - block.x0 },
+          { side: 'east', d: block.x1 - cx },
+        ];
+        edges.sort((a, b) => a.d - b.d);
+        const palette = district === 'residential' ? HOUSE_COLORS : INDUSTRIAL_COLORS;
+        const wallColor = palette[Math.floor(rand() * palette.length)];
+        createHollowBuilding(cx, cz, w, h, d, edges[0].side, wallColor);
+      } else {
+        state.buildingBoxes.push(createBuilding(cx, cz, w, h, d, cfg.colors));
+      }
+    }
+  }
+
+  // Street trees along the sidewalk perimeter to fill the empty green edges.
+  const s = sidewalk / 2;
+  const addStreetTrees = (axis, fixed, a, b) => {
+    for (let pos = a + 2.5; pos <= b - 2.5; pos += 10) {
+      if (rand() < 0.45) {
+        if (axis === 'x') placeTree(pos, fixed, treePositions);
+        else placeTree(fixed, pos, treePositions);
+      }
+    }
+  };
+  addStreetTrees('x', block.z0 + s, block.x0, block.x1); // south sidewalk
+  addStreetTrees('x', block.z1 - s, block.x0, block.x1); // north sidewalk
+  addStreetTrees('z', block.x0 + s, block.z0, block.z1); // west sidewalk
+  addStreetTrees('z', block.x1 - s, block.z0, block.z1); // east sidewalk
+}
+
+// ---------------- Brick-textured colony walls ----------------
+const COLONY_WALL_HEIGHT = 2.5;
+const COLONY_WALL_THICKNESS = 0.5;
+const COLONY_GATE_WIDTH = 6;
+
+let baseBrickTexture = null;
+function getBrickTexture() {
+  if (baseBrickTexture) return baseBrickTexture;
+
+  const size = 256;
+  const canvas = document.createElement('canvas');
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext('2d');
+
+  // Mortar base.
+  ctx.fillStyle = '#c9c4ba';
+  ctx.fillRect(0, 0, size, size);
+
+  // Running-bond brick pattern.
+  const brickH = 32;
+  const brickW = 64;
+  const mortar = 4;
+  const rows = Math.ceil(size / brickH);
+  for (let row = 0; row < rows; row++) {
+    const offset = (row % 2 === 0) ? 0 : brickW / 2;
+    for (let col = -1; col <= Math.ceil(size / brickW); col++) {
+      const x = col * brickW + offset;
+      const y = row * brickH;
+      const v = Math.floor(Math.random() * 30) - 15;
+      ctx.fillStyle = `rgb(${150 + v}, ${78 + v}, ${58 + v})`;
+      ctx.fillRect(x + mortar / 2, y + mortar / 2, brickW - mortar, brickH - mortar);
+    }
+  }
+
+  baseBrickTexture = new THREE.CanvasTexture(canvas);
+  baseBrickTexture.wrapS = THREE.RepeatWrapping;
+  baseBrickTexture.wrapT = THREE.RepeatWrapping;
+  baseBrickTexture.colorSpace = THREE.SRGBColorSpace;
+  return baseBrickTexture;
+}
+
+function brickMaterial(length) {
+  const tex = getBrickTexture().clone();
+  tex.needsUpdate = true;
+  tex.repeat.set(Math.max(1, Math.round(length / 4)), 1);
+  return new THREE.MeshPhongMaterial({ map: tex, shininess: 5 });
+}
+
+// Adds a single low wall segment (w = size along X, d = size along Z).
+function addColonyWallSegment(cx, cz, w, d) {
+  const h = COLONY_WALL_HEIGHT;
+  const length = Math.max(w, d);
+  const mesh = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), brickMaterial(length));
+  mesh.castShadow = true;
+  mesh.receiveShadow = true;
+  mesh.position.set(cx, h / 2, cz);
+  state.scene.add(mesh);
+
+  state.wallBoxes.push(new THREE.Box3(
+    new THREE.Vector3(cx - w / 2, 0, cz - d / 2),
+    new THREE.Vector3(cx + w / 2, h, cz + d / 2)
+  ));
+}
+
+// Low jumpable brick wall around a city block, with one gate opening.
+function addColonyWallsForBlock(block, rand) {
+  const { x0, x1, z0, z1 } = block;
+  const t = COLONY_WALL_THICKNESS;
+  const gateW = COLONY_GATE_WIDTH;
+
+  const sides = ['south', 'north', 'east', 'west'];
+  const gateSide = sides[Math.floor(rand() * sides.length)];
+
+  // Add a wall run along one axis; split around the gate if it's the gate side.
+  const addRun = (isVertical, fixed, a, b, isGateSide) => {
+    if (isGateSide) {
+      const gateCenter = a + (b - a) * (0.3 + rand() * 0.4);
+      const g0 = gateCenter - gateW / 2;
+      const g1 = gateCenter + gateW / 2;
+      if (g0 > a + 0.5) {
+        if (isVertical) addColonyWallSegment(fixed, (a + g0) / 2, t, g0 - a);
+        else addColonyWallSegment((a + g0) / 2, fixed, g0 - a, t);
+      }
+      if (g1 < b - 0.5) {
+        if (isVertical) addColonyWallSegment(fixed, (g1 + b) / 2, t, b - g1);
+        else addColonyWallSegment((g1 + b) / 2, fixed, b - g1, t);
+      }
+    } else {
+      if (isVertical) addColonyWallSegment(fixed, (a + b) / 2, t, b - a);
+      else addColonyWallSegment((a + b) / 2, fixed, b - a, t);
+    }
+  };
+
+  addRun(false, z0, x0, x1, gateSide === 'south'); // south (horizontal)
+  addRun(false, z1, x0, x1, gateSide === 'north'); // north (horizontal)
+  addRun(true, x0, z0, z1, gateSide === 'west');   // west (vertical)
+  addRun(true, x1, z0, z1, gateSide === 'east');   // east (vertical)
+}
+
+function generateCity(rand) {
+  const { roads, verticals, horizontals } = buildRoadNetwork();
+  state.roads = roads;
+
+  const blocks = buildBlocks(verticals, horizontals);
+  const treePositions = [];
+
+  for (const block of blocks) {
+    const cx = (block.x0 + block.x1) / 2;
+    const cz = (block.z0 + block.z1) / 2;
+    const district = districtFor(cx, cz);
+
+    if (district === 'park') {
+      // Open grass area with trees, no buildings.
+      const area = (block.x1 - block.x0) * (block.z1 - block.z0);
+      const n = Math.max(4, Math.floor(area / 400));
+      for (let i = 0; i < n; i++) {
+        const tx = block.x0 + 4 + rand() * (block.x1 - block.x0 - 8);
+        const tz = block.z0 + 4 + rand() * (block.z1 - block.z0 - 8);
+        placeTree(tx, tz, treePositions);
+      }
+      continue;
+    }
+
+    generateBlockBuildings(block, district, rand, treePositions);
+
+    // Every block gets a low brick boundary wall with a gate opening.
+    addColonyWallsForBlock(block, rand);
+  }
+
+  return { roads, treePositions };
+}
+
+// ---------------- Visual meshes ----------------
+function addFlatPlane(minX, maxX, minZ, maxZ, y, color, shininess) {
+  const w = maxX - minX;
+  const d = maxZ - minZ;
+  const geo = new THREE.PlaneGeometry(w, d);
+  const mat = new THREE.MeshPhongMaterial({ color, shininess });
+  const mesh = new THREE.Mesh(geo, mat);
+  mesh.rotation.x = -Math.PI / 2;
+  mesh.position.set((minX + maxX) / 2, y, (minZ + maxZ) / 2);
+  mesh.receiveShadow = true;
+  state.scene.add(mesh);
+  return mesh;
+}
+
+function addCenterLine(rect, color, y) {
+  const w = rect.maxX - rect.minX;
+  const d = rect.maxZ - rect.minZ;
+  const vertical = w < d;
+  const geo = vertical ? new THREE.PlaneGeometry(0.6, d) : new THREE.PlaneGeometry(w, 0.6);
+  const mat = new THREE.MeshBasicMaterial({ color });
+  const mesh = new THREE.Mesh(geo, mat);
+  mesh.rotation.x = -Math.PI / 2;
+  mesh.position.set((rect.minX + rect.maxX) / 2, y, (rect.minZ + rect.maxZ) / 2);
+  state.scene.add(mesh);
+}
+
+function buildTreeInstances(positions) {
+  const count = positions.length;
+  if (count === 0) return;
+
+  const trunkGeometry = new THREE.CylinderGeometry(0.5, 0.5, 5);
+  const trunkMaterial = new THREE.MeshPhongMaterial({ color: 0x8B4513 });
+  const trunks = new THREE.InstancedMesh(trunkGeometry, trunkMaterial, count);
+  trunks.castShadow = true;
+  trunks.receiveShadow = true;
+  trunks.frustumCulled = false;
+
+  const foliageGeometry = new THREE.SphereGeometry(3, 10, 10);
+  const foliageMaterial = new THREE.MeshPhongMaterial({ color: 0x228B22 });
+  const foliage = new THREE.InstancedMesh(foliageGeometry, foliageMaterial, count);
+  foliage.castShadow = true;
+  foliage.receiveShadow = true;
+  foliage.frustumCulled = false;
+
+  const matrix = new THREE.Matrix4();
+  for (let i = 0; i < count; i++) {
+    const { x, z } = positions[i];
+    matrix.setPosition(x, 2.5, z);
+    trunks.setMatrixAt(i, matrix);
+    matrix.setPosition(x, 6, z);
+    foliage.setMatrixAt(i, matrix);
+  }
+  trunks.instanceMatrix.needsUpdate = true;
+  foliage.instanceMatrix.needsUpdate = true;
+  state.scene.add(trunks);
+  state.scene.add(foliage);
+}
+
+// Perimeter boundary wall around the map edge so the city feels enclosed.
+function addPerimeterWalls() {
+  const half = state.groundSize / 2;
+  const thickness = 2;
+  const height = 6;
+  const inset = half - 1; // wall center, just inside the ground edge
+  const length = half * 2 + thickness * 2;
+  const material = new THREE.MeshPhongMaterial({ color: 0x9aa0a6, shininess: 5 });
+
+  const walls = [
+    { w: length, d: thickness, x: 0, z: -inset }, // south
+    { w: length, d: thickness, x: 0, z: inset },  // north
+    { w: thickness, d: length, x: -inset, z: 0 }, // west
+    { w: thickness, d: length, x: inset, z: 0 },  // east
+  ];
+
+  for (const w of walls) {
+    const geo = new THREE.BoxGeometry(w.w, height, w.d);
+    const mesh = new THREE.Mesh(geo, material);
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+    mesh.position.set(w.x, height / 2, w.z);
+    state.scene.add(mesh);
+
+    state.wallBoxes.push(new THREE.Box3(
+      new THREE.Vector3(w.x - w.w / 2, 0, w.z - w.d / 2),
+      new THREE.Vector3(w.x + w.w / 2, height, w.z + w.d / 2)
+    ));
+  }
+}
+
+// ---------------- World initialization ----------------
 export function initWorld() {
   const groundSize = state.groundSize;
 
-  // Ground with procedural grass texture.
+  // Reset world data (initWorld may be called once, but keep it safe).
+  state.treeBoxes.length = 0;
+  state.buildingBoxes.length = 0;
+  state.wallBoxes.length = 0;
+  state.roads = [];
+  state.buildingInteriors = [];
+  hollowWalls.length = 0;
+  hollowFloors.length = 0;
+  hollowRoofs.length = 0;
+  hollowWindows.length = 0;
+  state.doors = [];
+
+  // Base ground (grass — visible in parks and gaps).
   const groundGeometry = new THREE.PlaneGeometry(groundSize, groundSize);
   const grassTextureCanvas = generateGrassTexture();
   const grassTexture = new THREE.CanvasTexture(grassTextureCanvas);
   grassTexture.wrapS = THREE.RepeatWrapping;
   grassTexture.wrapT = THREE.RepeatWrapping;
-  // Tile every ~5 world units so the grass stays crisp up close.
   grassTexture.repeat.set(groundSize / 5, groundSize / 5);
   grassTexture.colorSpace = THREE.SRGBColorSpace;
-  // Anisotropic filtering keeps the ground sharp at grazing angles.
   grassTexture.anisotropy = Math.min(16, state.renderer.capabilities.getMaxAnisotropy());
 
   const groundMaterial = new THREE.MeshPhongMaterial({ map: grassTexture, side: THREE.DoubleSide });
@@ -210,87 +878,31 @@ export function initWorld() {
   ground.receiveShadow = true;
   state.scene.add(ground);
 
-  // Trees (instanced: 600 trunks + 600 foliage = 2 draw calls).
-  const trunkGeometry = new THREE.CylinderGeometry(0.5, 0.5, 5);
-  const trunkMaterial = new THREE.MeshPhongMaterial({ color: 0x8B4513 });
-  const trunks = new THREE.InstancedMesh(trunkGeometry, trunkMaterial, 600);
-  trunks.castShadow = true;
-  trunks.receiveShadow = true;
-  trunks.frustumCulled = false; // instances are spread across the whole map
+  // Generate the city layout (buildings + trees + collision boxes + road data).
+  const rand = mulberry32(CITY_SEED);
+  const { roads, treePositions } = generateCity(rand);
 
-  const foliageGeometry = new THREE.SphereGeometry(3, 10, 10);
-  const foliageMaterial = new THREE.MeshPhongMaterial({ color: 0x228B22 });
-  const foliage = new THREE.InstancedMesh(foliageGeometry, foliageMaterial, 600);
-  foliage.castShadow = true;
-  foliage.receiveShadow = true;
-  foliage.frustumCulled = false; // instances are spread across the whole map
-
-  const matrix = new THREE.Matrix4();
-  for (let i = 0; i < 600; i++) {
-    const x = Math.random() * groundSize - groundSize / 2;
-    const z = Math.random() * groundSize - groundSize / 2;
-
-    matrix.setPosition(x, 2.5, z);
-    trunks.setMatrixAt(i, matrix);
-
-    matrix.setPosition(x, 6, z);
-    foliage.setMatrixAt(i, matrix);
-
-    state.treeBoxes.push(
-      new THREE.Box3(
-        new THREE.Vector3(x - 0.5, 0, z - 0.5),
-        new THREE.Vector3(x + 0.5, 5, z + 0.5)
-      )
-    );
-  }
-  trunks.instanceMatrix.needsUpdate = true;
-  foliage.instanceMatrix.needsUpdate = true;
-  state.scene.add(trunks);
-  state.scene.add(foliage);
-
-  // Buildings.
-  for (let i = 0; i < 100; i++) {
-    const x = Math.random() * groundSize - groundSize / 2;
-    const z = Math.random() * groundSize - groundSize / 2;
-    const width = Math.random() * 40 + 10;
-    const height = Math.random() * 180 + 20;
-    const depth = Math.random() * 40 + 10;
-    state.buildingBoxes.push(createBuilding(x, z, width, height, depth));
+  // Road surfaces (asphalt). Slightly offset by orientation to avoid
+  // z-fighting where roads cross at intersections.
+  for (const road of roads) {
+    const vertical = (road.maxX - road.minX) < (road.maxZ - road.minZ);
+    addFlatPlane(road.minX, road.maxX, road.minZ, road.maxZ, vertical ? 0.011 : 0.01, 0x2c2f33, 5);
   }
 
-  // Walls (instanced: 1 draw call).
-  const wallGeometry = new THREE.BoxGeometry(1, 1, 1);
-  const wallMaterial = new THREE.MeshPhongMaterial({ color: 0xaaaaaa });
-  const walls = new THREE.InstancedMesh(wallGeometry, wallMaterial, 300);
-  walls.castShadow = true;
-  walls.receiveShadow = true;
-  walls.frustumCulled = false; // instances are spread across the whole map
-
-  const wallMatrix = new THREE.Matrix4();
-  const wallScale = new THREE.Vector3();
-  const wallPosition = new THREE.Vector3();
-  const wallQuaternion = new THREE.Quaternion();
-  for (let i = 0; i < 300; i++) {
-    const x = Math.random() * groundSize - groundSize / 2;
-    const z = Math.random() * groundSize - groundSize / 2;
-    const width = Math.random() * 20 + 10;
-    const height = Math.random() * 3 + 2;
-    const depth = Math.random() * 2 + 1;
-
-    wallScale.set(width, height, depth);
-    wallPosition.set(x, height / 2, z);
-    wallMatrix.compose(wallPosition, wallQuaternion, wallScale);
-    walls.setMatrixAt(i, wallMatrix);
-
-    state.wallBoxes.push(
-      new THREE.Box3(
-        new THREE.Vector3(x - width / 2, 0, z - depth / 2),
-        new THREE.Vector3(x + width / 2, height, z + depth / 2)
-      )
-    );
+  // Lane markings.
+  for (const road of roads) {
+    if (road.type === 'arterial') addCenterLine(road, 0xffd75e, 0.03);
+    else if (road.type === 'secondary') addCenterLine(road, 0xffffff, 0.03);
   }
-  walls.instanceMatrix.needsUpdate = true;
-  state.scene.add(walls);
+
+  // Trees (instanced).
+  buildTreeInstances(treePositions);
+
+  // Hollow buildings (instanced walls/floors/roofs).
+  buildHollowInstances();
+
+  // Perimeter walls (city boundary).
+  addPerimeterWalls();
 }
 
 // Returns a ground position (x, z) that is clear of all static obstacles
@@ -312,6 +924,12 @@ export function findClearSpawnPosition() {
     }
     for (const wallBox of state.wallBoxes) {
       if (box.intersectsBox(wallBox)) return false;
+    }
+    // Don't spawn inside a hollow building's interior.
+    for (const b of state.buildingInteriors) {
+      if (box.min.x < b.maxX && box.max.x > b.minX && box.min.z < b.maxZ && box.max.z > b.minZ) {
+        return false;
+      }
     }
     return true;
   };

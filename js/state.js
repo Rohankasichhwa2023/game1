@@ -94,6 +94,16 @@ export const state = {
   buildingBoxes: [],
   wallBoxes: [],
 
+  // Road rectangles (for the minimap) — { minX, maxX, minZ, maxZ }.
+  roads: [],
+
+  // Enterable building interiors (safe zones) + whether the player is inside.
+  buildingInteriors: [],
+  playerIndoors: false,
+
+  // Doors on enterable buildings (open/close automatically).
+  doors: [],
+
   // Dynamic entities.
   enemies: [],
   bullets: [],
@@ -117,6 +127,16 @@ export const state = {
 };
 
 // ---------------- HUD update helpers ----------------
+export function isPlayerIndoors() {
+  const p = state.player.position;
+  for (const b of state.buildingInteriors) {
+    if (p.x >= b.minX && p.x <= b.maxX && p.z >= b.minZ && p.z <= b.maxZ && p.y >= b.minY && p.y <= b.maxY) {
+      return true;
+    }
+  }
+  return false;
+}
+
 export function updateLifeHud() {
   const life = state.playerLife;
   lifeValue.textContent = life;

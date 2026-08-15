@@ -42,6 +42,7 @@
                     <li><span><kbd>Space</kbd> <kbd>Space</kbd></span> Double-tap near a building to jump to its roof</li>
                     <li><span><kbd>Left Click</kbd></span> Shoot</li>
                     <li><span><kbd>Right Click</kbd></span> Hold to aim, release to snipe</li>
+                    <li><span><kbd>V</kbd></span> Toggle third-person view</li>
                     <li><span><kbd>Esc</kbd></span> Pause / Resume</li>
                 </ul>
             </section>
@@ -61,7 +62,10 @@
     </div>
 
     <!-- Gun power display -->
-    <div id="gunPowerDisplay">Normal Gun Damage: 1</div>
+    <div id="gunPowerDisplay" class="hud-pill">
+        <span class="hud-icon">🔫</span>
+        <span class="hud-value"><span id="gunName">Pistol</span> <span class="hud-value-dim" id="gunDamage">DMG 1</span></span>
+    </div>
 
     <script type="module" src="js/main.js"></script>
 </body>

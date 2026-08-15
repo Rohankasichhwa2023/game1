@@ -4,6 +4,7 @@
 
 import * as THREE from 'three';
 import { PointerLockControls } from 'three/examples/jsm/controls/PointerLockControls.js';
+import { createHumanFigure } from './character.js';
 
 // ---------------- Scene, Camera, Renderer ----------------
 const scene = new THREE.Scene();
@@ -18,11 +19,11 @@ renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 document.body.appendChild(renderer.domElement);
 
 // ---------------- Player ----------------
-const playerGeometry = new THREE.BoxGeometry(1, 2, 1);
-const playerMaterial = new THREE.MeshPhongMaterial({ color: 0xff0000 });
-const player = new THREE.Mesh(playerGeometry, playerMaterial);
-player.castShadow = true;
-player.receiveShadow = true;
+const player = createHumanFigure({
+  shirtColor: 0xe53935,
+  pantsColor: 0x2f3b4c,
+  skinColor: 0xf1c27d,
+});
 player.position.y = 1;
 scene.add(player);
 
@@ -49,13 +50,25 @@ document.addEventListener('click', () => {
 // ---------------- HUD: Life & Gold Displays ----------------
 const lifeDisplay = document.createElement('div');
 lifeDisplay.id = 'lifeDisplay';
-lifeDisplay.textContent = 'Life: 10';
+lifeDisplay.className = 'hud-pill';
+lifeDisplay.innerHTML = `
+  <span class="hud-icon">❤️</span>
+  <div class="hud-bar"><div class="hud-bar-fill" id="lifeBarFill"></div></div>
+  <span class="hud-value" id="lifeValue">10</span>
+`;
 document.body.appendChild(lifeDisplay);
+const lifeBarFill = lifeDisplay.querySelector('#lifeBarFill');
+const lifeValue = lifeDisplay.querySelector('#lifeValue');
 
 const goldDisplay = document.createElement('div');
 goldDisplay.id = 'goldDisplay';
-goldDisplay.textContent = 'Gold: 0/5';
+goldDisplay.className = 'hud-pill';
+goldDisplay.innerHTML = `
+  <span class="hud-icon">🪙</span>
+  <span class="hud-value" id="goldValue">0<span class="hud-value-dim">/5</span></span>
+`;
 document.body.appendChild(goldDisplay);
+const goldValue = goldDisplay.querySelector('#goldValue');
 
 // ---------------- Shared game state ----------------
 export const state = {
@@ -90,6 +103,9 @@ export const state = {
   started: false,
   paused: false,
 
+  // Camera mode: false = first person (default), true = third person.
+  thirdPerson: false,
+
   // Boss / portal lifecycle flags.
   bossSpawned: false,
   bossEnemy: null,
@@ -99,3 +115,22 @@ export const state = {
   // Shared constant.
   groundSize: 1000,
 };
+
+// ---------------- HUD update helpers ----------------
+export function updateLifeHud() {
+  const life = state.playerLife;
+  lifeValue.textContent = life;
+  const pct = Math.min(100, Math.max(0, (life / 10) * 100));
+  lifeBarFill.style.width = `${pct}%`;
+  if (pct <= 25) lifeBarFill.style.background = '#e74c3c';
+  else if (pct <= 50) lifeBarFill.style.background = '#f1c40f';
+  else lifeBarFill.style.background = 'linear-gradient(90deg, #2ecc71, #7bed9f)';
+}
+
+export function updateGoldHud() {
+  goldValue.innerHTML = `${state.goldCount}<span class="hud-value-dim">/5</span>`;
+}
+
+// Initialize the HUD to the starting values.
+updateLifeHud();
+updateGoldHud();

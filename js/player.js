@@ -3,6 +3,7 @@
 
 import * as THREE from 'three';
 import { state } from './state.js';
+import { makeBox } from './character.js';
 import { getBullet } from './bullets.js';
 import { triggerGameOver } from './ui.js';
 
@@ -11,6 +12,9 @@ const keys = { KeyW: false, KeyS: false, KeyA: false, KeyD: false, Space: false 
 let isJumping = false;
 const velocity = new THREE.Vector3();
 const directionVec = new THREE.Vector3();
+const upVector = new THREE.Vector3(0, 1, 0);
+const rightVector = new THREE.Vector3();
+const moveVector = new THREE.Vector3();
 
 const doubleSpaceThreshold = 300; // milliseconds
 let lastSpacePressTime = 0;
@@ -20,6 +24,12 @@ const sniperFOV = 20;
 let isSniperMode = false;
 let shootCooldown = false;
 let sniperShootCooldown = false;
+
+// Third-person camera settings.
+const thirdPersonDistance = 6;
+const thirdPersonHeight = 3;
+const cameraForward = new THREE.Vector3();
+const cameraUpOffset = new THREE.Vector3();
 
 // ---------------- Building Jump ----------------
 function jumpToBuilding() {
@@ -49,7 +59,6 @@ function jumpToBuilding() {
 
   if (candidateBuilding) {
     state.player.position.y = candidateBuilding.max.y + 1;
-    state.camera.position.set(state.player.position.x, state.player.position.y + 2, state.player.position.z);
   }
 }
 
@@ -113,7 +122,7 @@ function getCurrentSupportingBuilding() {
   return null;
 }
 
-export function updateMovement() {
+export function updateMovement(dt) {
   const supportingBuilding = getCurrentSupportingBuilding();
   let currentGround = 1;
   if (supportingBuilding) {
@@ -124,16 +133,19 @@ export function updateMovement() {
   directionVec.y = 0;
   directionVec.normalize();
 
-  const right = new THREE.Vector3();
-  right.crossVectors(new THREE.Vector3(0, 1, 0), directionVec).normalize();
+  // Face the player toward the look/movement direction.
+  state.player.rotation.y = Math.atan2(directionVec.x, directionVec.z);
 
-  const moveVector = new THREE.Vector3();
-  if (keys['KeyW']) moveVector.addScaledVector(directionVec, moveSpeed);
-  if (keys['KeyS']) moveVector.addScaledVector(directionVec, -moveSpeed);
-  if (keys['KeyA']) moveVector.addScaledVector(right, moveSpeed);
-  if (keys['KeyD']) moveVector.addScaledVector(right, -moveSpeed);
+  rightVector.crossVectors(upVector, directionVec).normalize();
 
-  const playerBox = new THREE.Box3().setFromObject(state.player);
+  const speed = moveSpeed * dt;
+  moveVector.set(0, 0, 0);
+  if (keys['KeyW']) moveVector.addScaledVector(directionVec, speed);
+  if (keys['KeyS']) moveVector.addScaledVector(directionVec, -speed);
+  if (keys['KeyA']) moveVector.addScaledVector(rightVector, speed);
+  if (keys['KeyD']) moveVector.addScaledVector(rightVector, -speed);
+
+  const playerBox = makeBox(state.player.position, 0.5, 1, 0.5);
   const newPlayerBox = playerBox.clone().translate(moveVector);
 
   let canMove = true;
@@ -152,9 +164,9 @@ export function updateMovement() {
     }
   }
   if (canMove) {
-    const playerBoxNew = new THREE.Box3().setFromObject(state.player);
+    const playerBoxNew = makeBox(state.player.position, 0.5, 1, 0.5);
     for (const enemy of state.enemies) {
-      const enemyBox = new THREE.Box3().setFromObject(enemy.mesh);
+      const enemyBox = makeBox(enemy.mesh.position, enemy.halfWidth, enemy.halfHeight, enemy.halfDepth);
       if (playerBoxNew.intersectsBox(enemyBox)) {
         triggerGameOver('An enemy caught you.');
         return;
@@ -164,7 +176,6 @@ export function updateMovement() {
 
   if (canMove) {
     state.player.position.add(moveVector);
-    state.camera.position.set(state.player.position.x, state.player.position.y + 2, state.player.position.z);
   }
 
   if (keys['Space'] && !isJumping && Math.abs(state.player.position.y - currentGround) < 0.01) {
@@ -172,18 +183,47 @@ export function updateMovement() {
     isJumping = true;
   }
 
-  velocity.y -= 0.02;
-  state.player.position.y += velocity.y;
+  velocity.y -= 0.02 * dt;
+  state.player.position.y += velocity.y * dt;
 
   if (state.player.position.y < currentGround) {
     state.player.position.y = currentGround;
     velocity.y = 0;
     isJumping = false;
   }
+
+  // Keep the player inside the generated world.
+  const boundary = state.groundSize / 2 - 1;
+  state.player.position.x = Math.max(-boundary, Math.min(boundary, state.player.position.x));
+  state.player.position.z = Math.max(-boundary, Math.min(boundary, state.player.position.z));
+}
+
+// ---------------- Camera (first / third person) ----------------
+export function updateCamera() {
+  if (state.thirdPerson) {
+    // Orbit behind the player using the current look direction (yaw only).
+    state.camera.getWorldDirection(cameraForward);
+    cameraForward.y = 0;
+    if (cameraForward.lengthSq() < 1e-6) cameraForward.set(0, 0, -1);
+    cameraForward.normalize();
+
+    state.camera.position
+      .copy(state.player.position)
+      .add(cameraUpOffset.set(0, thirdPersonHeight, 0))
+      .addScaledVector(cameraForward, -thirdPersonDistance);
+  } else {
+    state.camera.position.set(state.player.position.x, state.player.position.y + 2, state.player.position.z);
+  }
 }
 
 // ---------------- Input listeners & initial camera position ----------------
 export function initPlayer() {
+  document.addEventListener('keydown', (event) => {
+    if (event.code === 'KeyV') {
+      state.thirdPerson = !state.thirdPerson;
+    }
+  });
+
   document.addEventListener('keydown', (event) => {
     if (event.code === 'Space') {
       event.preventDefault();

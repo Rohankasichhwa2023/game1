@@ -13,15 +13,10 @@ minimapCanvas.height = 150;
 minimapCanvas.id = 'minimap';
 const minimapContext = minimapCanvas.getContext('2d');
 
-function worldToMinimap(x, z) {
-  const scale = minimapCanvas.width / minimapWorldSize;
-  const dx = x - state.player.position.x;
-  const dz = z - state.player.position.z;
-  return {
-    x: minimapCanvas.width / 2 + dx * scale,
-    y: minimapCanvas.height / 2 - dz * scale, // Invert z to match canvas y-axis.
-  };
-}
+const minimapScale = minimapCanvas.width / minimapWorldSize;
+const halfWidth = minimapCanvas.width / 2;
+const halfHeight = minimapCanvas.height / 2;
+const centerVec = new THREE.Vector3(); // reused to avoid per-frame allocations
 
 export function initMinimap() {
   document.body.appendChild(minimapCanvas);
@@ -32,70 +27,65 @@ export function updateMinimap() {
 
   minimapContext.save();
   minimapContext.beginPath();
-  minimapContext.arc(minimapCanvas.width / 2, minimapCanvas.height / 2, minimapCanvas.width / 2, 0, Math.PI * 2);
+  minimapContext.arc(halfWidth, halfHeight, halfWidth, 0, Math.PI * 2);
   minimapContext.closePath();
   minimapContext.clip();
 
   minimapContext.fillStyle = '#333';
   minimapContext.fillRect(0, 0, minimapCanvas.width, minimapCanvas.height);
 
+  const px = state.player.position.x;
+  const pz = state.player.position.z;
+
   // Trees as green circles.
   minimapContext.fillStyle = '#008000';
-  const centerVec = new THREE.Vector3();
-  state.treeBoxes.forEach((treeBox) => {
+  for (const treeBox of state.treeBoxes) {
     treeBox.getCenter(centerVec);
-    const pos = worldToMinimap(centerVec.x, centerVec.z);
+    const x = halfWidth + (centerVec.x - px) * minimapScale;
+    const y = halfHeight - (centerVec.z - pz) * minimapScale;
     minimapContext.beginPath();
-    minimapContext.arc(pos.x, pos.y, 2 * entityScale, 0, 2 * Math.PI);
+    minimapContext.arc(x, y, 2 * entityScale, 0, 2 * Math.PI);
     minimapContext.fill();
-  });
+  }
 
   // Buildings as light grey rectangles.
   minimapContext.fillStyle = '#999';
-  state.buildingBoxes.forEach((buildingBox) => {
-    const center = new THREE.Vector3();
-    buildingBox.getCenter(center);
-    const min = buildingBox.min;
-    const max = buildingBox.max;
-    const widthWorld = max.x - min.x;
-    const heightWorld = max.z - min.z;
-    const scale = minimapCanvas.width / minimapWorldSize;
-    const width = widthWorld * scale * entityScale;
-    const height = heightWorld * scale * entityScale;
-    const pos = worldToMinimap(center.x, center.z);
-    minimapContext.fillRect(pos.x - width / 2, pos.y - height / 2, width, height);
-  });
+  for (const buildingBox of state.buildingBoxes) {
+    const width = (buildingBox.max.x - buildingBox.min.x) * minimapScale * entityScale;
+    const height = (buildingBox.max.z - buildingBox.min.z) * minimapScale * entityScale;
+    const cx = (buildingBox.min.x + buildingBox.max.x) / 2;
+    const cz = (buildingBox.min.z + buildingBox.max.z) / 2;
+    const x = halfWidth + (cx - px) * minimapScale;
+    const y = halfHeight - (cz - pz) * minimapScale;
+    minimapContext.fillRect(x - width / 2, y - height / 2, width, height);
+  }
 
   // Walls as darker grey rectangles.
   minimapContext.fillStyle = '#666';
-  state.wallBoxes.forEach((wallBox) => {
-    const center = new THREE.Vector3();
-    wallBox.getCenter(center);
-    const min = wallBox.min;
-    const max = wallBox.max;
-    const widthWorld = max.x - min.x;
-    const heightWorld = max.z - min.z;
-    const scale = minimapCanvas.width / minimapWorldSize;
-    const width = widthWorld * scale * entityScale;
-    const height = heightWorld * scale * entityScale;
-    const pos = worldToMinimap(center.x, center.z);
-    minimapContext.fillRect(pos.x - width / 2, pos.y - height / 2, width, height);
-  });
+  for (const wallBox of state.wallBoxes) {
+    const width = (wallBox.max.x - wallBox.min.x) * minimapScale * entityScale;
+    const height = (wallBox.max.z - wallBox.min.z) * minimapScale * entityScale;
+    const cx = (wallBox.min.x + wallBox.max.x) / 2;
+    const cz = (wallBox.min.z + wallBox.max.z) / 2;
+    const x = halfWidth + (cx - px) * minimapScale;
+    const y = halfHeight - (cz - pz) * minimapScale;
+    minimapContext.fillRect(x - width / 2, y - height / 2, width, height);
+  }
 
   // Enemies as red circles.
   minimapContext.fillStyle = '#ff0000';
-  state.enemies.forEach((enemy) => {
-    const pos = worldToMinimap(enemy.mesh.position.x, enemy.mesh.position.z);
+  for (const enemy of state.enemies) {
+    const x = halfWidth + (enemy.mesh.position.x - px) * minimapScale;
+    const y = halfHeight - (enemy.mesh.position.z - pz) * minimapScale;
     minimapContext.beginPath();
-    minimapContext.arc(pos.x, pos.y, 3 * entityScale, 0, 2 * Math.PI);
+    minimapContext.arc(x, y, 3 * entityScale, 0, 2 * Math.PI);
     minimapContext.fill();
-  });
+  }
 
-  // Player as a golden circle.
+  // Player as a golden circle (always centered).
   minimapContext.fillStyle = '#FFD700';
-  const playerPos = worldToMinimap(state.player.position.x, state.player.position.z);
   minimapContext.beginPath();
-  minimapContext.arc(playerPos.x, playerPos.y, 4 * entityScale, 0, 2 * Math.PI);
+  minimapContext.arc(halfWidth, halfHeight, 4 * entityScale, 0, 2 * Math.PI);
   minimapContext.fill();
 
   minimapContext.restore();

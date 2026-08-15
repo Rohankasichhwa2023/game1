@@ -3,6 +3,7 @@
 
 import * as THREE from 'three';
 import { state } from './state.js';
+import { makeBox } from './character.js';
 import { triggerGameOver } from './ui.js';
 
 export function spawnPortal(spawnPosition) {
@@ -51,7 +52,7 @@ export function updatePortalCollision() {
   if (!state.goldenGateSpawned || !state.goldenGateDoor) return;
 
   state.goldenGateDoor.userData.box.setFromObject(state.goldenGateDoor);
-  const playerBox = new THREE.Box3().setFromObject(state.player);
+  const playerBox = makeBox(state.player.position, 0.5, 1, 0.5);
 
   if (playerBox.intersectsBox(state.goldenGateDoor.userData.box)) {
     if (state.goldCount >= 5) {
@@ -63,7 +64,7 @@ export function updatePortalCollision() {
   }
 }
 
-export function animatePortal() {
+export function animatePortal(dt) {
   if (!state.goldenGateSpawned || !state.goldenGateDoor) return;
-  state.goldenGateDoor.rotation.y += 0.01;
+  state.goldenGateDoor.rotation.y += 0.01 * dt;
 }

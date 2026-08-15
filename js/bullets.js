@@ -2,7 +2,8 @@
 // Bullet pooling, enemy shooting, and per-frame bullet update logic.
 
 import * as THREE from 'three';
-import { state } from './state.js';
+import { state, updateLifeHud } from './state.js';
+import { makeBox } from './character.js';
 import { triggerGameOver } from './ui.js';
 
 const bulletSpeed = 1;
@@ -45,10 +46,10 @@ export function shootEnemyBullet(enemy) {
   enemyBullets.push(bullet);
 }
 
-export function updateBullets() {
+export function updateBullets(dt) {
   for (let i = state.bullets.length - 1; i >= 0; i--) {
     const bullet = state.bullets[i];
-    bullet.position.addScaledVector(bullet.userData.direction, bulletSpeed);
+    bullet.position.addScaledVector(bullet.userData.direction, bulletSpeed * dt);
 
     const rangeThreshold = bullet.userData.isSniper ? 300 : 100;
     if (bullet.position.distanceTo(state.camera.position) > rangeThreshold) {
@@ -60,7 +61,7 @@ export function updateBullets() {
 
     for (let j = state.enemies.length - 1; j >= 0; j--) {
       const enemy = state.enemies[j];
-      const enemyBox = new THREE.Box3().setFromObject(enemy.mesh);
+      const enemyBox = makeBox(enemy.mesh.position, enemy.halfWidth, enemy.halfHeight, enemy.halfDepth);
       if (enemyBox.containsPoint(bullet.position)) {
         enemy.life -= state.currentGun.damage;
         state.scene.remove(bullet);
@@ -76,11 +77,11 @@ export function updateBullets() {
   }
 }
 
-export function updateEnemyBullets() {
-  const playerBox = new THREE.Box3().setFromObject(state.player);
+export function updateEnemyBullets(dt) {
+  const playerBox = makeBox(state.player.position, 0.5, 1, 0.5);
   for (let i = enemyBullets.length - 1; i >= 0; i--) {
     const bullet = enemyBullets[i];
-    bullet.position.addScaledVector(bullet.userData.direction, bulletSpeed);
+    bullet.position.addScaledVector(bullet.userData.direction, bulletSpeed * dt);
 
     let collided = false;
     for (const treeBox of state.treeBoxes) {
@@ -112,7 +113,7 @@ export function updateEnemyBullets() {
 
     if (playerBox.containsPoint(bullet.position)) {
       state.playerLife -= 1;
-      state.lifeDisplay.textContent = `Life: ${state.playerLife}`;
+      updateLifeHud();
       state.scene.remove(bullet);
       enemyBullets.splice(i, 1);
       returnBullet(bullet, true);

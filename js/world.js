@@ -21,27 +21,6 @@ function generateGrassTexture() {
   return canvas;
 }
 
-function createTree(x, z) {
-  const trunkGeometry = new THREE.CylinderGeometry(0.5, 0.5, 5);
-  const trunkMaterial = new THREE.MeshPhongMaterial({ color: 0x8B4513 });
-  const trunk = new THREE.Mesh(trunkGeometry, trunkMaterial);
-  trunk.castShadow = true;
-  trunk.receiveShadow = true;
-  trunk.position.set(x, 2.5, z);
-
-  const foliageGeometry = new THREE.SphereGeometry(3, 10, 10);
-  const foliageMaterial = new THREE.MeshPhongMaterial({ color: 0x228B22 });
-  const foliage = new THREE.Mesh(foliageGeometry, foliageMaterial);
-  foliage.castShadow = true;
-  foliage.receiveShadow = true;
-  foliage.position.set(x, 6, z);
-
-  state.scene.add(trunk);
-  state.scene.add(foliage);
-
-  return new THREE.Box3().setFromObject(trunk);
-}
-
 function clamp255(value) {
   return Math.min(255, Math.max(0, value));
 }
@@ -167,18 +146,6 @@ function createBuilding(x, z, width, height, depth) {
   return new THREE.Box3().setFromObject(group);
 }
 
-function createWall(x, z, width, height, depth) {
-  const wallGeometry = new THREE.BoxGeometry(width, height, depth);
-  const wallMaterial = new THREE.MeshPhongMaterial({ color: 0xaaaaaa });
-  const wall = new THREE.Mesh(wallGeometry, wallMaterial);
-  wall.castShadow = true;
-  wall.receiveShadow = true;
-  wall.position.set(x, height / 2, z);
-  state.scene.add(wall);
-
-  return new THREE.Box3().setFromObject(wall);
-}
-
 export function initWorld() {
   const groundSize = state.groundSize;
 
@@ -196,12 +163,43 @@ export function initWorld() {
   ground.receiveShadow = true;
   state.scene.add(ground);
 
-  // Trees.
+  // Trees (instanced: 600 trunks + 600 foliage = 2 draw calls).
+  const trunkGeometry = new THREE.CylinderGeometry(0.5, 0.5, 5);
+  const trunkMaterial = new THREE.MeshPhongMaterial({ color: 0x8B4513 });
+  const trunks = new THREE.InstancedMesh(trunkGeometry, trunkMaterial, 600);
+  trunks.castShadow = true;
+  trunks.receiveShadow = true;
+  trunks.frustumCulled = false; // instances are spread across the whole map
+
+  const foliageGeometry = new THREE.SphereGeometry(3, 10, 10);
+  const foliageMaterial = new THREE.MeshPhongMaterial({ color: 0x228B22 });
+  const foliage = new THREE.InstancedMesh(foliageGeometry, foliageMaterial, 600);
+  foliage.castShadow = true;
+  foliage.receiveShadow = true;
+  foliage.frustumCulled = false; // instances are spread across the whole map
+
+  const matrix = new THREE.Matrix4();
   for (let i = 0; i < 600; i++) {
     const x = Math.random() * groundSize - groundSize / 2;
     const z = Math.random() * groundSize - groundSize / 2;
-    state.treeBoxes.push(createTree(x, z));
+
+    matrix.setPosition(x, 2.5, z);
+    trunks.setMatrixAt(i, matrix);
+
+    matrix.setPosition(x, 6, z);
+    foliage.setMatrixAt(i, matrix);
+
+    state.treeBoxes.push(
+      new THREE.Box3(
+        new THREE.Vector3(x - 0.5, 0, z - 0.5),
+        new THREE.Vector3(x + 0.5, 5, z + 0.5)
+      )
+    );
   }
+  trunks.instanceMatrix.needsUpdate = true;
+  foliage.instanceMatrix.needsUpdate = true;
+  state.scene.add(trunks);
+  state.scene.add(foliage);
 
   // Buildings.
   for (let i = 0; i < 100; i++) {
@@ -213,13 +211,78 @@ export function initWorld() {
     state.buildingBoxes.push(createBuilding(x, z, width, height, depth));
   }
 
-  // Walls.
+  // Walls (instanced: 1 draw call).
+  const wallGeometry = new THREE.BoxGeometry(1, 1, 1);
+  const wallMaterial = new THREE.MeshPhongMaterial({ color: 0xaaaaaa });
+  const walls = new THREE.InstancedMesh(wallGeometry, wallMaterial, 300);
+  walls.castShadow = true;
+  walls.receiveShadow = true;
+  walls.frustumCulled = false; // instances are spread across the whole map
+
+  const wallMatrix = new THREE.Matrix4();
+  const wallScale = new THREE.Vector3();
+  const wallPosition = new THREE.Vector3();
+  const wallQuaternion = new THREE.Quaternion();
   for (let i = 0; i < 300; i++) {
     const x = Math.random() * groundSize - groundSize / 2;
     const z = Math.random() * groundSize - groundSize / 2;
     const width = Math.random() * 20 + 10;
     const height = Math.random() * 3 + 2;
     const depth = Math.random() * 2 + 1;
-    state.wallBoxes.push(createWall(x, z, width, height, depth));
+
+    wallScale.set(width, height, depth);
+    wallPosition.set(x, height / 2, z);
+    wallMatrix.compose(wallPosition, wallQuaternion, wallScale);
+    walls.setMatrixAt(i, wallMatrix);
+
+    state.wallBoxes.push(
+      new THREE.Box3(
+        new THREE.Vector3(x - width / 2, 0, z - depth / 2),
+        new THREE.Vector3(x + width / 2, height, z + depth / 2)
+      )
+    );
   }
+  walls.instanceMatrix.needsUpdate = true;
+  state.scene.add(walls);
+}
+
+// Returns a ground position (x, z) that is clear of all static obstacles
+// (buildings, trees, walls), so entities never spawn trapped inside geometry.
+export function findClearSpawnPosition() {
+  const half = 1.0; // half footprint (0.5) + clearance margin
+  const range = state.groundSize / 2 - 20;
+
+  const isClear = (x, z) => {
+    const box = new THREE.Box3(
+      new THREE.Vector3(x - half, 0, z - half),
+      new THREE.Vector3(x + half, 2, z + half)
+    );
+    for (const treeBox of state.treeBoxes) {
+      if (box.intersectsBox(treeBox)) return false;
+    }
+    for (const buildingBox of state.buildingBoxes) {
+      if (box.intersectsBox(buildingBox)) return false;
+    }
+    for (const wallBox of state.wallBoxes) {
+      if (box.intersectsBox(wallBox)) return false;
+    }
+    return true;
+  };
+
+  // Random attempts (usually succeeds on the first try).
+  for (let i = 0; i < 300; i++) {
+    const x = (Math.random() - 0.5) * 2 * range;
+    const z = (Math.random() - 0.5) * 2 * range;
+    if (isClear(x, z)) return { x, z };
+  }
+
+  // Deterministic fallback: scan a coarse grid for any clear cell.
+  for (let x = -range; x <= range; x += 5) {
+    for (let z = -range; z <= range; z += 5) {
+      if (isClear(x, z)) return { x, z };
+    }
+  }
+
+  // Last resort (should never be reached).
+  return { x: 0, z: 0 };
 }

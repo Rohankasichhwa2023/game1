@@ -2,12 +2,23 @@
 // Gun pickups, lifelines (hearts), and gold coins.
 
 import * as THREE from 'three';
-import { state } from './state.js';
+import { state, updateLifeHud, updateGoldHud } from './state.js';
 import { triggerGameOver } from './ui.js';
 
 const gunPickups = [];
 const lifelines = [];
 const goldCoins = [];
+
+// Returns a random spawn position near the player, clamped inside the world.
+function randomSpawnPosition(distanceMin, distanceMax) {
+  const distance = distanceMin + Math.random() * (distanceMax - distanceMin);
+  const angle = Math.random() * 2 * Math.PI;
+  const limit = state.groundSize / 2 - 2;
+  return {
+    x: Math.max(-limit, Math.min(limit, state.player.position.x + distance * Math.cos(angle))),
+    z: Math.max(-limit, Math.min(limit, state.player.position.z + distance * Math.sin(angle))),
+  };
+}
 
 // ---------------- Guns ----------------
 function createTextSprite(message) {
@@ -57,36 +68,33 @@ function createGunPickup(gunType) {
 
 function scatterGunPickups() {
   const rifle = createGunPickup('rifle');
-  let distance = 100 + Math.random() * 100;
-  let angle = Math.random() * 2 * Math.PI;
-  let x = state.player.position.x + distance * Math.cos(angle);
-  let z = state.player.position.z + distance * Math.sin(angle);
-  rifle.position.set(x, 0.5, z);
+  const riflePos = randomSpawnPosition(100, 200);
+  rifle.position.set(riflePos.x, 0.5, riflePos.z);
   state.scene.add(rifle);
   gunPickups.push(rifle);
 
   const shotgun = createGunPickup('shotgun');
-  distance = 200 + Math.random() * 200;
-  angle = Math.random() * 2 * Math.PI;
-  x = state.player.position.x + distance * Math.cos(angle);
-  z = state.player.position.z + distance * Math.sin(angle);
-  shotgun.position.set(x, 0.5, z);
+  const shotgunPos = randomSpawnPosition(200, 400);
+  shotgun.position.set(shotgunPos.x, 0.5, shotgunPos.z);
   state.scene.add(shotgun);
   gunPickups.push(shotgun);
 }
 
 export function updateGunPickups() {
-  const gunPowerText = document.getElementById('gunPowerDisplay');
+  const gunName = document.getElementById('gunName');
+  const gunDamage = document.getElementById('gunDamage');
   for (let i = gunPickups.length - 1; i >= 0; i--) {
     const gunMesh = gunPickups[i];
     if (state.player.position.distanceTo(gunMesh.position) < 2) {
       const newGunType = gunMesh.userData.gunType;
       if (newGunType === 'rifle') {
         state.currentGun = { name: 'rifle', damage: 2 };
-        if (gunPowerText) gunPowerText.textContent = ' Rifle Damage: 2';
+        if (gunName) gunName.textContent = 'Rifle';
+        if (gunDamage) gunDamage.textContent = 'DMG 2';
       } else if (newGunType === 'shotgun') {
         state.currentGun = { name: 'shotgun', damage: 5 };
-        if (gunPowerText) gunPowerText.textContent = 'ShotGun Damage: 5';
+        if (gunName) gunName.textContent = 'Shotgun';
+        if (gunDamage) gunDamage.textContent = 'DMG 5';
       }
       console.log('Picked up ' + state.currentGun.name);
       state.scene.remove(gunMesh);
@@ -125,13 +133,10 @@ const smallHeartGeometry = createSmallHeartGeometry();
 const heartMaterial = new THREE.MeshPhongMaterial({ color: 0xff0000 });
 
 function createHeartLifeline(distanceMin, distanceMax) {
-  const distance = distanceMin + Math.random() * (distanceMax - distanceMin);
-  const angle = Math.random() * 2 * Math.PI;
-  const x = state.player.position.x + distance * Math.cos(angle);
-  const z = state.player.position.z + distance * Math.sin(angle);
+  const pos = randomSpawnPosition(distanceMin, distanceMax);
   const heartMesh = new THREE.Mesh(smallHeartGeometry, heartMaterial);
   heartMesh.rotation.z = Math.PI;
-  heartMesh.position.set(x, 1, z);
+  heartMesh.position.set(pos.x, 1, pos.z);
   state.scene.add(heartMesh);
   lifelines.push(heartMesh);
 }
@@ -141,7 +146,7 @@ export function updateLifelines() {
     const heart = lifelines[i];
     if (state.player.position.distanceTo(heart.position) < 3) {
       state.playerLife += 2;
-      state.lifeDisplay.textContent = `Life: ${state.playerLife}`;
+      updateLifeHud();
       state.scene.remove(heart);
       lifelines.splice(i, 1);
     }
@@ -153,13 +158,10 @@ const goldCoinGeometry = new THREE.CylinderGeometry(0.5, 0.5, 0.1, 32);
 const goldCoinMaterial = new THREE.MeshPhongMaterial({ color: 0xffd700 });
 
 function createGoldCoin(minDistance, maxDistance) {
-  const distance = minDistance + Math.random() * (maxDistance - minDistance);
-  const angle = Math.random() * 2 * Math.PI;
-  const x = state.player.position.x + distance * Math.cos(angle);
-  const z = state.player.position.z + distance * Math.sin(angle);
+  const pos = randomSpawnPosition(minDistance, maxDistance);
   const coinMesh = new THREE.Mesh(goldCoinGeometry, goldCoinMaterial);
   coinMesh.rotation.x = Math.PI / 2;
-  coinMesh.position.set(x, 0.5, z);
+  coinMesh.position.set(pos.x, 0.5, pos.z);
   state.scene.add(coinMesh);
   goldCoins.push(coinMesh);
 }
@@ -169,7 +171,7 @@ export function updateGoldCoins() {
     const coin = goldCoins[i];
     if (state.player.position.distanceTo(coin.position) < 2) {
       state.goldCount++;
-      state.goldDisplay.textContent = `Gold: ${state.goldCount}/5`;
+      updateGoldHud();
       state.scene.remove(coin);
       goldCoins.splice(i, 1);
 

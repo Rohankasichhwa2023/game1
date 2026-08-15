@@ -3,32 +3,52 @@
 
 import * as THREE from 'three';
 import { state } from './state.js';
+import { createHumanFigure, makeBox } from './character.js';
+import { findClearSpawnPosition } from './world.js';
 import { shootEnemyBullet } from './bullets.js';
 import { triggerGameOver } from './ui.js';
 import { spawnPortal } from './portal.js';
 
 function createEnemy(x, z) {
-  const enemyGeometry = new THREE.BoxGeometry(2, 2, 2);
-  const enemyMaterial = new THREE.MeshPhongMaterial({ color: 0xff00ff });
-  const enemyMesh = new THREE.Mesh(enemyGeometry, enemyMaterial);
-  enemyMesh.castShadow = true;
-  enemyMesh.receiveShadow = true;
+  const enemyMesh = createHumanFigure({
+    shirtColor: 0xe91e63,
+    pantsColor: 0x263238,
+    skinColor: 0xf1c27d,
+  });
   enemyMesh.position.set(x, 1, z);
   state.scene.add(enemyMesh);
 
-  return { mesh: enemyMesh, life: 10, lastShot: Date.now(), shootInterval: 2000 };
+  return {
+    mesh: enemyMesh,
+    life: 10,
+    lastShot: Date.now(),
+    shootInterval: 2000,
+    halfWidth: 0.6,
+    halfHeight: 1.1,
+    halfDepth: 0.6,
+  };
 }
 
 function createBossEnemy(x, z) {
-  const bossGeometry = new THREE.BoxGeometry(4, 4, 4);
-  const bossMaterial = new THREE.MeshPhongMaterial({ color: 0x800080 });
-  const bossMesh = new THREE.Mesh(bossGeometry, bossMaterial);
-  bossMesh.castShadow = true;
-  bossMesh.receiveShadow = true;
+  const bossMesh = createHumanFigure({
+    shirtColor: 0x6a1b9a,
+    pantsColor: 0x1b1b2f,
+    skinColor: 0x8d6e63,
+    scale: 2,
+  });
   bossMesh.position.set(x, 2, z);
   state.scene.add(bossMesh);
 
-  return { mesh: bossMesh, life: 100, lastShot: Date.now(), shootInterval: 1000, isBoss: true };
+  return {
+    mesh: bossMesh,
+    life: 100,
+    lastShot: Date.now(),
+    shootInterval: 1000,
+    isBoss: true,
+    halfWidth: 1.2,
+    halfHeight: 2.2,
+    halfDepth: 1.2,
+  };
 }
 
 function rotateVectorY(vector, angle) {
@@ -56,28 +76,30 @@ function checkObstaclesCollision(box) {
 
 export function initEnemies() {
   for (let i = 0; i < 6; i++) {
-    const x = Math.random() * state.groundSize - state.groundSize / 2;
-    const z = Math.random() * state.groundSize - state.groundSize / 2;
-    state.enemies.push(createEnemy(x, z));
+    const spawn = findClearSpawnPosition();
+    state.enemies.push(createEnemy(spawn.x, spawn.z));
   }
 }
 
-function updateBossEnemy() {
+function updateBossEnemy(dt) {
   if (!state.bossEnemy) return;
 
-  const playerBox = new THREE.Box3().setFromObject(state.player);
-  const enemyBox = new THREE.Box3().setFromObject(state.bossEnemy.mesh);
+  const playerBox = makeBox(state.player.position, 0.5, 1, 0.5);
+  const enemyBox = makeBox(state.bossEnemy.mesh.position, state.bossEnemy.halfWidth, state.bossEnemy.halfHeight, state.bossEnemy.halfDepth);
 
   const directChaseDir = new THREE.Vector3().subVectors(state.player.position, state.bossEnemy.mesh.position).normalize();
   const bossSpeed = 0.05;
-  const moveVector = directChaseDir.clone().multiplyScalar(bossSpeed);
+  const moveVector = directChaseDir.clone().multiplyScalar(bossSpeed * dt);
 
   const enemyBoxAfterMove = enemyBox.clone().translate(moveVector);
   if (!checkObstaclesCollision(enemyBoxAfterMove)) {
     state.bossEnemy.mesh.position.add(moveVector);
   }
 
-  const updatedEnemyBox = new THREE.Box3().setFromObject(state.bossEnemy.mesh);
+  // Face the player.
+  state.bossEnemy.mesh.rotation.y = Math.atan2(directChaseDir.x, directChaseDir.z);
+
+  const updatedEnemyBox = makeBox(state.bossEnemy.mesh.position, state.bossEnemy.halfWidth, state.bossEnemy.halfHeight, state.bossEnemy.halfDepth);
   if (updatedEnemyBox.intersectsBox(playerBox)) {
     triggerGameOver('The boss caught you.');
     return;
@@ -97,16 +119,16 @@ function updateBossEnemy() {
   }
 }
 
-export function updateEnemies() {
-  const playerBox = new THREE.Box3().setFromObject(state.player);
+export function updateEnemies(dt) {
+  const playerBox = makeBox(state.player.position, 0.5, 1, 0.5);
 
   for (let i = state.enemies.length - 1; i >= 0; i--) {
     const enemy = state.enemies[i];
     const directChaseDir = new THREE.Vector3().subVectors(state.player.position, enemy.mesh.position).normalize();
     const enemySpeed = 0.1;
-    let bestVector = directChaseDir.clone().multiplyScalar(enemySpeed);
+    let bestVector = directChaseDir.clone().multiplyScalar(enemySpeed * dt);
 
-    const enemyBox = new THREE.Box3().setFromObject(enemy.mesh);
+    const enemyBox = makeBox(enemy.mesh.position, enemy.halfWidth, enemy.halfHeight, enemy.halfDepth);
     const newEnemyBox = enemyBox.clone().translate(bestVector);
     let canMove = !checkObstaclesCollision(newEnemyBox);
 
@@ -114,7 +136,7 @@ export function updateEnemies() {
       const alternatives = [];
       for (let angle = -Math.PI / 2; angle <= Math.PI / 2; angle += Math.PI / 12) {
         const altDir = rotateVectorY(directChaseDir, angle);
-        const altVector = altDir.clone().multiplyScalar(enemySpeed);
+        const altVector = altDir.clone().multiplyScalar(enemySpeed * dt);
         const altBox = enemyBox.clone().translate(altVector);
         if (!checkObstaclesCollision(altBox)) {
           const predictedPos = enemy.mesh.position.clone().add(altVector);
@@ -133,7 +155,10 @@ export function updateEnemies() {
       enemy.mesh.position.add(bestVector);
     }
 
-    const updatedEnemyBox = new THREE.Box3().setFromObject(enemy.mesh);
+    // Face the player.
+    enemy.mesh.rotation.y = Math.atan2(directChaseDir.x, directChaseDir.z);
+
+    const updatedEnemyBox = makeBox(enemy.mesh.position, enemy.halfWidth, enemy.halfHeight, enemy.halfDepth);
     if (updatedEnemyBox.intersectsBox(playerBox)) {
       triggerGameOver('An enemy caught you.');
       return;
@@ -150,11 +175,12 @@ export function updateEnemies() {
     state.bossSpawned = true;
     const offset = 20;
     const angle = Math.random() * 2 * Math.PI;
-    const bossX = state.player.position.x + offset * Math.cos(angle);
-    const bossZ = state.player.position.z + offset * Math.sin(angle);
+    const boundary = state.groundSize / 2 - 2;
+    const bossX = Math.max(-boundary, Math.min(boundary, state.player.position.x + offset * Math.cos(angle)));
+    const bossZ = Math.max(-boundary, Math.min(boundary, state.player.position.z + offset * Math.sin(angle)));
     state.bossEnemy = createBossEnemy(bossX, bossZ);
     console.log('Boss enemy spawned near the player!');
   }
 
-  updateBossEnemy();
+  updateBossEnemy(dt);
 }

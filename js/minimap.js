@@ -3,6 +3,7 @@
 
 import * as THREE from 'three';
 import { state } from './state.js';
+import { gunPickups, lifelines, goldCoins } from './pickups.js';
 
 const minimapWorldSize = 300; // World units shown in minimap (diameter)
 const entityScale = 2;        // Multiplier to draw entities larger on minimap
@@ -82,6 +83,32 @@ export function updateMinimap() {
     const x = halfWidth + (cx - px) * minimapScale;
     const y = halfHeight - (cz - pz) * minimapScale;
     minimapContext.fillRect(x - width / 2, y - height / 2, width, height);
+  }
+
+  // Pickups as symbols (so the player can tell them apart).
+  minimapContext.font = '11px "Segoe UI Emoji", "Apple Color Emoji", "Noto Color Emoji", sans-serif';
+  minimapContext.textAlign = 'center';
+  minimapContext.textBaseline = 'middle';
+
+  // Guns 🔫.
+  for (const gun of gunPickups) {
+    const x = halfWidth + (gun.position.x - px) * minimapScale;
+    const y = halfHeight - (gun.position.z - pz) * minimapScale;
+    minimapContext.fillText('🔫', x, y);
+  }
+
+  // Lifelines ❤️.
+  for (const heart of lifelines) {
+    const x = halfWidth + (heart.position.x - px) * minimapScale;
+    const y = halfHeight - (heart.position.z - pz) * minimapScale;
+    minimapContext.fillText('❤️', x, y);
+  }
+
+  // Gold coins 🪙.
+  for (const coin of goldCoins) {
+    const x = halfWidth + (coin.position.x - px) * minimapScale;
+    const y = halfHeight - (coin.position.z - pz) * minimapScale;
+    minimapContext.fillText('🪙', x, y);
   }
 
   // Enemies as red circles.

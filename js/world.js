@@ -231,8 +231,8 @@ const hollowRoofs = [];
 const hollowWindows = [];
 
 const HOLLOW_WALL_T = 0.4;
-const HOLLOW_DOOR_W = 2.2;
-const HOLLOW_DOOR_H = 2.5;
+const HOLLOW_DOOR_W = 4.4; // entrance opening width
+const HOLLOW_DOOR_H = 2.5; // normal door height
 const WINDOW_W = 1.2;
 const WINDOW_H = 1.5;
 const WINDOW_Y = 1.8;
@@ -307,65 +307,21 @@ function createHollowBuilding(x, z, width, height, depth, doorSide, wallColor) {
   const addWindows = (axis, fixed, a, b, withDoor, doorCenter) => {
     const winD = wallT + 0.2;
     const step = 3.2;
-    for (let pos = a + step / 2; pos < b - WINDOW_W / 2; pos += step) {
-      if (withDoor && Math.abs(pos - doorCenter) < doorW / 2 + WINDOW_W) continue;
-      if (axis === 'x') {
-        hollowWindows.push({ cx: pos, cy: WINDOW_Y, cz: fixed, w: WINDOW_W, h: WINDOW_H, d: winD });
-      } else {
-        hollowWindows.push({ cx: fixed, cy: WINDOW_Y, cz: pos, w: winD, h: WINDOW_H, d: WINDOW_W });
+    const rowStep = 3.2;
+    for (let wy = WINDOW_Y; wy < height - WINDOW_H / 2; wy += rowStep) {
+      for (let pos = a + step / 2; pos < b - WINDOW_W / 2; pos += step) {
+        // Skip windows around the door opening (ground floor only).
+        if (withDoor && wy < doorH && Math.abs(pos - doorCenter) < doorW / 2 + WINDOW_W) continue;
+        if (axis === 'x') {
+          hollowWindows.push({ cx: pos, cy: wy, cz: fixed, w: WINDOW_W, h: WINDOW_H, d: winD });
+        } else {
+          hollowWindows.push({ cx: fixed, cy: wy, cz: pos, w: winD, h: WINDOW_H, d: WINDOW_W });
+        }
       }
     }
   };
 
-  // Add a door (dark frame + panel + brass knob) on the front wall.
-  const addDoor = (axis, fixed, center) => {
-    const cx = axis === 'x' ? center : fixed;
-    const cz = axis === 'x' ? fixed : center;
-    // Panel is slightly proud of the wall so it reads as a real door.
-    const panelW = axis === 'x' ? doorW : wallT + 0.15;
-    const panelD = axis === 'x' ? wallT + 0.15 : doorW;
-    const frameW = axis === 'x' ? doorW + 0.4 : wallT;
-    const frameD = axis === 'x' ? wallT : doorW + 0.4;
-
-    const mesh = new THREE.Mesh(
-      new THREE.BoxGeometry(panelW, doorH, panelD),
-      new THREE.MeshPhongMaterial({ color: 0x7a4a2a, shininess: 12 })
-    );
-    mesh.castShadow = true;
-    mesh.receiveShadow = true;
-    mesh.position.set(cx, doorH / 2, cz);
-
-    // Dark trim around the opening (child so it hides when the door opens).
-    const frame = new THREE.Mesh(
-      new THREE.BoxGeometry(frameW, doorH + 0.4, frameD),
-      new THREE.MeshPhongMaterial({ color: 0x33302a, shininess: 6 })
-    );
-    mesh.add(frame);
-
-    // Brass knob near the latch edge.
-    const knob = new THREE.Mesh(
-      new THREE.SphereGeometry(0.05, 8, 8),
-      new THREE.MeshPhongMaterial({ color: 0xd4a017, shininess: 40 })
-    );
-    if (axis === 'x') {
-      knob.position.set(panelW / 2 - 0.18, -0.1, panelD / 2 + 0.02);
-    } else {
-      knob.position.set(panelD / 2 + 0.02, -0.1, panelW / 2 - 0.18);
-    }
-    mesh.add(knob);
-
-    state.scene.add(mesh);
-
-    const box = new THREE.Box3(
-      new THREE.Vector3(cx - panelW / 2, 0, cz - panelD / 2),
-      new THREE.Vector3(cx + panelW / 2, doorH, cz + panelD / 2)
-    );
-    state.wallBoxes.push(box); // closed initially
-
-    state.doors.push({ mesh, box, cx, cz, open: false });
-  };
-
-  // Build the four walls; the front wall gets a door + lintel.
+  // Build the four walls; the front wall gets a full-height opening (entrance).
   const buildSide = (axis, fixed, a, b, isDoorSide) => {
     const center = (a + b) / 2;
     if (isDoorSide) {
@@ -374,7 +330,7 @@ function createHollowBuilding(x, z, width, height, depth, doorSide, wallColor) {
       if (d0 > a + 0.1) addWallSegment(axis, fixed, a, d0, 0, height);
       if (d1 < b - 0.1) addWallSegment(axis, fixed, d1, b, 0, height);
       if (height > doorH) addWallSegment(axis, fixed, d0, d1, doorH, height); // lintel
-      addDoor(axis, fixed, center);
+      // Open entrance below the lintel (door-height gap).
     } else {
       addWallSegment(axis, fixed, a, b, 0, height);
     }
@@ -448,24 +404,6 @@ function buildHollowInstances() {
   buildInstancedBoxes(hollowWindows, 0x7fb8d8); // sky-blue glass
   buildInstancedBoxes(hollowFloors, 0x9c7a4c);  // wood floor
   buildInstancedBoxes(hollowRoofs, 0x666666);   // dark roof/ceiling
-}
-
-// Auto open/close doors based on the player's proximity.
-export function updateDoors() {
-  const p = state.player.position;
-  for (const door of state.doors) {
-    const dist = Math.hypot(p.x - door.cx, p.z - door.cz);
-    if (dist < 2.0 && !door.open) {
-      door.open = true;
-      door.mesh.visible = false;
-      const i = state.wallBoxes.indexOf(door.box);
-      if (i !== -1) state.wallBoxes.splice(i, 1);
-    } else if (dist > 3.5 && door.open) {
-      door.open = false;
-      door.mesh.visible = true;
-      state.wallBoxes.push(door.box);
-    }
-  }
 }
 
 // ---------------- Road network ----------------
@@ -590,21 +528,20 @@ function generateBlockBuildings(block, district, rand, treePositions) {
       const cz = lz0 + margin + (maxD - d) / 2 + (rand() - 0.5) * 2;
       const h = cfg.minH + rand() * (cfg.maxH - cfg.minH);
 
-      if (district === 'residential' || district === 'industrial') {
-        // Door faces the nearest road (block edge).
-        const edges = [
-          { side: 'south', d: cz - block.z0 },
-          { side: 'north', d: block.z1 - cz },
-          { side: 'west', d: cx - block.x0 },
-          { side: 'east', d: block.x1 - cx },
-        ];
-        edges.sort((a, b) => a.d - b.d);
-        const palette = district === 'residential' ? HOUSE_COLORS : INDUSTRIAL_COLORS;
-        const wallColor = palette[Math.floor(rand() * palette.length)];
-        createHollowBuilding(cx, cz, w, h, d, edges[0].side, wallColor);
-      } else {
-        state.buildingBoxes.push(createBuilding(cx, cz, w, h, d, cfg.colors));
-      }
+      // All buildings are hollow (enterable), with the door facing the
+      // nearest road (block edge).
+      const edges = [
+        { side: 'south', d: cz - block.z0 },
+        { side: 'north', d: block.z1 - cz },
+        { side: 'west', d: cx - block.x0 },
+        { side: 'east', d: block.x1 - cx },
+      ];
+      edges.sort((a, b) => a.d - b.d);
+      const palette = district === 'residential' ? HOUSE_COLORS
+        : district === 'industrial' ? INDUSTRIAL_COLORS
+        : cfg.colors;
+      const wallColor = palette[Math.floor(rand() * palette.length)];
+      createHollowBuilding(cx, cz, w, h, d, edges[0].side, wallColor);
     }
   }
 
@@ -860,7 +797,6 @@ export function initWorld() {
   hollowFloors.length = 0;
   hollowRoofs.length = 0;
   hollowWindows.length = 0;
-  state.doors = [];
 
   // Base ground (grass — visible in parks and gaps).
   const groundGeometry = new THREE.PlaneGeometry(groundSize, groundSize);

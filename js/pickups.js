@@ -5,9 +5,9 @@ import * as THREE from 'three';
 import { state, updateLifeHud, updateGoldHud } from './state.js';
 import { triggerGameOver } from './ui.js';
 
-const gunPickups = [];
-const lifelines = [];
-const goldCoins = [];
+export const gunPickups = [];
+export const lifelines = [];
+export const goldCoins = [];
 
 // Returns a random spawn position near the player, clamped inside the world.
 function randomSpawnPosition(distanceMin, distanceMax) {

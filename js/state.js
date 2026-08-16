@@ -101,9 +101,6 @@ export const state = {
   buildingInteriors: [],
   playerIndoors: false,
 
-  // Doors on enterable buildings (open/close automatically).
-  doors: [],
-
   // Dynamic entities.
   enemies: [],
   bullets: [],

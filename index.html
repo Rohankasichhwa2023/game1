@@ -14,6 +14,12 @@
             }
         }
     </script>
+    <script>
+        window.va = window.va || function () {
+            (window.vaq = window.vaq || []).push(arguments);
+        };
+    </script>
+    <script defer src="/_vercel/insights/script.js"></script>
 </head>
 
 <body>
@@ -39,7 +45,8 @@
                 <ul class="controls-list">
                     <li><span><kbd>W</kbd> <kbd>A</kbd> <kbd>S</kbd> <kbd>D</kbd></span> Move</li>
                     <li><span><kbd>Space</kbd></span> Jump</li>
-                    <li><span><kbd>Space</kbd> <kbd>Space</kbd></span> Double-tap near a building to jump to its roof</li>
+                    <li><span><kbd>Space</kbd> <kbd>Space</kbd></span> Double-tap near a building to jump to its roof
+                    </li>
                     <li><span><kbd>Left Click</kbd></span> Shoot</li>
                     <li><span><kbd>Right Click</kbd></span> Hold to aim, release to snipe</li>
                     <li><span><kbd>V</kbd></span> Toggle third-person view</li>
@@ -64,7 +71,8 @@
     <!-- Gun power display -->
     <div id="gunPowerDisplay" class="hud-pill">
         <span class="hud-icon">🔫</span>
-        <span class="hud-value"><span id="gunName">Pistol</span> <span class="hud-value-dim" id="gunDamage">DMG 1</span></span>
+        <span class="hud-value"><span id="gunName">Pistol</span> <span class="hud-value-dim" id="gunDamage">DMG
+                1</span></span>
     </div>
 
     <!-- Controls hint -->

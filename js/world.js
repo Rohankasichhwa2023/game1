@@ -274,7 +274,15 @@ const INDUSTRIAL_COLORS = [
   0x8a8a8a, 0x9a9aa0, 0x6a6a6a, 0x7a5a4a, 0x8a6a5a, 0x5a5a5a,
 ];
 
-function createHollowBuilding(x, z, width, height, depth, doorSides, wallColor) {
+function createHollowBuilding(
+  x,
+  z,
+  width,
+  height,
+  depth,
+  doorSides,
+  wallColor,
+) {
   const wallT = HOLLOW_WALL_T;
   const doorW = HOLLOW_DOOR_W;
   const doorH = HOLLOW_DOOR_H;

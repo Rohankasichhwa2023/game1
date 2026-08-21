@@ -115,7 +115,7 @@ function updateBossEnemy(dt) {
     state.bossEnemy.halfHeight,
     state.bossEnemy.halfDepth,
   );
-  if (updatedEnemyBox.intersectsBox(playerBox)) {
+  if (!state.inCar && updatedEnemyBox.intersectsBox(playerBox)) {
     triggerGameOver("The boss caught you.");
     return;
   }
@@ -193,7 +193,7 @@ export function updateEnemies(dt) {
       enemy.halfHeight,
       enemy.halfDepth,
     );
-    if (updatedEnemyBox.intersectsBox(playerBox)) {
+    if (!state.inCar && updatedEnemyBox.intersectsBox(playerBox)) {
       triggerGameOver("An enemy caught you.");
       return;
     }

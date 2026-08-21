@@ -737,8 +737,25 @@ function addColonyWallSegment(cx, cz, w, d) {
   );
 }
 
+// Returns the road type whose edge coincides with `edgeValue` on the given
+// axis (vertical or horizontal roads), or null if it's the map boundary.
+function adjacentRoadType(edgeValue, roads, isVertical) {
+  for (const r of roads) {
+    const pos = isVertical ? r.x : r.z;
+    const halfW = r.width / 2;
+    if (
+      Math.abs(pos - halfW - edgeValue) < 0.01 ||
+      Math.abs(pos + halfW - edgeValue) < 0.01
+    )
+      return r.type;
+  }
+  return null;
+}
+
 // Low jumpable brick wall around a city block, with one gate opening.
-function addColonyWallsForBlock(block, rand) {
+// Sides that border a narrow "local" road are skipped so small streets don't
+// feel walled in.
+function addColonyWallsForBlock(block, rand, verticals, horizontals) {
   const { x0, x1, z0, z1 } = block;
   const t = COLONY_WALL_THICKNESS;
   const gateW = COLONY_GATE_WIDTH;
@@ -746,8 +763,15 @@ function addColonyWallsForBlock(block, rand) {
   const sides = ["south", "north", "east", "west"];
   const gateSide = sides[Math.floor(rand() * sides.length)];
 
+  // Determine which sides border a narrow local road.
+  const southLocal = adjacentRoadType(z0, horizontals, false) === "local";
+  const northLocal = adjacentRoadType(z1, horizontals, false) === "local";
+  const westLocal = adjacentRoadType(x0, verticals, true) === "local";
+  const eastLocal = adjacentRoadType(x1, verticals, true) === "local";
+
   // Add a wall run along one axis; split around the gate if it's the gate side.
-  const addRun = (isVertical, fixed, a, b, isGateSide) => {
+  const addRun = (isVertical, fixed, a, b, isGateSide, skip) => {
+    if (skip) return;
     if (isGateSide) {
       const gateCenter = a + (b - a) * (0.3 + rand() * 0.4);
       const g0 = gateCenter - gateW / 2;
@@ -766,10 +790,10 @@ function addColonyWallsForBlock(block, rand) {
     }
   };
 
-  addRun(false, z0, x0, x1, gateSide === "south"); // south (horizontal)
-  addRun(false, z1, x0, x1, gateSide === "north"); // north (horizontal)
-  addRun(true, x0, z0, z1, gateSide === "west"); // west (vertical)
-  addRun(true, x1, z0, z1, gateSide === "east"); // east (vertical)
+  addRun(false, z0, x0, x1, gateSide === "south", southLocal); // south
+  addRun(false, z1, x0, x1, gateSide === "north", northLocal); // north
+  addRun(true, x0, z0, z1, gateSide === "west", westLocal); // west
+  addRun(true, x1, z0, z1, gateSide === "east", eastLocal); // east
 }
 
 function generateCity(rand) {
@@ -798,8 +822,9 @@ function generateCity(rand) {
 
     generateBlockBuildings(block, district, rand, treePositions);
 
-    // Every block gets a low brick boundary wall with a gate opening.
-    addColonyWallsForBlock(block, rand);
+    // Every block gets a low brick boundary wall with a gate opening
+    // (skipped on sides that border narrow local roads).
+    addColonyWallsForBlock(block, rand, verticals, horizontals);
   }
 
   return { roads, treePositions };

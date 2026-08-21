@@ -101,6 +101,10 @@ export const state = {
   buildingInteriors: [],
   playerIndoors: false,
 
+  // Drivable car.
+  car: null,
+  inCar: false,
+
   // Dynamic entities.
   enemies: [],
   bullets: [],

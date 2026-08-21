@@ -4,7 +4,7 @@
 import { state, updateGoldHud, isPlayerIndoors } from "./state.js";
 import { initWorld, findClearSpawnPosition } from "./world.js";
 import { initEnemies, updateEnemies } from "./enemies.js";
-import { initPlayer, updateMovement, updateCamera } from "./player.js";
+import { initPlayer, updateMovement, updateCamera, initCar, updateCar } from "./player.js";
 import { updateBullets, updateEnemyBullets } from "./bullets.js";
 import {
   initPickups,
@@ -35,6 +35,7 @@ const spawn = findClearSpawnPosition();
 state.player.position.set(spawn.x, 1, spawn.z);
 
 initPlayer();
+initCar();
 initPickups();
 initUI();
 initMinimap();
@@ -52,7 +53,11 @@ function animate(now) {
   lastTime = now;
 
   if (state.started && !state.paused) {
-    updateMovement(dt);
+    if (state.inCar) {
+      updateCar(dt);
+    } else {
+      updateMovement(dt);
+    }
     state.playerIndoors = isPlayerIndoors();
     updateBullets(dt);
     updateEnemyBullets(dt);

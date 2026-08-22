@@ -2,15 +2,20 @@
 // Core THREE bootstrap and the single shared mutable game state object.
 // Every module imports `state` from here so they can read/write the same values.
 
-import * as THREE from 'three';
-import { PointerLockControls } from 'three/examples/jsm/controls/PointerLockControls.js';
-import { createHumanFigure } from './character.js';
+import * as THREE from "three";
+import { PointerLockControls } from "three/examples/jsm/controls/PointerLockControls.js";
+import { createHumanFigure } from "./character.js";
 
 // ---------------- Scene, Camera, Renderer ----------------
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(0x87CEEB); // Light blue sky
+scene.background = new THREE.Color(0x87ceeb); // Light blue sky
 
-const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 3000);
+const camera = new THREE.PerspectiveCamera(
+  75,
+  window.innerWidth / window.innerHeight,
+  0.1,
+  3000,
+);
 
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setSize(window.innerWidth, window.innerHeight);
@@ -43,32 +48,32 @@ scene.add(ambientLight);
 // ---------------- Controls ----------------
 export const controls = new PointerLockControls(camera, document.body);
 // Re-lock the pointer on click only while the game is running (not paused).
-document.addEventListener('click', () => {
+document.addEventListener("click", () => {
   if (!state.paused) controls.lock();
 });
 
 // ---------------- HUD: Life & Gold Displays ----------------
-const lifeDisplay = document.createElement('div');
-lifeDisplay.id = 'lifeDisplay';
-lifeDisplay.className = 'hud-pill';
+const lifeDisplay = document.createElement("div");
+lifeDisplay.id = "lifeDisplay";
+lifeDisplay.className = "hud-pill";
 lifeDisplay.innerHTML = `
   <span class="hud-icon">❤️</span>
   <div class="hud-bar"><div class="hud-bar-fill" id="lifeBarFill"></div></div>
   <span class="hud-value" id="lifeValue">10</span>
 `;
 document.body.appendChild(lifeDisplay);
-const lifeBarFill = lifeDisplay.querySelector('#lifeBarFill');
-const lifeValue = lifeDisplay.querySelector('#lifeValue');
+const lifeBarFill = lifeDisplay.querySelector("#lifeBarFill");
+const lifeValue = lifeDisplay.querySelector("#lifeValue");
 
-const goldDisplay = document.createElement('div');
-goldDisplay.id = 'goldDisplay';
-goldDisplay.className = 'hud-pill';
+const goldDisplay = document.createElement("div");
+goldDisplay.id = "goldDisplay";
+goldDisplay.className = "hud-pill";
 goldDisplay.innerHTML = `
   <span class="hud-icon">🪙</span>
   <span class="hud-value" id="goldValue">0<span class="hud-value-dim">/5</span></span>
 `;
 document.body.appendChild(goldDisplay);
-const goldValue = goldDisplay.querySelector('#goldValue');
+const goldValue = goldDisplay.querySelector("#goldValue");
 
 // ---------------- Shared game state ----------------
 export const state = {
@@ -87,7 +92,7 @@ export const state = {
   goldCount: 0,
 
   // Currently equipped gun.
-  currentGun: { name: 'default', damage: 1 },
+  currentGun: { name: "default", damage: 1 },
 
   // Collision boxes for the static world.
   treeBoxes: [],
@@ -96,6 +101,9 @@ export const state = {
 
   // Road rectangles (for the minimap) — { minX, maxX, minZ, maxZ }.
   roads: [],
+
+  // Ring-road highway around the world — { inner, outer } radii.
+  ringRoad: null,
 
   // Enterable building interiors (safe zones) + whether the player is inside.
   buildingInteriors: [],
@@ -131,7 +139,14 @@ export const state = {
 export function isPlayerIndoors() {
   const p = state.player.position;
   for (const b of state.buildingInteriors) {
-    if (p.x >= b.minX && p.x <= b.maxX && p.z >= b.minZ && p.z <= b.maxZ && p.y >= b.minY && p.y <= b.maxY) {
+    if (
+      p.x >= b.minX &&
+      p.x <= b.maxX &&
+      p.z >= b.minZ &&
+      p.z <= b.maxZ &&
+      p.y >= b.minY &&
+      p.y <= b.maxY
+    ) {
       return true;
     }
   }
@@ -143,9 +158,10 @@ export function updateLifeHud() {
   lifeValue.textContent = life;
   const pct = Math.min(100, Math.max(0, (life / 10) * 100));
   lifeBarFill.style.width = `${pct}%`;
-  if (pct <= 25) lifeBarFill.style.background = '#e74c3c';
-  else if (pct <= 50) lifeBarFill.style.background = '#f1c40f';
-  else lifeBarFill.style.background = 'linear-gradient(90deg, #2ecc71, #7bed9f)';
+  if (pct <= 25) lifeBarFill.style.background = "#e74c3c";
+  else if (pct <= 50) lifeBarFill.style.background = "#f1c40f";
+  else
+    lifeBarFill.style.background = "linear-gradient(90deg, #2ecc71, #7bed9f)";
 }
 
 export function updateGoldHud() {

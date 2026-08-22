@@ -4,7 +4,7 @@
 import * as THREE from "three";
 import { state } from "./state.js";
 import { createHumanFigure, makeBox } from "./character.js";
-import { findClearSpawnPosition } from "./world.js";
+import { findClearSpawnPosition, getGroundHeight } from "./world.js";
 import { shootEnemyBullet } from "./bullets.js";
 import { triggerGameOver } from "./ui.js";
 import { spawnPortal } from "./portal.js";
@@ -101,6 +101,11 @@ function updateBossEnemy(dt) {
   const enemyBoxAfterMove = enemyBox.clone().translate(moveVector);
   if (!checkObstaclesCollision(enemyBoxAfterMove)) {
     state.bossEnemy.mesh.position.add(moveVector);
+    state.bossEnemy.mesh.position.y =
+      getGroundHeight(
+        state.bossEnemy.mesh.position.x,
+        state.bossEnemy.mesh.position.z,
+      ) + 2;
   }
 
   // Face the player.
@@ -182,6 +187,8 @@ export function updateEnemies(dt) {
 
     if (canMove) {
       enemy.mesh.position.add(bestVector);
+      enemy.mesh.position.y =
+        getGroundHeight(enemy.mesh.position.x, enemy.mesh.position.z) + 1;
     }
 
     // Face the player.

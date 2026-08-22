@@ -21,6 +21,55 @@ function mulberry32(seed) {
   };
 }
 
+// ---------------- Hilly terrain ----------------
+// The city stays perfectly flat inside CITY_RADIUS so buildings, walls and
+// roads line up. Past R_FLAT the terrain rises into a ring of hills, and the
+// circular ring-road highway runs around the whole world on top of them.
+
+const CITY_RADIUS = 370; // city content is confined within this radius
+const R_FLAT = 380; // terrain is flat up to this radius
+const R_EDGE = 492; // terrain envelope completes at this radius
+const RING_INNER = 440; // ring-road inner radius
+const RING_OUTER = 476; // ring-road outer radius
+
+const hills = [];
+(function buildHills() {
+  const rand = mulberry32(0x5eed1234);
+  for (let i = 0; i < 16; i++) {
+    const angle = rand() * Math.PI * 2;
+    const radius = 400 + rand() * 88; // 400..488
+    hills.push({
+      x: Math.cos(angle) * radius,
+      z: Math.sin(angle) * radius,
+      r: 110 + rand() * 80, // 110..190
+      h: 14 + rand() * 22, // 14..36
+    });
+  }
+})();
+
+function smoothstep(a, b, x) {
+  const t = Math.min(1, Math.max(0, (x - a) / (b - a)));
+  return t * t * (3 - 2 * t);
+}
+
+// Ground surface height (Y) at world coordinates (x, z). Flat inside the city,
+// smooth hills + a gentle ring undulation around the outside.
+export function getGroundHeight(x, z) {
+  const r = Math.hypot(x, z);
+  if (r <= R_FLAT) return 0;
+
+  const theta = Math.atan2(z, x);
+  let h = 0;
+  for (const hill of hills) {
+    const d = Math.hypot(x - hill.x, z - hill.z) / hill.r;
+    if (d < 1) h += hill.h * 0.5 * (1 + Math.cos(Math.PI * d));
+  }
+  // Rolling undulation along the ring so the highway visibly climbs/descends.
+  h += 14 * Math.sin(theta * 3 + 1.7) + 7 * Math.sin(theta * 5 + 0.4);
+
+  return h * smoothstep(R_FLAT, R_EDGE, r);
+}
+
 // ---------------- Textures ----------------
 function generateGrassTexture() {
   const size = 1024;
@@ -493,8 +542,6 @@ function buildHollowInstances() {
 
 // ---------------- Road network ----------------
 function buildRoadNetwork() {
-  const half = state.groundSize / 2;
-
   // Hierarchy: arterial (widest), secondary, local streets.
   const verticals = [
     { x: -360, width: 18, type: "secondary" },
@@ -520,15 +567,15 @@ function buildRoadNetwork() {
     roads.push({
       minX: v.x - v.width / 2,
       maxX: v.x + v.width / 2,
-      minZ: -half,
-      maxZ: half,
+      minZ: -RING_INNER,
+      maxZ: RING_INNER,
       type: v.type,
     });
   }
   for (const h of horizontals) {
     roads.push({
-      minX: -half,
-      maxX: half,
+      minX: -RING_INNER,
+      maxX: RING_INNER,
       minZ: h.z - h.width / 2,
       maxZ: h.z + h.width / 2,
       type: h.type,
@@ -814,6 +861,10 @@ function generateCity(rand) {
   for (const block of blocks) {
     const cx = (block.x0 + block.x1) / 2;
     const cz = (block.z0 + block.z1) / 2;
+
+    // Leave the outer band empty for the hilly ring-road terrain.
+    if (Math.hypot(cx, cz) > CITY_RADIUS) continue;
+
     const district = districtFor(cx, cz);
 
     if (district === "park") {
@@ -839,35 +890,128 @@ function generateCity(rand) {
 }
 
 // ---------------- Visual meshes ----------------
-function addFlatPlane(minX, maxX, minZ, maxZ, y, color, shininess) {
+// A plane laid flat in the XZ plane whose vertices follow the terrain height
+// (plus a small offset to avoid z-fighting). Used for roads, lane markings
+// and the ring road.
+function addDisplacedPlane(
+  minX,
+  maxX,
+  minZ,
+  maxZ,
+  yOffset,
+  material,
+  segX,
+  segZ,
+) {
   const w = maxX - minX;
   const d = maxZ - minZ;
-  const geo = new THREE.PlaneGeometry(w, d);
-  const mat = new THREE.MeshPhongMaterial({ color, shininess });
-  const mesh = new THREE.Mesh(geo, mat);
+  const cx = (minX + maxX) / 2;
+  const cz = (minZ + maxZ) / 2;
+  const geo = new THREE.PlaneGeometry(w, d, segX, segZ);
+  const pos = geo.attributes.position;
+  for (let i = 0; i < pos.count; i++) {
+    const lx = pos.getX(i);
+    const ly = pos.getY(i);
+    pos.setZ(i, getGroundHeight(cx + lx, cz - ly) + yOffset);
+  }
+  pos.needsUpdate = true;
+  geo.computeVertexNormals();
+  const mesh = new THREE.Mesh(geo, material);
   mesh.rotation.x = -Math.PI / 2;
-  mesh.position.set((minX + maxX) / 2, y, (minZ + maxZ) / 2);
+  mesh.position.set(cx, 0, cz);
   mesh.receiveShadow = true;
   state.scene.add(mesh);
   return mesh;
 }
 
-function addCenterLine(rect, color, y) {
-  const w = rect.maxX - rect.minX;
-  const d = rect.maxZ - rect.minZ;
-  const vertical = w < d;
-  const geo = vertical
-    ? new THREE.PlaneGeometry(0.6, d)
-    : new THREE.PlaneGeometry(w, 0.6);
-  const mat = new THREE.MeshBasicMaterial({ color });
-  const mesh = new THREE.Mesh(geo, mat);
-  mesh.rotation.x = -Math.PI / 2;
-  mesh.position.set(
-    (rect.minX + rect.maxX) / 2,
-    y,
-    (rect.minZ + rect.maxZ) / 2,
+function addRoadSurface(road) {
+  const vertical = road.maxX - road.minX < road.maxZ - road.minZ;
+  const segX = vertical
+    ? 1
+    : Math.max(1, Math.ceil((road.maxX - road.minX) / 2));
+  const segZ = vertical
+    ? Math.max(1, Math.ceil((road.maxZ - road.minZ) / 2))
+    : 1;
+  addDisplacedPlane(
+    road.minX,
+    road.maxX,
+    road.minZ,
+    road.maxZ,
+    vertical ? 0.011 : 0.01,
+    new THREE.MeshPhongMaterial({ color: 0x2c2f33, shininess: 5 }),
+    segX,
+    segZ,
   );
+}
+
+function addCenterLine(road, color, yOffset) {
+  const w = road.maxX - road.minX;
+  const d = road.maxZ - road.minZ;
+  const vertical = w < d;
+  let minX, maxX, minZ, maxZ;
+  if (vertical) {
+    const cx = (road.minX + road.maxX) / 2;
+    minX = cx - 0.3;
+    maxX = cx + 0.3;
+    minZ = road.minZ;
+    maxZ = road.maxZ;
+  } else {
+    const cz = (road.minZ + road.maxZ) / 2;
+    minZ = cz - 0.3;
+    maxZ = cz + 0.3;
+    minX = road.minX;
+    maxX = road.maxX;
+  }
+  const segX = vertical ? 1 : Math.max(1, Math.ceil(w / 2));
+  const segZ = vertical ? Math.max(1, Math.ceil(d / 2)) : 1;
+  addDisplacedPlane(
+    minX,
+    maxX,
+    minZ,
+    maxZ,
+    yOffset,
+    new THREE.MeshBasicMaterial({ color }),
+    segX,
+    segZ,
+  );
+}
+
+// Circular ring-road highway around the whole world, following the hills.
+function addRingRoad() {
+  const geo = new THREE.RingGeometry(RING_INNER, RING_OUTER, 360, 16);
+  const pos = geo.attributes.position;
+  for (let i = 0; i < pos.count; i++) {
+    const lx = pos.getX(i);
+    const ly = pos.getY(i);
+    pos.setZ(i, getGroundHeight(lx, -ly) + 0.02);
+  }
+  pos.needsUpdate = true;
+  geo.computeVertexNormals();
+  const mesh = new THREE.Mesh(
+    geo,
+    new THREE.MeshPhongMaterial({ color: 0x2c2f33, shininess: 5 }),
+  );
+  mesh.rotation.x = -Math.PI / 2;
+  mesh.receiveShadow = true;
   state.scene.add(mesh);
+
+  // Centerline marking.
+  const mid = (RING_INNER + RING_OUTER) / 2;
+  const lineGeo = new THREE.RingGeometry(mid - 0.4, mid + 0.4, 360, 1);
+  const lpos = lineGeo.attributes.position;
+  for (let i = 0; i < lpos.count; i++) {
+    const lx = lpos.getX(i);
+    const ly = lpos.getY(i);
+    lpos.setZ(i, getGroundHeight(lx, -ly) + 0.06);
+  }
+  lpos.needsUpdate = true;
+  lineGeo.computeVertexNormals();
+  const lineMesh = new THREE.Mesh(
+    lineGeo,
+    new THREE.MeshBasicMaterial({ color: 0xffd75e }),
+  );
+  lineMesh.rotation.x = -Math.PI / 2;
+  state.scene.add(lineMesh);
 }
 
 function buildTreeInstances(positions) {
@@ -906,42 +1050,6 @@ function buildTreeInstances(positions) {
   state.scene.add(foliage);
 }
 
-// Perimeter boundary wall around the map edge so the city feels enclosed.
-function addPerimeterWalls() {
-  const half = state.groundSize / 2;
-  const thickness = 2;
-  const height = 6;
-  const inset = half - 1; // wall center, just inside the ground edge
-  const length = half * 2 + thickness * 2;
-  const material = new THREE.MeshPhongMaterial({
-    color: 0x9aa0a6,
-    shininess: 5,
-  });
-
-  const walls = [
-    { w: length, d: thickness, x: 0, z: -inset }, // south
-    { w: length, d: thickness, x: 0, z: inset }, // north
-    { w: thickness, d: length, x: -inset, z: 0 }, // west
-    { w: thickness, d: length, x: inset, z: 0 }, // east
-  ];
-
-  for (const w of walls) {
-    const geo = new THREE.BoxGeometry(w.w, height, w.d);
-    const mesh = new THREE.Mesh(geo, material);
-    mesh.castShadow = true;
-    mesh.receiveShadow = true;
-    mesh.position.set(w.x, height / 2, w.z);
-    state.scene.add(mesh);
-
-    state.wallBoxes.push(
-      new THREE.Box3(
-        new THREE.Vector3(w.x - w.w / 2, 0, w.z - w.d / 2),
-        new THREE.Vector3(w.x + w.w / 2, height, w.z + w.d / 2),
-      ),
-    );
-  }
-}
-
 // ---------------- World initialization ----------------
 export function initWorld() {
   const groundSize = state.groundSize;
@@ -958,7 +1066,12 @@ export function initWorld() {
   hollowWindows.length = 0;
 
   // Base ground (grass — visible in parks and gaps).
-  const groundGeometry = new THREE.PlaneGeometry(groundSize, groundSize);
+  const groundGeometry = new THREE.PlaneGeometry(
+    groundSize,
+    groundSize,
+    240,
+    240,
+  );
   const grassTextureCanvas = generateGrassTexture();
   const grassTexture = new THREE.CanvasTexture(grassTextureCanvas);
   grassTexture.wrapS = THREE.RepeatWrapping;
@@ -977,25 +1090,27 @@ export function initWorld() {
   const ground = new THREE.Mesh(groundGeometry, groundMaterial);
   ground.rotation.x = -Math.PI / 2;
   ground.receiveShadow = true;
+
+  // Displace the terrain: flat in the city center, rising into a hilly ring.
+  {
+    const pos = groundGeometry.attributes.position;
+    for (let i = 0; i < pos.count; i++) {
+      const lx = pos.getX(i);
+      const ly = pos.getY(i);
+      pos.setZ(i, getGroundHeight(lx, -ly));
+    }
+    pos.needsUpdate = true;
+    groundGeometry.computeVertexNormals();
+  }
   state.scene.add(ground);
 
   // Generate the city layout (buildings + trees + collision boxes + road data).
   const rand = mulberry32(CITY_SEED);
   const { roads, treePositions } = generateCity(rand);
 
-  // Road surfaces (asphalt). Slightly offset by orientation to avoid
-  // z-fighting where roads cross at intersections.
+  // Road surfaces (asphalt) that climb the hills up to the ring road.
   for (const road of roads) {
-    const vertical = road.maxX - road.minX < road.maxZ - road.minZ;
-    addFlatPlane(
-      road.minX,
-      road.maxX,
-      road.minZ,
-      road.maxZ,
-      vertical ? 0.011 : 0.01,
-      0x2c2f33,
-      5,
-    );
+    addRoadSurface(road);
   }
 
   // Lane markings.
@@ -1010,15 +1125,17 @@ export function initWorld() {
   // Hollow buildings (instanced walls/floors/roofs).
   buildHollowInstances();
 
-  // Perimeter walls (city boundary).
-  addPerimeterWalls();
+  // Hilly ring-road highway around the whole world (replaces the old
+  // perimeter walls).
+  addRingRoad();
+  state.ringRoad = { inner: RING_INNER, outer: RING_OUTER };
 }
 
 // Returns a ground position (x, z) that is clear of all static obstacles
 // (buildings, trees, walls), so entities never spawn trapped inside geometry.
 export function findClearSpawnPosition() {
   const half = 1.0; // half footprint (0.5) + clearance margin
-  const range = state.groundSize / 2 - 20;
+  const range = CITY_RADIUS - 10; // stay in the flat city area
 
   const isClear = (x, z) => {
     const box = new THREE.Box3(

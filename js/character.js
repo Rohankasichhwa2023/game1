@@ -18,29 +18,47 @@ export function createHumanFigure({
   const pants = new THREE.MeshPhongMaterial({ color: pantsColor });
   const skin = new THREE.MeshPhongMaterial({ color: skinColor });
 
-  const add = (geometry, material, x, y, z) => {
+  const add = (geometry, material, x, y, z, parent) => {
     const mesh = new THREE.Mesh(geometry, material);
     mesh.position.set(x, y, z);
     mesh.castShadow = true;
     mesh.receiveShadow = true;
-    group.add(mesh);
+    (parent || group).add(mesh);
     return mesh;
   };
 
-  // Legs (feet at y = -1).
-  add(new THREE.BoxGeometry(0.26, 0.9, 0.26), pants, -0.15, -0.55, 0);
-  add(new THREE.BoxGeometry(0.26, 0.9, 0.26), pants, 0.15, -0.55, 0);
+  // Legs — each is a group pivoted at the hip (feet at y = -1 when idle) so
+  // the walk-cycle animation can swing them like a real hinge joint.
+  const LEG_LEN = 0.9;
+  const HIP_Y = -0.1;
+  const hipL = new THREE.Group();
+  hipL.position.set(-0.15, HIP_Y, 0);
+  group.add(hipL);
+  add(new THREE.BoxGeometry(0.26, LEG_LEN, 0.26), pants, 0, -LEG_LEN / 2, 0, hipL);
+
+  const hipR = new THREE.Group();
+  hipR.position.set(0.15, HIP_Y, 0);
+  group.add(hipR);
+  add(new THREE.BoxGeometry(0.26, LEG_LEN, 0.26), pants, 0, -LEG_LEN / 2, 0, hipR);
 
   // Torso (hips ~ -0.1, shoulders ~ +0.65).
   add(new THREE.BoxGeometry(0.7, 0.75, 0.4), shirt, 0, 0.275, 0);
 
-  // Arms hanging at the sides.
-  add(new THREE.BoxGeometry(0.16, 0.7, 0.16), shirt, -0.46, 0.2, 0);
-  add(new THREE.BoxGeometry(0.16, 0.7, 0.16), shirt, 0.46, 0.2, 0);
+  // Arms — each pivoted at the shoulder so they can swing opposite the
+  // same-side leg during the walk cycle. Hands ride along with the arm.
+  const ARM_LEN = 0.7;
+  const SHOULDER_Y = 0.55;
+  const shoulderL = new THREE.Group();
+  shoulderL.position.set(-0.46, SHOULDER_Y, 0);
+  group.add(shoulderL);
+  add(new THREE.BoxGeometry(0.16, ARM_LEN, 0.16), shirt, 0, -ARM_LEN / 2, 0, shoulderL);
+  add(new THREE.BoxGeometry(0.14, 0.12, 0.14), skin, 0, -ARM_LEN - 0.07, 0, shoulderL);
 
-  // Hands.
-  add(new THREE.BoxGeometry(0.14, 0.12, 0.14), skin, -0.46, -0.22, 0);
-  add(new THREE.BoxGeometry(0.14, 0.12, 0.14), skin, 0.46, -0.22, 0);
+  const shoulderR = new THREE.Group();
+  shoulderR.position.set(0.46, SHOULDER_Y, 0);
+  group.add(shoulderR);
+  add(new THREE.BoxGeometry(0.16, ARM_LEN, 0.16), shirt, 0, -ARM_LEN / 2, 0, shoulderR);
+  add(new THREE.BoxGeometry(0.14, 0.12, 0.14), skin, 0, -ARM_LEN - 0.07, 0, shoulderR);
 
   // Head.
   add(new THREE.SphereGeometry(0.24, 12, 10), skin, 0, 0.88, 0);
@@ -56,6 +74,9 @@ export function createHumanFigure({
   group.add(rightEye);
 
   group.scale.setScalar(scale);
+
+  // Hinge pivots exposed so callers can drive a walk-cycle animation.
+  group.userData.limbs = { hipL, hipR, shoulderL, shoulderR };
 
   return group;
 }

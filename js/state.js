@@ -122,8 +122,8 @@ export const state = {
   started: false,
   paused: false,
 
-  // Camera mode: false = first person (default), true = third person.
-  thirdPerson: false,
+  // Camera mode: false = first person, true = third person (default).
+  thirdPerson: true,
 
   // Boss / portal lifecycle flags.
   bossSpawned: false,

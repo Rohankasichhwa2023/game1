@@ -22,6 +22,33 @@ const keys = {
 };
 let isJumping = false;
 const velocity = new THREE.Vector3();
+
+// ─── Walk-cycle animation (swinging legs/arms, GTA-style) ───────────────────
+const WALK_PHASE_RATE = 0.58; // radians of stride phase per unit distance walked
+const WALK_BLEND_RATE = 0.25; // how fast the swing eases in/out of idle stance
+const LEG_SWING_MAX = 0.6; // radians
+const ARM_SWING_MAX = 0.5; // radians
+let walkPhase = 0;
+let walkBlend = 0;
+
+function animateWalk(dt, horizSpeed) {
+  const limbs = state.player.userData.limbs;
+  if (!limbs) return;
+  const moving = horizSpeed > 1e-4;
+  const targetBlend = moving ? 1 : 0;
+  walkBlend += (targetBlend - walkBlend) * Math.min(1, WALK_BLEND_RATE * dt);
+  if (moving) walkPhase += horizSpeed * WALK_PHASE_RATE;
+
+  const swing = Math.sin(walkPhase);
+  const legAngle = swing * LEG_SWING_MAX * walkBlend;
+  const armAngle = swing * ARM_SWING_MAX * walkBlend;
+
+  // Legs and opposite-side arms swing together, like a real gait.
+  limbs.hipL.rotation.x = legAngle;
+  limbs.hipR.rotation.x = -legAngle;
+  limbs.shoulderL.rotation.x = -armAngle;
+  limbs.shoulderR.rotation.x = armAngle;
+}
 const directionVec = new THREE.Vector3();
 const upVector = new THREE.Vector3(0, 1, 0);
 const rightVector = new THREE.Vector3();
@@ -51,6 +78,13 @@ const CAR_REVERSE_MAX = 0.42;
 const CAR_TURN_RATE = 0.052; // increased from 0.032
 const MAX_STEER_ANGLE = Math.PI / 4.5; // ~40° — wider visual lock
 
+// Handbrake / drift
+const HANDBRAKE_DECEL = 0.05; // speed scrubbed per frame while the handbrake is held
+const DRIFT_TURN_BOOST = 1.55; // looser rear end rotates the chassis faster while drifting
+const GRIP_RATE = 0.9; // how fast travel direction snaps to chassis heading (normal grip)
+const DRIFT_GRIP_RATE = 0.07; // how fast travel direction catches up while drifting (low grip = slide)
+const DRIFT_MIN_SPEED = 0.15; // minimum speed before a handbrake turn counts as a drift
+
 // Suspension
 const SUSP_TRAVEL = 0.22;
 const SUSP_STIFFNESS = 18;
@@ -71,6 +105,8 @@ function initCarPhysics(car) {
   car.userData.bodyRoll = 0;
   car.userData.bodyPitch = 0;
   car.userData.prevVelocity = 0;
+  car.userData.moveHeading = 0; // actual travel direction (can lag rotation.y while drifting)
+  car.userData.isDrifting = false;
 }
 
 let carLookYawOffset = 0;
@@ -566,6 +602,7 @@ function enterCar(car) {
   state.player.visible = false;
   carLookYawOffset = 0;
   car.userData.velocity = 0;
+  car.userData.moveHeading = car.rotation.y;
 }
 function exitCar() {
   const car = state.car;
@@ -686,9 +723,18 @@ export function updateCar(dt) {
   if (keys["KeyA"] || keys["ArrowLeft"]) turnInput = 1;
   if (keys["KeyD"] || keys["ArrowRight"]) turnInput = -1;
 
+  // Space = handbrake. Pulling it while turning at speed breaks rear grip:
+  // the chassis rotates faster than the car actually travels, so the travel
+  // direction (moveHeading) lags behind rotation.y and the car slides — a
+  // drift. Releasing it (or straightening out) lets grip bite again.
+  const handbrake = keys["Space"];
+  const isDrifting = handbrake && absVel > DRIFT_MIN_SPEED && turnInput !== 0;
+  ud.isDrifting = isDrifting;
+
+  const turnRateMult = isDrifting ? DRIFT_TURN_BOOST : 1;
   if (absVel > 0.01) {
     const dir = carVelocity >= 0 ? 1 : -1;
-    car.rotation.y += turnInput * CAR_TURN_RATE * turnScale * dt * dir;
+    car.rotation.y += turnInput * CAR_TURN_RATE * turnScale * turnRateMult * dt * dir;
   }
 
   // Visual steer angle — snappier tracking
@@ -696,7 +742,22 @@ export function updateCar(dt) {
   ud.steerAngle += (targetSteer - ud.steerAngle) * 0.22 * dt;
 
   // ── Acceleration / braking ────────────────────────────────────────────────
-  if (keys["KeyW"] || keys["ArrowUp"]) {
+  if (handbrake) {
+    // Rear wheels lock and scrub speed. Holding the throttle at the same
+    // time keeps some power down so a slide can be sustained (power-slide).
+    const scrub = HANDBRAKE_DECEL * dt;
+    if (keys["KeyW"] || keys["ArrowUp"]) {
+      carVelocity = Math.min(
+        carVelocity + CAR_ACCEL * 0.4 * dt,
+        CAR_MAX_SPEED * 0.85,
+      );
+      carVelocity -= scrub * 0.35;
+    } else if (carVelocity > 0) {
+      carVelocity = Math.max(0, carVelocity - scrub);
+    } else {
+      carVelocity = Math.min(0, carVelocity + scrub);
+    }
+  } else if (keys["KeyW"] || keys["ArrowUp"]) {
     carVelocity = Math.min(carVelocity + CAR_ACCEL * dt, CAR_MAX_SPEED);
   } else if (keys["KeyS"] || keys["ArrowDown"]) {
     if (carVelocity > 0.05) {
@@ -713,9 +774,18 @@ export function updateCar(dt) {
     else carVelocity = Math.min(0, carVelocity + friction);
   }
 
+  // ── Drift slip — travel direction chases the chassis heading at a rate
+  // set by how much grip the rear wheels currently have. Full grip snaps it
+  // in line with rotation.y (old behavior); low grip lets an angle build up
+  // between where the car points and where it's actually sliding.
+  const gripRate = isDrifting ? DRIFT_GRIP_RATE : GRIP_RATE;
+  let headingDiff = car.rotation.y - ud.moveHeading;
+  headingDiff = Math.atan2(Math.sin(headingDiff), Math.cos(headingDiff));
+  ud.moveHeading += headingDiff * Math.min(1, gripRate * dt);
+
   // ── Movement & slope ──────────────────────────────────────────────────────
   if (Math.abs(carVelocity) > 0.001) {
-    carForwardVec.set(Math.sin(car.rotation.y), 0, Math.cos(car.rotation.y));
+    carForwardVec.set(Math.sin(ud.moveHeading), 0, Math.cos(ud.moveHeading));
     const s = 1.5;
     const slopeH =
       (getGroundHeight(
@@ -745,14 +815,20 @@ export function updateCar(dt) {
   car.position.z = Math.max(-boundary, Math.min(boundary, car.position.z));
 
   // ── Terrain following ─────────────────────────────────────────────────────
+  // Sample all four wheel/contact areas. The car body uses these samples to
+  // follow hills while maintaining a hard minimum clearance above the ground.
   const fy = car.rotation.y;
-  const fxA = Math.sin(fy),
-    fzA = Math.cos(fy);
-  const rxA = Math.cos(fy),
-    rzA = -Math.sin(fy);
-  const L = 1.42,
-    W = 0.95,
-    CLEAR = 0.055;
+  const fxA = Math.sin(fy);
+  const fzA = Math.cos(fy);
+  const rxA = Math.cos(fy);
+  const rzA = -Math.sin(fy);
+
+  const L = 1.42;
+  const W = 0.95;
+
+  // Extra vertical safety margin so the chassis does not visually clip into
+  // steep terrain after the car is rotated to match the slope.
+  const CLEAR = 0.15;
 
   const hFL = getGroundHeight(
     car.position.x + fxA * L - rxA * W,
@@ -771,14 +847,13 @@ export function updateCar(dt) {
     car.position.z - fzA * L + rzA * W,
   );
 
-  const frontH = (hFL + hFR) / 2,
-    rearH = (hRL + hRR) / 2;
-  const leftH = (hFL + hRL) / 2,
-    rightH = (hFR + hRR) / 2;
+  const frontH = (hFL + hFR) / 2;
+  const rearH = (hRL + hRR) / 2;
+  const leftH = (hFL + hRL) / 2;
+  const rightH = (hFR + hRR) / 2;
 
-  // Use the HIGHEST of all four corners so the body never clips into the slope.
-  // Averaging or using center-point alone undershoots on steep terrain because
-  // the tilted chassis geometry reaches lower than the sampled center height.
+  // Put the car origin above the highest sampled terrain point. This is a
+  // conservative placement that prevents the wheels/chassis from sinking.
   const highestCorner = Math.max(hFL, hFR, hRL, hRR);
   car.position.y = highestCorner + CLEAR;
 
@@ -803,7 +878,7 @@ export function updateCar(dt) {
   }
 
   // ── Body roll & pitch ─────────────────────────────────────────────────────
-  const targetRoll = -turnInput * speedRatio * 0.055;
+  const targetRoll = -turnInput * speedRatio * (isDrifting ? 0.1 : 0.055);
   const accelDelta = carVelocity - ud.prevVelocity;
   const targetPitch = -accelDelta * 12;
   ud.prevVelocity = carVelocity;
@@ -812,12 +887,17 @@ export function updateCar(dt) {
   ud.bodyPitch += (targetPitch - ud.bodyPitch) * 0.08 * dt;
   ud.bodyPitch = Math.max(-0.08, Math.min(0.08, ud.bodyPitch));
 
-  // Add cosmetic lean on top of terrain angles (assignment already set above).
-  // Must be += because terrain pitch/roll were already written two lines up.
-  // To prevent double-accumulation we store the PREVIOUS cosmetic offsets and
-  // remove them before re-adding the new ones.
-  car.rotation.z = Math.atan2(rightH - leftH, 2 * W) + ud.bodyRoll;
-  car.rotation.x = Math.atan2(frontH - rearH, 2 * L) + ud.bodyPitch;
+  // ── Terrain roll & pitch ─────────────────────────────────────────────────
+  // Three.js uses +Z as the car's forward direction. Positive X rotation
+  // moves the +Z/front side DOWN, so terrain pitch must be NEGATED.
+  //
+  // Uphill:  front terrain is higher -> front of car rises.
+  // Downhill: rear terrain is higher -> rear of car rises.
+  const terrainRoll = Math.atan2(rightH - leftH, 2 * W);
+  const terrainPitch = -Math.atan2(frontH - rearH, 2 * L);
+
+  car.rotation.z = terrainRoll + ud.bodyRoll;
+  car.rotation.x = terrainPitch + ud.bodyPitch;
 
   // ── Steering visual ───────────────────────────────────────────────────────
   ud.steerPivotL.rotation.y = ud.steerAngle;
@@ -825,10 +905,15 @@ export function updateCar(dt) {
 
   // ── Wheel spin ────────────────────────────────────────────────────────────
   const spinDelta = (carVelocity * dt) / 0.42;
+  // Rear wheels lose traction while drifting, so they spin faster than the
+  // ground speed alone would produce.
+  const rearSpinDelta = isDrifting
+    ? spinDelta + Math.sign(carVelocity || 1) * 0.3 * dt
+    : spinDelta;
   ud.wheelGroupFL.rotation.x += spinDelta;
   ud.wheelGroupFR.rotation.x += spinDelta;
-  ud.wheelGroupRL.rotation.x += spinDelta;
-  ud.wheelGroupRR.rotation.x += spinDelta;
+  ud.wheelGroupRL.rotation.x += rearSpinDelta;
+  ud.wheelGroupRR.rotation.x += rearSpinDelta;
 
   // Save velocity back
   ud.velocity = carVelocity;
@@ -849,17 +934,22 @@ export function updateCamera() {
     const idealZ = state.car.position.z - carForwardVec.z * 8;
     const idealY = state.car.position.y + 3;
 
-    // Clamp camera Y so it never goes below the terrain at the camera's XZ.
-    const groundAtCam = getGroundHeight(idealX, idealZ) + 0.5;
+    // Clamp camera Y so it NEVER goes below the terrain. Use a larger
+    // clearance because the camera can sit behind the car on steep hills.
+    const CAMERA_GROUND_CLEARANCE = 1.0;
+    const groundAtCam =
+      getGroundHeight(idealX, idealZ) + CAMERA_GROUND_CLEARANCE;
     const camY = Math.max(idealY, groundAtCam);
 
     state.camera.position.set(idealX, camY, idealZ);
 
-    // LookAt target: car center raised by 1 unit — always above ground.
-    const lookY = Math.max(
-      state.car.position.y + 1,
-      getGroundHeight(state.car.position.x, state.car.position.z) + 0.5,
-    );
+    // Keep the look-at target above the terrain as well.
+    const cameraLookClearance = 0.8;
+    const lookGroundY =
+      getGroundHeight(state.car.position.x, state.car.position.z) +
+      cameraLookClearance;
+    const lookY = Math.max(state.car.position.y + 1, lookGroundY);
+
     state.camera.lookAt(state.car.position.x, lookY, state.car.position.z);
     return;
   }
@@ -868,10 +958,21 @@ export function updateCamera() {
     cameraForward.y = 0;
     if (cameraForward.lengthSq() < 1e-6) cameraForward.set(0, 0, -1);
     cameraForward.normalize();
-    state.camera.position
-      .copy(state.player.position)
-      .add(cameraUpOffset.set(0, thirdPersonHeight, 0))
-      .addScaledVector(cameraForward, -thirdPersonDistance);
+
+    const idealThirdX =
+      state.player.position.x - cameraForward.x * thirdPersonDistance;
+    const idealThirdZ =
+      state.player.position.z - cameraForward.z * thirdPersonDistance;
+    const idealThirdY = state.player.position.y + thirdPersonHeight;
+
+    // Hard terrain floor for third-person camera too.
+    const thirdPersonGroundClearance = 1.0;
+    const thirdPersonGroundY =
+      getGroundHeight(idealThirdX, idealThirdZ) + thirdPersonGroundClearance;
+
+    const safeThirdY = Math.max(idealThirdY, thirdPersonGroundY);
+
+    state.camera.position.set(idealThirdX, safeThirdY, idealThirdZ);
   } else {
     state.camera.position.set(
       state.player.position.x,
@@ -1069,6 +1170,8 @@ export function updateMovement(dt) {
     -boundary,
     Math.min(boundary, state.player.position.z),
   );
+
+  animateWalk(dt, canMove ? horiz : 0);
 }
 
 // ─── Input listeners & initial camera ─────────────────────────────────────────

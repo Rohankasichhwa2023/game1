@@ -75,7 +75,7 @@ function checkObstaclesCollision(box) {
 }
 
 export function initEnemies() {
-  for (let i = 0; i < 6; i++) {
+  for (let i = 0; i < 1; i++) {
     const spawn = findClearSpawnPosition();
     state.enemies.push(createEnemy(spawn.x, spawn.z));
   }

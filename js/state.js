@@ -32,6 +32,18 @@ const player = createHumanFigure({
 player.position.y = 1;
 scene.add(player);
 
+// Knockback / ragdoll state — driven by npc.js when a car runs the player
+// over, and respected by player.js so normal movement can't fight the throw.
+// It lives in shared state (not npc.js) so both modules can read/write the
+// same object without a circular import between npc.js and player.js.
+export const playerKnockback = {
+  active: false,
+  velocityX: 0,
+  velocityY: 0,
+  velocityZ: 0,
+  time: 0,
+};
+
 // ---------------- Sun & Ambient Light ----------------
 const sun = new THREE.DirectionalLight(0xffffff, 1);
 sun.position.set(100, 200, 100);
@@ -109,7 +121,10 @@ export const state = {
   buildingInteriors: [],
   playerIndoors: false,
 
-  // Drivable car.
+  // Drivable cars — every enterable car (the player's originals plus any
+  // stolen from NPC drivers) lives in this one list. `car` is whichever one
+  // is currently being driven.
+  cars: [],
   car: null,
   inCar: false,
 
@@ -117,6 +132,10 @@ export const state = {
   enemies: [],
   bullets: [],
   gameOver: false,
+
+  // Timestamp (Date.now()) of the player's last fired shot — nearby NPCs
+  // watch this to know when to react to gunfire.
+  lastShotAt: 0,
 
   // Flow-control flags.
   started: false,

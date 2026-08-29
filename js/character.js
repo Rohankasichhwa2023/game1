@@ -81,6 +81,42 @@ export function createHumanFigure({
   return group;
 }
 
+// ─── Shared walk-cycle animation ──────────────────────────────────────────
+// Drives the hip/shoulder hinges exposed on `group.userData.limbs` (see
+// createHumanFigure above) into a swinging gait. Cadence is constant
+// (independent of how fast the figure is actually translating) so it looks
+// right whether it's driving the player, a fast enemy, or a slow-strolling
+// NPC — only whether it's `moving` matters. Per-figure phase/blend state is
+// kept on `group.userData.walkState` so any number of figures can share
+// this one function.
+const WALK_PHASE_RATE = 0.175; // radians of stride phase per frame (~60fps) while moving
+const WALK_BLEND_RATE = 0.25; // how fast the swing eases in/out of idle stance
+const LEG_SWING_MAX = 0.6; // radians
+const ARM_SWING_MAX = 0.5; // radians
+
+export function updateWalkCycle(group, dt, moving) {
+  const limbs = group.userData.limbs;
+  if (!limbs) return;
+  let ws = group.userData.walkState;
+  if (!ws) {
+    ws = { phase: 0, blend: 0 };
+    group.userData.walkState = ws;
+  }
+  const targetBlend = moving ? 1 : 0;
+  ws.blend += (targetBlend - ws.blend) * Math.min(1, WALK_BLEND_RATE * dt);
+  if (moving) ws.phase += WALK_PHASE_RATE * dt;
+
+  const swing = Math.sin(ws.phase);
+  const legAngle = swing * LEG_SWING_MAX * ws.blend;
+  const armAngle = swing * ARM_SWING_MAX * ws.blend;
+
+  // Legs and opposite-side arms swing together, like a real gait.
+  limbs.hipL.rotation.x = legAngle;
+  limbs.hipR.rotation.x = -legAngle;
+  limbs.shoulderL.rotation.x = -armAngle;
+  limbs.shoulderR.rotation.x = armAngle;
+}
+
 // Axis-aligned collision box centered on `position`. Using an explicit box
 // (rather than the visual mesh's bounding box) keeps hit detection stable
 // regardless of how a character is rotated.

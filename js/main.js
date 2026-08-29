@@ -2,9 +2,10 @@
 // Entry point: wires up all modules, bootstraps the world, and runs the game loop.
 
 import { state, updateGoldHud, isPlayerIndoors } from "./state.js";
-import { initWorld, findClearSpawnPosition } from "./world.js";
+import { initWorld, findClearSpawnPosition, updateEnvironment } from "./world.js";
 import { initEnemies, updateEnemies } from "./enemies.js";
 import { initPlayer, updateMovement, updateCamera, initCar, updateCar } from "./player.js";
+import { initNpcs, updateNpcs } from "./npc.js";
 import { updateBullets, updateEnemyBullets } from "./bullets.js";
 import {
   initPickups,
@@ -29,6 +30,7 @@ document.addEventListener("DOMContentLoaded", () => {
 // Bootstrap (order matters: world and enemies first, then things that use the player).
 initWorld();
 initEnemies();
+initNpcs();
 
 // Place the player on clear ground so they never spawn inside a building/tree/wall.
 const spawn = findClearSpawnPosition();
@@ -67,6 +69,8 @@ function animate(now) {
     updateGunPickups();
     updatePortalCollision();
     animatePortal(dt);
+    updateNpcs(dt);
+    updateEnvironment(dt);
     updateMinimap();
     updateCamera();
   }

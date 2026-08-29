@@ -2,8 +2,8 @@
 // Movement, jumping, player shooting, and multi-car system.
 
 import * as THREE from "three";
-import { state } from "./state.js";
-import { makeBox } from "./character.js";
+import { state, playerKnockback } from "./state.js";
+import { makeBox, updateWalkCycle } from "./character.js";
 import { getBullet } from "./bullets.js";
 import { triggerGameOver } from "./ui.js";
 import { getGroundHeight } from "./world.js";
@@ -22,33 +22,6 @@ const keys = {
 };
 let isJumping = false;
 const velocity = new THREE.Vector3();
-
-// ─── Walk-cycle animation (swinging legs/arms, GTA-style) ───────────────────
-const WALK_PHASE_RATE = 0.58; // radians of stride phase per unit distance walked
-const WALK_BLEND_RATE = 0.25; // how fast the swing eases in/out of idle stance
-const LEG_SWING_MAX = 0.6; // radians
-const ARM_SWING_MAX = 0.5; // radians
-let walkPhase = 0;
-let walkBlend = 0;
-
-function animateWalk(dt, horizSpeed) {
-  const limbs = state.player.userData.limbs;
-  if (!limbs) return;
-  const moving = horizSpeed > 1e-4;
-  const targetBlend = moving ? 1 : 0;
-  walkBlend += (targetBlend - walkBlend) * Math.min(1, WALK_BLEND_RATE * dt);
-  if (moving) walkPhase += horizSpeed * WALK_PHASE_RATE;
-
-  const swing = Math.sin(walkPhase);
-  const legAngle = swing * LEG_SWING_MAX * walkBlend;
-  const armAngle = swing * ARM_SWING_MAX * walkBlend;
-
-  // Legs and opposite-side arms swing together, like a real gait.
-  limbs.hipL.rotation.x = legAngle;
-  limbs.hipR.rotation.x = -legAngle;
-  limbs.shoulderL.rotation.x = -armAngle;
-  limbs.shoulderR.rotation.x = armAngle;
-}
 const directionVec = new THREE.Vector3();
 const upVector = new THREE.Vector3(0, 1, 0);
 const rightVector = new THREE.Vector3();
@@ -115,7 +88,7 @@ const carForwardVec = new THREE.Vector3();
 // ─── Five car style definitions ───────────────────────────────────────────────
 // Each entry: { name, paint, dark, fender, hubColor, style }
 // style: 'sedan' | 'muscle' | 'suv' | 'sports' | 'pickup'
-const CAR_STYLES = [
+export const CAR_STYLES = [
   // 0 — Classic Sedan (red, the original)
   {
     name: "Sedan",
@@ -265,7 +238,7 @@ function attachWheels(group, hubColor, frontZ, rearZ, trackW, tyreR) {
 }
 
 // ─── createCarByStyle ────────────────────────────────────────────────────────
-function createCarByStyle(x, z, styleIdx) {
+export function createCarByStyle(x, z, styleIdx) {
   const def = CAR_STYLES[styleIdx % CAR_STYLES.length];
   const group = new THREE.Group();
 
@@ -551,6 +524,14 @@ function carOverlapWithAabb(carPos, yaw, aabb, shrink = 0) {
 function carIntersectsAabb(carPos, yaw, aabb) {
   return carOverlapWithAabb(carPos, yaw, aabb, 0) !== null;
 }
+
+// Does this car's footprint overlap an arbitrary AABB (e.g. the player's
+// collision box)? Used by npc.js to detect an NPC car running the player
+// over, the same SAT test runOverEnemies below already uses for the
+// player's own car vs. enemies.
+export function carHitsBox(car, box) {
+  return carIntersectsAabb(car.position, car.rotation.y, box);
+}
 function carCollides(position, yaw, shrink = 0) {
   for (const t of state.treeBoxes)
     if (carOverlapWithAabb(position, yaw, t, shrink)) return true;
@@ -573,6 +554,72 @@ function resolveCarOverlaps(car) {
     car.position.z += worst.nz * (worst.depth + 0.02);
   }
 }
+// Same SAT test as carOverlapWithAabb, but against another car's oriented
+// footprint instead of a static AABB (both cars share the same rectangle).
+function carOverlapWithCar(posA, yawA, posB, yawB, shrink = 0) {
+  const cosA = Math.cos(yawA),
+    sinA = Math.sin(yawA);
+  const cosB = Math.cos(yawB),
+    sinB = Math.sin(yawB);
+  const axisAx = { x: cosA, z: sinA };
+  const axisAz = { x: -sinA, z: cosA };
+  const axisBx = { x: cosB, z: sinB };
+  const axisBz = { x: -sinB, z: cosB };
+  const axes = [axisAx, axisAz, axisBx, axisBz];
+
+  const hw = carHalfWidth - shrink,
+    hd = carHalfDepth - shrink;
+  const dx = posA.x - posB.x,
+    dz = posA.z - posB.z;
+
+  let minDepth = Infinity,
+    n = { x: 0, z: 0 };
+  for (const axis of axes) {
+    const radiusA =
+      hw * Math.abs(axis.x * axisAx.x + axis.z * axisAx.z) +
+      hd * Math.abs(axis.x * axisAz.x + axis.z * axisAz.z);
+    const radiusB =
+      hw * Math.abs(axis.x * axisBx.x + axis.z * axisBx.z) +
+      hd * Math.abs(axis.x * axisBz.x + axis.z * axisBz.z);
+    const distance = axis.x * dx + axis.z * dz;
+    const overlap = radiusA + radiusB - Math.abs(distance);
+    if (overlap < 0) return null;
+    if (overlap < minDepth) {
+      minDepth = overlap;
+      const sign = distance >= 0 ? 1 : -1;
+      n = { x: axis.x * sign, z: axis.z * sign };
+    }
+  }
+  return { depth: minDepth, nx: n.x, nz: n.z };
+}
+
+// Does (position, yaw) overlap any OTHER car currently in state.cars? Shared
+// by the player's own driving physics and by npc.js's driver AI, so cars —
+// player-driven, NPC-driven, or parked — never pass through one another.
+export function findCarOverlap(position, yaw, selfCar, shrink = 0) {
+  for (const other of state.cars) {
+    if (other === selfCar) continue;
+    const o = carOverlapWithCar(
+      position,
+      yaw,
+      other.position,
+      other.rotation.y,
+      shrink,
+    );
+    if (o) return o;
+  }
+  return null;
+}
+
+export function resolveCarVsCarOverlap(car) {
+  for (let iter = 0; iter < 4; iter++) {
+    const o = findCarOverlap(car.position, car.rotation.y, car, 0);
+    if (!o) break;
+    car.position.x += o.nx * (o.depth + 0.02);
+    car.position.z += o.nz * (o.depth + 0.02);
+  }
+}
+
 function staticCollides(box) {
   for (const t of state.treeBoxes) if (box.intersectsBox(t)) return true;
   for (const b of state.buildingBoxes) if (box.intersectsBox(b)) return true;
@@ -663,9 +710,9 @@ function findSpawnSpot(avoidPositions) {
 
 // ─── initCar — spawn 5 cars ───────────────────────────────────────────────────
 export function initCar() {
-  // state.cars will hold all car groups; state.car = currently driven one
-  if (!state.cars) state.cars = [];
-
+  // state.cars (initialized in state.js) holds every enterable car — the 5
+  // spawned below plus any NPC cars stolen later; state.car is whichever one
+  // is currently driven.
   const spawnedPositions = [];
 
   for (let i = 0; i < 5; i++) {
@@ -734,7 +781,8 @@ export function updateCar(dt) {
   const turnRateMult = isDrifting ? DRIFT_TURN_BOOST : 1;
   if (absVel > 0.01) {
     const dir = carVelocity >= 0 ? 1 : -1;
-    car.rotation.y += turnInput * CAR_TURN_RATE * turnScale * turnRateMult * dt * dir;
+    car.rotation.y +=
+      turnInput * CAR_TURN_RATE * turnScale * turnRateMult * dt * dir;
   }
 
   // Visual steer angle — snappier tracking
@@ -801,7 +849,11 @@ export function updateCar(dt) {
     const move = carForwardVec
       .clone()
       .multiplyScalar(carVelocity * slopeScale * dt);
-    if (!carCollides(car.position.clone().add(move), car.rotation.y, 0.12)) {
+    const nextPos = car.position.clone().add(move);
+    if (
+      !carCollides(nextPos, car.rotation.y, 0.12) &&
+      !findCarOverlap(nextPos, car.rotation.y, car, 0.08)
+    ) {
       car.position.add(move);
     } else {
       carVelocity *= 0.3;
@@ -809,6 +861,7 @@ export function updateCar(dt) {
   }
 
   resolveCarOverlaps(car);
+  resolveCarVsCarOverlap(car);
 
   const boundary = state.groundSize / 2 - 2;
   car.position.x = Math.max(-boundary, Math.min(boundary, car.position.x));
@@ -1012,6 +1065,7 @@ function jumpToBuilding() {
 
 function shootBullet() {
   if (shootCooldown) return;
+  state.lastShotAt = Date.now();
   const bullet = getBullet(0xff0000, false);
   const raycaster = new THREE.Raycaster();
   raycaster.setFromCamera(new THREE.Vector2(0, 0), state.camera);
@@ -1030,6 +1084,7 @@ function shootBullet() {
 
 function shootSniperBullet() {
   if (sniperShootCooldown) return;
+  state.lastShotAt = Date.now();
   const bullet = getBullet(0xff0000, false);
   bullet.userData.isSniper = true;
   const raycaster = new THREE.Raycaster();
@@ -1064,6 +1119,14 @@ function getCurrentSupportingBuilding() {
 }
 
 export function updateMovement(dt) {
+  // While a car knockback/ragdoll is playing, skip normal input movement so
+  // the player's flight is driven purely by the knockback physics in npc.js
+  // (which already applies gravity and ground snapping for us).
+  if (playerKnockback.active) {
+    updateWalkCycle(state.player, dt, false);
+    return;
+  }
+
   const supportingBuilding = getCurrentSupportingBuilding();
   const supportingGround = supportingBuilding
     ? supportingBuilding.max.y + 1
@@ -1171,7 +1234,7 @@ export function updateMovement(dt) {
     Math.min(boundary, state.player.position.z),
   );
 
-  animateWalk(dt, canMove ? horiz : 0);
+  updateWalkCycle(state.player, dt, canMove && horiz > 1e-6);
 }
 
 // ─── Input listeners & initial camera ─────────────────────────────────────────

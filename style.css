@@ -237,18 +237,53 @@ kbd {
 
 #hintDisplay {
   position: absolute;
-  top: 52px;
+  bottom: 18px;
   left: 50%;
   transform: translateX(-50%);
-  font-size: 12px;
-  font-weight: 600;
-  letter-spacing: 0.4px;
-  color: rgba(255, 255, 255, 0.62);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 16px;
+  background: rgba(10, 14, 20, 0.72);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 10px;
   font-family: Arial, sans-serif;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  color: rgba(255, 255, 255, 0.85);
+  backdrop-filter: blur(4px);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.45);
   pointer-events: none;
   z-index: 10;
-  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6);
   white-space: nowrap;
+}
+
+#hintDisplay kbd {
+  display: inline-block;
+  min-width: 20px;
+  padding: 2px 6px;
+  margin-right: 5px;
+  text-align: center;
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 700;
+  color: #fff;
+  background: linear-gradient(180deg, #3a4a5c, #232f3d);
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  border-bottom-width: 2px;
+  border-radius: 5px;
+  box-shadow: 0 2px 3px rgba(0, 0, 0, 0.4);
+}
+
+.hint-item {
+  display: inline-flex;
+  align-items: center;
+}
+
+.hint-sep {
+  color: rgba(255, 255, 255, 0.3);
+  font-weight: 400;
 }
 
 .hud-icon {

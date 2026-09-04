@@ -144,6 +144,10 @@ export const state = {
   // Camera mode: false = first person, true = third person (default).
   thirdPerson: true,
 
+  // Night mode + street lights.
+  nightMode: false,
+  streetLights: [],
+
   // Boss / portal lifecycle flags.
   bossSpawned: false,
   bossEnemy: null,
@@ -153,6 +157,36 @@ export const state = {
   // Shared constant.
   groundSize: 1000,
 };
+
+// ---------------- Day / night ----------------
+export function setNightMode(isNight) {
+  state.nightMode = isNight;
+  if (isNight) {
+    scene.background = new THREE.Color(0x0a0e1a);
+    scene.fog = new THREE.Fog(0x0a0e1a, 60, 380);
+    sun.intensity = 0.12;
+    sun.color.set(0x93a7c8); // bluish moonlight
+    ambientLight.intensity = 0.16;
+    ambientLight.color.set(0x33406a);
+  } else {
+    scene.background = new THREE.Color(0x87ceeb);
+    scene.fog = null;
+    sun.intensity = 1;
+    sun.color.set(0xffffff);
+    ambientLight.intensity = 0.5;
+    ambientLight.color.set(0xffffff);
+  }
+  for (const light of state.streetLights) {
+    light.intensity = isNight ? 4 : 0;
+  }
+
+  // Car headlights — every car (player's + stolen NPC cars) lights up at
+  // night, since all cars register their spotlights in userData.headLights.
+  for (const car of state.cars) {
+    if (!car.userData.headLights) continue;
+    for (const l of car.userData.headLights) l.intensity = isNight ? 2.6 : 0;
+  }
+}
 
 // ---------------- HUD update helpers ----------------
 export function isPlayerIndoors() {

@@ -76,7 +76,9 @@ function checkObstaclesCollision(box) {
 
 export function initEnemies() {
   for (let i = 0; i < 1; i++) {
-    const spawn = findClearSpawnPosition();
+    // Keep every enemy at least 60 units from the player's spawn so nothing
+    // can shoot or catch the player the moment the game starts.
+    const spawn = findClearSpawnPosition(state.player.position, 60);
     state.enemies.push(createEnemy(spawn.x, spawn.z));
   }
 }

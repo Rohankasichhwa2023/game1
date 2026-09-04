@@ -1,7 +1,7 @@
 // character.js
 // Low-poly humanoid figures built from primitives, plus a small collision helper.
 
-import * as THREE from 'three';
+import * as THREE from "three";
 
 // Builds a simple human figure (head, torso, arms, hands, legs) facing +Z.
 // The group origin is the body center: feet sit at y = -1 * scale and the
@@ -34,12 +34,26 @@ export function createHumanFigure({
   const hipL = new THREE.Group();
   hipL.position.set(-0.15, HIP_Y, 0);
   group.add(hipL);
-  add(new THREE.BoxGeometry(0.26, LEG_LEN, 0.26), pants, 0, -LEG_LEN / 2, 0, hipL);
+  add(
+    new THREE.BoxGeometry(0.26, LEG_LEN, 0.26),
+    pants,
+    0,
+    -LEG_LEN / 2,
+    0,
+    hipL,
+  );
 
   const hipR = new THREE.Group();
   hipR.position.set(0.15, HIP_Y, 0);
   group.add(hipR);
-  add(new THREE.BoxGeometry(0.26, LEG_LEN, 0.26), pants, 0, -LEG_LEN / 2, 0, hipR);
+  add(
+    new THREE.BoxGeometry(0.26, LEG_LEN, 0.26),
+    pants,
+    0,
+    -LEG_LEN / 2,
+    0,
+    hipR,
+  );
 
   // Torso (hips ~ -0.1, shoulders ~ +0.65).
   add(new THREE.BoxGeometry(0.7, 0.75, 0.4), shirt, 0, 0.275, 0);
@@ -51,14 +65,42 @@ export function createHumanFigure({
   const shoulderL = new THREE.Group();
   shoulderL.position.set(-0.46, SHOULDER_Y, 0);
   group.add(shoulderL);
-  add(new THREE.BoxGeometry(0.16, ARM_LEN, 0.16), shirt, 0, -ARM_LEN / 2, 0, shoulderL);
-  add(new THREE.BoxGeometry(0.14, 0.12, 0.14), skin, 0, -ARM_LEN - 0.07, 0, shoulderL);
+  add(
+    new THREE.BoxGeometry(0.16, ARM_LEN, 0.16),
+    shirt,
+    0,
+    -ARM_LEN / 2,
+    0,
+    shoulderL,
+  );
+  add(
+    new THREE.BoxGeometry(0.14, 0.12, 0.14),
+    skin,
+    0,
+    -ARM_LEN - 0.07,
+    0,
+    shoulderL,
+  );
 
   const shoulderR = new THREE.Group();
   shoulderR.position.set(0.46, SHOULDER_Y, 0);
   group.add(shoulderR);
-  add(new THREE.BoxGeometry(0.16, ARM_LEN, 0.16), shirt, 0, -ARM_LEN / 2, 0, shoulderR);
-  add(new THREE.BoxGeometry(0.14, 0.12, 0.14), skin, 0, -ARM_LEN - 0.07, 0, shoulderR);
+  add(
+    new THREE.BoxGeometry(0.16, ARM_LEN, 0.16),
+    shirt,
+    0,
+    -ARM_LEN / 2,
+    0,
+    shoulderR,
+  );
+  add(
+    new THREE.BoxGeometry(0.14, 0.12, 0.14),
+    skin,
+    0,
+    -ARM_LEN - 0.07,
+    0,
+    shoulderR,
+  );
 
   // Head.
   add(new THREE.SphereGeometry(0.24, 12, 10), skin, 0, 0.88, 0);
@@ -122,7 +164,88 @@ export function updateWalkCycle(group, dt, moving) {
 // regardless of how a character is rotated.
 export function makeBox(position, halfWidth, halfHeight, halfDepth) {
   return new THREE.Box3(
-    new THREE.Vector3(position.x - halfWidth, position.y - halfHeight, position.z - halfDepth),
-    new THREE.Vector3(position.x + halfWidth, position.y + halfHeight, position.z + halfDepth)
+    new THREE.Vector3(
+      position.x - halfWidth,
+      position.y - halfHeight,
+      position.z - halfDepth,
+    ),
+    new THREE.Vector3(
+      position.x + halfWidth,
+      position.y + halfHeight,
+      position.z + halfDepth,
+    ),
   );
+}
+
+// ─── Punch / melee swing animation ────────────────────────────────────────
+// Drives one arm through a windup → jab → recover arc using the same shoulder
+// hinges as the walk cycle. Call updateWalkCycle() FIRST each frame, then
+// updatePunch() — the punch overrides the swinging arm (and raises the other
+// into a guard pose) while it is active. `dt` uses the game's frame-normalized
+// units (1.0 = one 60fps frame), so time is converted to seconds internally.
+const PUNCH_WINDUP_END = 0.15; // seconds — arm pulled back
+const PUNCH_STRIKE_END = 0.28; // seconds — arm fully extended forward
+const PUNCH_TOTAL = 0.55; // seconds — back to a relaxed stance
+const PUNCH_WINDUP_ANGLE = 0.55; // radians behind the body
+const PUNCH_STRIKE_ANGLE = -1.6; // radians forward (arm roughly horizontal)
+const PUNCH_GUARD_ANGLE = -0.55; // idle guard raise for the off hand
+
+// Starts a swing with the given hand ("L" | "R"). Returns false if a swing is
+// already in progress so callers can't spam overlapping animations.
+export function startPunch(group, hand = "R") {
+  if (group.userData.punchState) return false;
+  group.userData.punchState = { time: 0, hand, struck: false };
+  return true;
+}
+
+// Advances an active punch. Returns:
+//   false     — no swing running (callers may start a new one)
+//   "strike"  — the frame the fist reaches full extension (damage moment)
+//   "active"  — swing still animating
+export function updatePunch(group, dt) {
+  const ps = group.userData.punchState;
+  const limbs = group.userData.limbs;
+  if (!ps || !limbs) return false;
+  if (group.visible === false) {
+    group.userData.punchState = null;
+    return false;
+  }
+
+  ps.time += dt / 60;
+  const t = ps.time;
+
+  let punchAngle;
+  if (t < PUNCH_WINDUP_END) {
+    // Windup: pull the fist back over the shoulder.
+    punchAngle = (t / PUNCH_WINDUP_END) * PUNCH_WINDUP_ANGLE;
+  } else if (t < PUNCH_STRIKE_END) {
+    // Strike: snap the arm forward to full extension.
+    const u = (t - PUNCH_WINDUP_END) / (PUNCH_STRIKE_END - PUNCH_WINDUP_END);
+    punchAngle =
+      PUNCH_WINDUP_ANGLE + (PUNCH_STRIKE_ANGLE - PUNCH_WINDUP_ANGLE) * (u * u); // ease-in snap
+  } else {
+    // Recover: ease the arm back down to the relaxed stance.
+    const u = Math.min(
+      1,
+      (t - PUNCH_STRIKE_END) / (PUNCH_TOTAL - PUNCH_STRIKE_END),
+    );
+    punchAngle = PUNCH_STRIKE_ANGLE * (1 - u) * (1 - u * 0.5);
+  }
+
+  const punchShoulder = ps.hand === "R" ? limbs.shoulderR : limbs.shoulderL;
+  const guardShoulder = ps.hand === "R" ? limbs.shoulderL : limbs.shoulderR;
+  punchShoulder.rotation.x = punchAngle;
+  // Off hand holds a loose guard near the chest for the whole swing.
+  guardShoulder.rotation.x = PUNCH_GUARD_ANGLE;
+
+  // Fire the strike signal exactly once — the frame the jab reaches extension.
+  if (!ps.struck && t >= PUNCH_STRIKE_END * 0.85) {
+    ps.struck = true;
+    return "strike";
+  }
+
+  if (t >= PUNCH_TOTAL) {
+    group.userData.punchState = null;
+  }
+  return "active";
 }

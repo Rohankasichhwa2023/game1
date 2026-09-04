@@ -43,33 +43,32 @@ const cameraForward = new THREE.Vector3();
 const cameraUpOffset = new THREE.Vector3();
 
 // ─── Shared car physics constants ────────────────────────────────────────────
-const CAR_MAX_SPEED = 1.0; // reduced from 1.4
+const CAR_MAX_SPEED = 1.0;
 const CAR_ACCEL = 0.038;
 const CAR_BRAKE = 0.06;
 const CAR_FRICTION = 0.014;
 const CAR_REVERSE_MAX = 0.42;
-const CAR_TURN_RATE = 0.052; // increased from 0.032
-const MAX_STEER_ANGLE = Math.PI / 4.5; // ~40° — wider visual lock
+const CAR_TURN_RATE = 0.052;
+const MAX_STEER_ANGLE = Math.PI / 4.5;
 
 // Handbrake / drift
-const HANDBRAKE_DECEL = 0.05; // speed scrubbed per frame while the handbrake is held
-const DRIFT_TURN_BOOST = 1.55; // looser rear end rotates the chassis faster while drifting
-const GRIP_RATE = 0.9; // how fast travel direction snaps to chassis heading (normal grip)
-const DRIFT_GRIP_RATE = 0.07; // how fast travel direction catches up while drifting (low grip = slide)
-const DRIFT_MIN_SPEED = 0.15; // minimum speed before a handbrake turn counts as a drift
+const HANDBRAKE_DECEL = 0.05;
+const DRIFT_TURN_BOOST = 1.55;
+const GRIP_RATE = 0.9;
+const DRIFT_GRIP_RATE = 0.07;
+const DRIFT_MIN_SPEED = 0.15;
 
 // Suspension
 const SUSP_TRAVEL = 0.22;
 const SUSP_STIFFNESS = 18;
 const SUSP_DAMPING = 3.5;
 
-// Collision footprint (shared across all car styles)
+// Collision footprint
 const carHalfWidth = 1.1;
 const carHalfHeight = 0.9;
 const carHalfDepth = 2.3;
 
-// ─── Per-car runtime state (keyed by car group uuid) ─────────────────────────
-// We store physics state on userData so each parked car keeps its own state.
+// ─── Per-car runtime state ────────────────────────────────────────────────────
 function initCarPhysics(car) {
   car.userData.velocity = 0;
   car.userData.steerAngle = 0;
@@ -78,18 +77,20 @@ function initCarPhysics(car) {
   car.userData.bodyRoll = 0;
   car.userData.bodyPitch = 0;
   car.userData.prevVelocity = 0;
-  car.userData.moveHeading = 0; // actual travel direction (can lag rotation.y while drifting)
+  car.userData.moveHeading = 0;
   car.userData.isDrifting = false;
 }
 
+// ─── Free-look yaw — CLAMPED so you can't spin inside the car ────────────────
+// Positive = look right, negative = look left. Limited to ±60° so the
+// windscreen pillars are always visible and the road stays in frame.
 let carLookYawOffset = 0;
+const CAR_LOOK_MAX_YAW = Math.PI / 3; // 60° each side
+
 const carForwardVec = new THREE.Vector3();
 
 // ─── Five car style definitions ───────────────────────────────────────────────
-// Each entry: { name, paint, dark, fender, hubColor, style }
-// style: 'sedan' | 'muscle' | 'suv' | 'sports' | 'pickup'
 export const CAR_STYLES = [
-  // 0 — Classic Sedan (red, the original)
   {
     name: "Sedan",
     paint: 0xcc2222,
@@ -98,7 +99,6 @@ export const CAR_STYLES = [
     hub: 0xc8cfd8,
     style: "sedan",
   },
-  // 1 — Muscle Car (deep blue, wide body)
   {
     name: "Muscle",
     paint: 0x1a3a8a,
@@ -107,7 +107,6 @@ export const CAR_STYLES = [
     hub: 0xe0c840,
     style: "muscle",
   },
-  // 2 — SUV / Truck (army green, taller)
   {
     name: "SUV",
     paint: 0x3a5c2a,
@@ -116,7 +115,6 @@ export const CAR_STYLES = [
     hub: 0x888888,
     style: "suv",
   },
-  // 3 — Sports Car (bright orange, low & long)
   {
     name: "Sports",
     paint: 0xe86010,
@@ -125,7 +123,6 @@ export const CAR_STYLES = [
     hub: 0xd0d0d0,
     style: "sports",
   },
-  // 4 — Pickup Truck (slate purple, open bed)
   {
     name: "Pickup",
     paint: 0x5a3080,
@@ -136,7 +133,7 @@ export const CAR_STYLES = [
   },
 ];
 
-// ─── Wheel builder (shared) ───────────────────────────────────────────────────
+// ─── Wheel builder ────────────────────────────────────────────────────────────
 function makeWheel(hubColor) {
   const TYRE_R = 0.42,
     TYRE_W = 0.28;
@@ -160,7 +157,6 @@ function makeWheel(hubColor) {
   });
 
   const wg = new THREE.Group();
-
   const tyreGeo = new THREE.CylinderGeometry(TYRE_R, TYRE_R, TYRE_W, 18);
   tyreGeo.rotateZ(Math.PI / 2);
   const tyre = new THREE.Mesh(tyreGeo, rubberMat);
@@ -184,14 +180,13 @@ function makeWheel(hubColor) {
   return wg;
 }
 
-// ─── Wheel rig builder (suspension pivots + steer pivots) ─────────────────────
+// ─── Wheel rig builder ────────────────────────────────────────────────────────
 function attachWheels(group, hubColor, frontZ, rearZ, trackW, tyreR) {
   const chromeMat = new THREE.MeshPhongMaterial({
     color: 0xd0d8e0,
     shininess: 200,
   });
 
-  // Axle rods (visual only)
   function addAxle(z) {
     const axleGeo = new THREE.CylinderGeometry(0.06, 0.06, trackW * 2 + 0.1, 8);
     axleGeo.rotateZ(Math.PI / 2);
@@ -202,7 +197,6 @@ function attachWheels(group, hubColor, frontZ, rearZ, trackW, tyreR) {
   addAxle(frontZ);
   addAxle(rearZ);
 
-  // Front steer pivots
   const spL = new THREE.Group();
   spL.position.set(-trackW, tyreR, frontZ);
   group.add(spL);
@@ -214,7 +208,6 @@ function attachWheels(group, hubColor, frontZ, rearZ, trackW, tyreR) {
   const wFR = makeWheel(hubColor);
   spR.add(wFR);
 
-  // Rear fixed groups
   const rlG = new THREE.Group();
   rlG.position.set(-trackW, tyreR, rearZ);
   group.add(rlG);
@@ -237,6 +230,152 @@ function attachWheels(group, hubColor, frontZ, rearZ, trackW, tyreR) {
   group.userData.suspRestY = tyreR;
 }
 
+// ─── COCKPIT CAMERA POSITIONS ──────────────────────────────────────────────────
+// These are LOCAL positions inside the car group (car forward = +Z).
+// eyeX : 0   = perfectly centred — no offset into the car body
+// eyeY       = driver's eye height above car origin
+// eyeZ       = forward position; POSITIVE = toward the FRONT of the car.
+//              Push forward enough so the camera sits behind the windscreen
+//              glass, not inside any solid panel.
+// lookAheadY : how far below eye-level the look-at target sits
+//              (a small negative makes you see the top of the dashboard)
+//
+//  Car body extents for reference (from createCarByStyle):
+//    Sedan  : cabin panel at z=-0.18, windscreen glass front at z=+0.72
+//    Muscle : cabin at z=-0.5,  windscreen at z=+0.52
+//    SUV    : cabin at z=-0.1,  windscreen at z=+0.98
+//    Sports : cabin at z=-0.1,  windscreen at z=+0.60
+//    Pickup : cabin at z=+0.7,  windscreen at z=+1.58
+//
+// Rule: eyeZ must be LESS than the windscreen front Z so the camera is
+// behind the glass, not poking through it.
+// eyeY raised above the cabin roof panels (roof panels sit at ~1.64 for sedan,
+// ~1.58 for muscle, ~1.9 for suv, ~1.4 for sports, ~1.68 for pickup) so the
+// camera never clips into the roof geometry and gets the brown tint.
+// lookAheadY: small negative = horizon sits in the upper-third of the screen
+// (natural driving perspective). Zero = dead level.
+const COCKPIT_EYE = {
+  sedan: { x: 0, y: 1.5, z: 0.3, lookAheadY: -0.15 },
+  muscle: { x: 0, y: 1.48, z: 0.1, lookAheadY: -0.15 },
+  suv: { x: 0, y: 1.72, z: 0.5, lookAheadY: -0.18 },
+  sports: { x: 0, y: 1.32, z: 0.2, lookAheadY: -0.12 },
+  pickup: { x: 0, y: 1.68, z: 1.1, lookAheadY: -0.18 },
+};
+
+// ─── Cockpit overlay: dashboard panel + steering wheel ───────────────────────
+// Sits entirely in local car space, positioned just below the camera eye so
+// it's visible at the bottom quarter of the screen in first-person view.
+// The steering wheel "spin" group is stored so updateCar() can rotate it
+// to match the actual steer angle — same technique as the original interior.
+function buildCockpitOverlay(group, styleKey) {
+  const eye = COCKPIT_EYE[styleKey] || COCKPIT_EYE.sedan;
+
+  const dashMat = new THREE.MeshPhongMaterial({
+    color: 0x141618,
+    shininess: 18,
+  });
+  const rimMat = new THREE.MeshPhongMaterial({
+    color: 0x0d0e10,
+    shininess: 55,
+  });
+  const spokeMat = new THREE.MeshPhongMaterial({
+    color: 0x1a1c20,
+    shininess: 30,
+  });
+  const hubMat = new THREE.MeshPhongMaterial({
+    color: 0x111214,
+    shininess: 60,
+  });
+  const chromeMat = new THREE.MeshPhongMaterial({
+    color: 0xb8c2cc,
+    shininess: 180,
+  });
+
+  const overlay = new THREE.Group();
+  overlay.visible = false;
+
+  // ── Dashboard panel — wide, shallow box sitting at eye-Y - 0.30 ──────────
+  // Tilted slightly toward the driver so it fills the bottom of the screen.
+  const dashGeo = new THREE.BoxGeometry(1.8, 0.16, 0.55);
+  const dash = new THREE.Mesh(dashGeo, dashMat);
+  dash.position.set(0, eye.y - 0.3, eye.z + 0.46);
+  dash.rotation.x = 0.22; // lean top of dash away from camera
+  dash.castShadow = false;
+  overlay.add(dash);
+
+  // Thin chrome trim strip along the top edge of the dash
+  const trimGeo = new THREE.BoxGeometry(1.82, 0.025, 0.04);
+  const trim = new THREE.Mesh(trimGeo, chromeMat);
+  trim.position.set(0, eye.y - 0.225, eye.z + 0.24);
+  trim.castShadow = false;
+  overlay.add(trim);
+
+  // ── Steering wheel ────────────────────────────────────────────────────────
+  // Pivot group: handles column angle and sits slightly right-of-centre
+  // (left-hand drive) just like a real car.
+  const WHEEL_R = 0.175; // rim radius
+  const TUBE_R = 0.018; // rim tube radius
+  const SPOKE_R = 0.012;
+
+  const pivot = new THREE.Group();
+  // Position: below eye, slightly forward, offset a little to the right
+  pivot.position.set(0.14, eye.y - 0.28, eye.z + 0.36);
+  pivot.rotation.x = 0.38; // column rake — top leans toward dash
+
+  overlay.add(pivot);
+
+  // spin group — this is what rotates when the player steers
+  const spin = new THREE.Group();
+  pivot.add(spin);
+
+  // Rim torus
+  const rimGeo = new THREE.TorusGeometry(WHEEL_R, TUBE_R, 10, 36);
+  const rim = new THREE.Mesh(rimGeo, rimMat);
+  spin.add(rim);
+
+  // Hub centre
+  const hubGeo = new THREE.CylinderGeometry(0.032, 0.032, 0.04, 12);
+  hubGeo.rotateX(Math.PI / 2);
+  const hub = new THREE.Mesh(hubGeo, hubMat);
+  spin.add(hub);
+
+  // Three spokes (at 0°, 120°, 240°)
+  for (let i = 0; i < 3; i++) {
+    const angle = (i / 3) * Math.PI * 2;
+    const spokeGeo = new THREE.CylinderGeometry(
+      SPOKE_R,
+      SPOKE_R,
+      WHEEL_R * 0.85,
+      8,
+    );
+    const spoke = new THREE.Mesh(spokeGeo, spokeMat);
+    // Rotate so the spoke points radially outward from centre
+    spoke.rotation.z = angle + Math.PI / 2;
+    spoke.position.set(
+      Math.cos(angle) * (WHEEL_R * 0.425),
+      Math.sin(angle) * (WHEEL_R * 0.425),
+      0,
+    );
+    spin.add(spoke);
+  }
+
+  // Steering column tube (visible below the wheel)
+  const colGeo = new THREE.CylinderGeometry(0.022, 0.022, 0.18, 10);
+  colGeo.rotateX(Math.PI / 2);
+  const col = new THREE.Mesh(colGeo, dashMat);
+  col.position.set(0, -0.014, 0.1);
+  pivot.add(col);
+
+  // Store references
+  group.userData.cockpitOverlay = overlay;
+  group.userData.cockpitWheelSpin = spin; // rotated each frame in updateCar
+  overlay.visible = false;
+  group.add(overlay);
+
+  // Legacy alias so enterCar/exitCar visibility toggles still work
+  group.userData.dashStrip = overlay;
+}
+
 // ─── createCarByStyle ────────────────────────────────────────────────────────
 export function createCarByStyle(x, z, styleIdx) {
   const def = CAR_STYLES[styleIdx % CAR_STYLES.length];
@@ -254,11 +393,15 @@ export function createCarByStyle(x, z, styleIdx) {
     color: def.fender,
     shininess: 70,
   });
+  // Glass is fully invisible from the driver's POV — the tinted box was
+  // darkening the cockpit view. Side windows still provide collision geometry
+  // but render at zero opacity so the view stays clear in all directions.
   const glassM = new THREE.MeshPhongMaterial({
     color: 0x7ab8d4,
     shininess: 120,
     transparent: true,
-    opacity: 0.82,
+    opacity: 0.0,
+    depthWrite: false,
   });
   const chromeMat = new THREE.MeshPhongMaterial({
     color: 0xd0d8e0,
@@ -293,7 +436,6 @@ export function createCarByStyle(x, z, styleIdx) {
   const s = def.style;
 
   if (s === "sedan") {
-    // ── Sedan (original proportions) ────────────────────────────────────────
     add(new THREE.BoxGeometry(2.1, 0.28, 4.6), underMat, 0, 0.28, 0);
     add(new THREE.BoxGeometry(0.12, 0.22, 4.3), darkMat, -1.05, 0.5, 0);
     add(new THREE.BoxGeometry(0.12, 0.22, 4.3), darkMat, 1.05, 0.5, 0);
@@ -326,123 +468,95 @@ export function createCarByStyle(x, z, styleIdx) {
     add(new THREE.BoxGeometry(aw, ah, ad), fenderMat, 1.04, 0.76, -1.4);
     attachWheels(group, def.hub, 1.42, -1.42, 1.02, 0.42);
   } else if (s === "muscle") {
-    // ── Muscle Car — wide, long hood, fastback roofline ─────────────────────
     add(new THREE.BoxGeometry(2.3, 0.26, 4.8), underMat, 0, 0.26, 0);
     add(new THREE.BoxGeometry(0.14, 0.24, 4.5), darkMat, -1.15, 0.48, 0);
     add(new THREE.BoxGeometry(0.14, 0.24, 4.5), darkMat, 1.15, 0.48, 0);
     add(new THREE.BoxGeometry(2.18, 0.36, 4.7), paintMat, 0, 0.58, 0);
-    // Long hood
     add(new THREE.BoxGeometry(2.0, 0.14, 1.8), paintMat, 0, 0.82, 1.6);
-    // Hood scoop
     add(new THREE.BoxGeometry(0.6, 0.12, 0.7), darkMat, 0, 0.96, 1.4);
-    // Short trunk
     add(new THREE.BoxGeometry(1.9, 0.12, 0.6), paintMat, 0, 0.82, -1.9);
-    // Fastback cabin (sits further back)
     add(new THREE.BoxGeometry(1.8, 0.1, 1.5), paintMat, 0, 1.58, -0.5);
     add(new THREE.BoxGeometry(1.82, 0.58, 1.52), paintMat, 0, 1.18, -0.5);
-    // Windscreen (raked)
     add(new THREE.BoxGeometry(1.58, 0.54, 0.1), glassM, 0, 1.26, 0.52);
     add(new THREE.BoxGeometry(1.58, 0.4, 0.1), glassM, 0, 1.26, -1.26);
     add(new THREE.BoxGeometry(0.06, 0.38, 1.1), glassM, -0.9, 1.26, -0.5);
     add(new THREE.BoxGeometry(0.06, 0.38, 1.1), glassM, 0.9, 1.26, -0.5);
-    // Lights
     add(new THREE.BoxGeometry(0.52, 0.16, 0.1), lightMat, -0.64, 0.66, 2.38);
     add(new THREE.BoxGeometry(0.52, 0.16, 0.1), lightMat, 0.64, 0.66, 2.38);
     add(new THREE.BoxGeometry(0.6, 0.14, 0.1), tailMat, -0.66, 0.68, -2.38);
     add(new THREE.BoxGeometry(0.6, 0.14, 0.1), tailMat, 0.66, 0.68, -2.38);
     add(new THREE.BoxGeometry(1.9, 0.18, 0.12), chromeMat, 0, 0.34, 2.42);
     add(new THREE.BoxGeometry(1.9, 0.12, 0.1), chromeMat, 0, 0.38, -2.4);
-    // Side exhausts
     add(new THREE.BoxGeometry(0.1, 0.1, 1.2), darkMat, -1.14, 0.3, -0.8);
     add(new THREE.BoxGeometry(0.1, 0.1, 1.2), darkMat, 1.14, 0.3, -0.8);
-    // Wide fenders
     add(new THREE.BoxGeometry(0.18, 0.22, 1.1), fenderMat, -1.14, 0.76, 1.42);
     add(new THREE.BoxGeometry(0.18, 0.22, 1.1), fenderMat, 1.14, 0.76, 1.42);
     add(new THREE.BoxGeometry(0.18, 0.22, 1.1), fenderMat, -1.14, 0.76, -1.42);
     add(new THREE.BoxGeometry(0.18, 0.22, 1.1), fenderMat, 1.14, 0.76, -1.42);
     attachWheels(group, def.hub, 1.42, -1.42, 1.1, 0.42);
   } else if (s === "suv") {
-    // ── SUV — tall, boxy, high ride ─────────────────────────────────────────
     add(new THREE.BoxGeometry(2.2, 0.32, 4.7), underMat, 0, 0.32, 0);
     add(new THREE.BoxGeometry(0.12, 0.28, 4.4), darkMat, -1.1, 0.58, 0);
     add(new THREE.BoxGeometry(0.12, 0.28, 4.4), darkMat, 1.1, 0.58, 0);
     add(new THREE.BoxGeometry(2.08, 0.46, 4.6), paintMat, 0, 0.7, 0);
-    // Flat hood
     add(new THREE.BoxGeometry(1.96, 0.14, 1.2), paintMat, 0, 0.96, 1.62);
-    // Flat roof rack suggestion
     add(new THREE.BoxGeometry(1.7, 0.1, 2.1), paintMat, 0, 1.9, -0.1);
     add(new THREE.BoxGeometry(0.05, 0.06, 2.0), darkMat, -0.82, 1.96, -0.1);
     add(new THREE.BoxGeometry(0.05, 0.06, 2.0), darkMat, 0.82, 1.96, -0.1);
-    // Tall boxy cabin
     add(new THREE.BoxGeometry(1.84, 0.8, 2.2), paintMat, 0, 1.4, -0.1);
     add(new THREE.BoxGeometry(1.6, 0.7, 0.1), glassM, 0, 1.42, 0.98);
     add(new THREE.BoxGeometry(1.6, 0.7, 0.1), glassM, 0, 1.42, -1.18);
     add(new THREE.BoxGeometry(0.06, 0.58, 1.8), glassM, -0.91, 1.42, -0.1);
     add(new THREE.BoxGeometry(0.06, 0.58, 1.8), glassM, 0.91, 1.42, -0.1);
-    // Roof lights bar
     add(new THREE.BoxGeometry(1.5, 0.08, 0.22), lightMat, 0, 1.98, 0.82);
-    // Bumpers (chunky)
     add(new THREE.BoxGeometry(2.08, 0.28, 0.18), darkMat, 0, 0.44, 2.42);
     add(new THREE.BoxGeometry(2.08, 0.24, 0.18), darkMat, 0, 0.44, -2.42);
     add(new THREE.BoxGeometry(0.52, 0.18, 0.1), lightMat, -0.6, 0.7, 2.42);
     add(new THREE.BoxGeometry(0.52, 0.18, 0.1), lightMat, 0.6, 0.7, 2.42);
     add(new THREE.BoxGeometry(0.56, 0.16, 0.1), tailMat, -0.62, 0.72, -2.42);
     add(new THREE.BoxGeometry(0.56, 0.16, 0.1), tailMat, 0.62, 0.72, -2.42);
-    // Step bars
     add(new THREE.BoxGeometry(0.14, 0.1, 3.2), darkMat, -1.1, 0.22, 0);
     add(new THREE.BoxGeometry(0.14, 0.1, 3.2), darkMat, 1.1, 0.22, 0);
-    // Fenders
     add(new THREE.BoxGeometry(0.16, 0.24, 1.1), fenderMat, -1.1, 0.84, 1.44);
     add(new THREE.BoxGeometry(0.16, 0.24, 1.1), fenderMat, 1.1, 0.84, 1.44);
     add(new THREE.BoxGeometry(0.16, 0.24, 1.1), fenderMat, -1.1, 0.84, -1.44);
     add(new THREE.BoxGeometry(0.16, 0.24, 1.1), fenderMat, 1.1, 0.84, -1.44);
     attachWheels(group, def.hub, 1.44, -1.44, 1.05, 0.46);
   } else if (s === "sports") {
-    // ── Sports Car — low, wide, long, wedge nose ─────────────────────────────
     add(new THREE.BoxGeometry(2.14, 0.22, 4.9), underMat, 0, 0.22, 0);
     add(new THREE.BoxGeometry(0.1, 0.18, 4.6), darkMat, -1.07, 0.38, 0);
     add(new THREE.BoxGeometry(0.1, 0.18, 4.6), darkMat, 1.07, 0.38, 0);
     add(new THREE.BoxGeometry(2.04, 0.32, 4.8), paintMat, 0, 0.48, 0);
-    // Long low hood
     add(new THREE.BoxGeometry(1.92, 0.1, 2.0), paintMat, 0, 0.72, 1.7);
-    // Aero splitter
     add(new THREE.BoxGeometry(2.1, 0.06, 0.3), darkMat, 0, 0.16, 2.5);
-    // Rear diffuser
     add(new THREE.BoxGeometry(2.0, 0.08, 0.28), darkMat, 0, 0.2, -2.52);
-    // Rear spoiler
     add(new THREE.BoxGeometry(1.8, 0.08, 0.22), darkMat, 0, 0.98, -2.3);
     add(new THREE.BoxGeometry(0.08, 0.28, 0.08), darkMat, -0.8, 0.86, -2.3);
     add(new THREE.BoxGeometry(0.08, 0.28, 0.08), darkMat, 0.8, 0.86, -2.3);
-    // Low coupe cabin
     add(new THREE.BoxGeometry(1.74, 0.08, 1.4), paintMat, 0, 1.4, -0.1);
     add(new THREE.BoxGeometry(1.76, 0.46, 1.42), paintMat, 0, 1.1, -0.1);
-    // Raked windscreen
     add(new THREE.BoxGeometry(1.54, 0.44, 0.1), glassM, 0, 1.16, 0.6);
     add(new THREE.BoxGeometry(1.54, 0.38, 0.1), glassM, 0, 1.16, -0.8);
     add(new THREE.BoxGeometry(0.06, 0.34, 1.0), glassM, -0.86, 1.14, -0.1);
     add(new THREE.BoxGeometry(0.06, 0.34, 1.0), glassM, 0.86, 1.14, -0.1);
-    // Lights (thin, wide)
     add(new THREE.BoxGeometry(0.64, 0.1, 0.08), lightMat, -0.56, 0.6, 2.46);
     add(new THREE.BoxGeometry(0.64, 0.1, 0.08), lightMat, 0.56, 0.6, 2.46);
     add(new THREE.BoxGeometry(0.68, 0.1, 0.08), tailMat, -0.56, 0.62, -2.46);
     add(new THREE.BoxGeometry(0.68, 0.1, 0.08), tailMat, 0.56, 0.62, -2.46);
     add(new THREE.BoxGeometry(1.9, 0.1, 0.1), chromeMat, 0, 0.3, 2.5);
-    // Side vents
     add(new THREE.BoxGeometry(0.08, 0.12, 0.4), darkMat, -1.06, 0.56, 0.6);
     add(new THREE.BoxGeometry(0.08, 0.12, 0.4), darkMat, 1.06, 0.56, 0.6);
-    // Fenders (flared)
     add(new THREE.BoxGeometry(0.18, 0.18, 1.0), fenderMat, -1.06, 0.68, 1.44);
     add(new THREE.BoxGeometry(0.18, 0.18, 1.0), fenderMat, 1.06, 0.68, 1.44);
     add(new THREE.BoxGeometry(0.18, 0.18, 1.0), fenderMat, -1.06, 0.68, -1.44);
     add(new THREE.BoxGeometry(0.18, 0.18, 1.0), fenderMat, 1.06, 0.68, -1.44);
     attachWheels(group, def.hub, 1.44, -1.44, 1.0, 0.4);
   } else {
-    // ── Pickup Truck — cab + open flat bed ───────────────────────────────────
+    // Pickup
     add(new THREE.BoxGeometry(2.2, 0.3, 5.0), underMat, 0, 0.3, 0);
     add(new THREE.BoxGeometry(0.12, 0.26, 4.7), darkMat, -1.1, 0.54, 0);
     add(new THREE.BoxGeometry(0.12, 0.26, 4.7), darkMat, 1.1, 0.54, 0);
     add(new THREE.BoxGeometry(2.08, 0.4, 4.9), paintMat, 0, 0.62, 0);
-    // Short cab (front half)
     add(new THREE.BoxGeometry(2.0, 0.12, 1.6), paintMat, 0, 0.88, 1.5);
     add(new THREE.BoxGeometry(1.88, 0.12, 1.8), paintMat, 0, 1.68, 0.7);
     add(new THREE.BoxGeometry(1.9, 0.64, 1.82), paintMat, 0, 1.36, 0.7);
@@ -450,25 +564,19 @@ export function createCarByStyle(x, z, styleIdx) {
     add(new THREE.BoxGeometry(1.68, 0.5, 0.1), glassM, 0, 1.38, -0.18);
     add(new THREE.BoxGeometry(0.06, 0.44, 1.5), glassM, -0.93, 1.38, 0.7);
     add(new THREE.BoxGeometry(0.06, 0.44, 1.5), glassM, 0.93, 1.38, 0.7);
-    // Open flat bed (rear half)
     add(new THREE.BoxGeometry(2.0, 0.1, 2.0), paintMat, 0, 0.8, -1.5);
-    // Bed walls
     add(new THREE.BoxGeometry(2.0, 0.42, 0.1), paintMat, 0, 1.0, -2.48);
     add(new THREE.BoxGeometry(0.1, 0.42, 1.9), paintMat, -0.99, 1.0, -1.5);
     add(new THREE.BoxGeometry(0.1, 0.42, 1.9), paintMat, 0.99, 1.0, -1.5);
-    // Lights
     add(new THREE.BoxGeometry(0.5, 0.18, 0.1), lightMat, -0.6, 0.7, 2.48);
     add(new THREE.BoxGeometry(0.5, 0.18, 0.1), lightMat, 0.6, 0.7, 2.48);
     add(new THREE.BoxGeometry(0.54, 0.18, 0.1), tailMat, -0.6, 0.72, -2.5);
     add(new THREE.BoxGeometry(0.54, 0.18, 0.1), tailMat, 0.6, 0.72, -2.5);
     add(new THREE.BoxGeometry(2.08, 0.22, 0.16), darkMat, 0, 0.4, 2.52);
     add(new THREE.BoxGeometry(2.08, 0.2, 0.14), darkMat, 0, 0.38, -2.52);
-    // Chrome grille
     add(new THREE.BoxGeometry(1.6, 0.14, 0.08), chromeMat, 0, 0.6, 2.5);
-    // Step bars
     add(new THREE.BoxGeometry(0.12, 0.08, 2.8), darkMat, -1.1, 0.24, 0.4);
     add(new THREE.BoxGeometry(0.12, 0.08, 2.8), darkMat, 1.1, 0.24, 0.4);
-    // Fenders
     add(new THREE.BoxGeometry(0.16, 0.24, 1.1), fenderMat, -1.1, 0.8, 1.44);
     add(new THREE.BoxGeometry(0.16, 0.24, 1.1), fenderMat, 1.1, 0.8, 1.44);
     add(new THREE.BoxGeometry(0.16, 0.24, 1.1), fenderMat, -1.1, 0.8, -1.44);
@@ -476,6 +584,30 @@ export function createCarByStyle(x, z, styleIdx) {
     attachWheels(group, def.hub, 1.44, -1.44, 1.04, 0.44);
   }
 
+  // Build cockpit overlay: dashboard panel + steering wheel
+  buildCockpitOverlay(group, def.style);
+
+  // ── Headlights (night mode) ────────────────────────────────────────────────
+  // Two spotlights mounted at the nose, aimed down the road. Intensity 0
+  // during the day; setNightMode() switches them on for every car at once.
+  const headLights = [];
+  const headZ = s === "pickup" ? 2.5 : s === "sports" ? 2.44 : 2.3;
+  for (const side of [-1, 1]) {
+    const spot = new THREE.SpotLight(0xfff0c4, 0, 95, Math.PI / 6.5, 0.45, 1.1);
+    spot.position.set(side * 0.6, 0.72, headZ);
+    spot.target.position.set(side * 0.6, 0, headZ + 22);
+    spot.castShadow = false;
+    group.add(spot);
+    group.add(spot.target);
+    headLights.push(spot);
+  }
+  group.userData.headLights = headLights;
+
+  // Cars spawned while already in night mode start lit (e.g. stolen NPC cars).
+  for (const l of headLights) l.intensity = state.nightMode ? 2.6 : 0;
+
+  // Store cockpit eye data directly on userData for updateCamera()
+  group.userData.cockpitEye = COCKPIT_EYE[def.style] || COCKPIT_EYE.sedan;
   group.userData.styleIndex = styleIdx;
   group.userData.styleName = def.name;
   group.position.set(x, 0, z);
@@ -524,11 +656,6 @@ function carOverlapWithAabb(carPos, yaw, aabb, shrink = 0) {
 function carIntersectsAabb(carPos, yaw, aabb) {
   return carOverlapWithAabb(carPos, yaw, aabb, 0) !== null;
 }
-
-// Does this car's footprint overlap an arbitrary AABB (e.g. the player's
-// collision box)? Used by npc.js to detect an NPC car running the player
-// over, the same SAT test runOverEnemies below already uses for the
-// player's own car vs. enemies.
 export function carHitsBox(car, box) {
   return carIntersectsAabb(car.position, car.rotation.y, box);
 }
@@ -554,8 +681,6 @@ function resolveCarOverlaps(car) {
     car.position.z += worst.nz * (worst.depth + 0.02);
   }
 }
-// Same SAT test as carOverlapWithAabb, but against another car's oriented
-// footprint instead of a static AABB (both cars share the same rectangle).
 function carOverlapWithCar(posA, yawA, posB, yawB, shrink = 0) {
   const cosA = Math.cos(yawA),
     sinA = Math.sin(yawA);
@@ -566,12 +691,10 @@ function carOverlapWithCar(posA, yawA, posB, yawB, shrink = 0) {
   const axisBx = { x: cosB, z: sinB };
   const axisBz = { x: -sinB, z: cosB };
   const axes = [axisAx, axisAz, axisBx, axisBz];
-
   const hw = carHalfWidth - shrink,
     hd = carHalfDepth - shrink;
   const dx = posA.x - posB.x,
     dz = posA.z - posB.z;
-
   let minDepth = Infinity,
     n = { x: 0, z: 0 };
   for (const axis of axes) {
@@ -592,10 +715,6 @@ function carOverlapWithCar(posA, yawA, posB, yawB, shrink = 0) {
   }
   return { depth: minDepth, nx: n.x, nz: n.z };
 }
-
-// Does (position, yaw) overlap any OTHER car currently in state.cars? Shared
-// by the player's own driving physics and by npc.js's driver AI, so cars —
-// player-driven, NPC-driven, or parked — never pass through one another.
 export function findCarOverlap(position, yaw, selfCar, shrink = 0) {
   for (const other of state.cars) {
     if (other === selfCar) continue;
@@ -610,7 +729,6 @@ export function findCarOverlap(position, yaw, selfCar, shrink = 0) {
   }
   return null;
 }
-
 export function resolveCarVsCarOverlap(car) {
   for (let iter = 0; iter < 4; iter++) {
     const o = findCarOverlap(car.position, car.rotation.y, car, 0);
@@ -619,7 +737,6 @@ export function resolveCarVsCarOverlap(car) {
     car.position.z += o.nz * (o.depth + 0.02);
   }
 }
-
 function staticCollides(box) {
   for (const t of state.treeBoxes) if (box.intersectsBox(t)) return true;
   for (const b of state.buildingBoxes) if (box.intersectsBox(b)) return true;
@@ -647,15 +764,22 @@ function enterCar(car) {
   state.car = car;
   state.inCar = true;
   state.player.visible = false;
-  carLookYawOffset = 0;
+  carLookYawOffset = 0; // always reset look to dead-ahead on entry
   car.userData.velocity = 0;
   car.userData.moveHeading = car.rotation.y;
+
+  // Show the dash strip for this car
+  if (car.userData.dashStrip) car.userData.dashStrip.visible = false; // hidden by default; shown in updateCamera
 }
 function exitCar() {
   const car = state.car;
   state.inCar = false;
   state.player.visible = true;
   car.userData.velocity = 0;
+
+  // Hide dash strip
+  if (car.userData.dashStrip) car.userData.dashStrip.visible = false;
+
   const carPos = car.position;
   const offsets = [
     [2.5, 0],
@@ -694,7 +818,6 @@ function findSpawnSpot(avoidPositions) {
       z = p.z + Math.sin(a) * r;
     const pos = new THREE.Vector3(x, 0, z);
     if (carCollides(pos, 0)) continue;
-    // Keep away from other cars
     let tooClose = false;
     for (const ap of avoidPositions) {
       if (Math.hypot(x - ap.x, z - ap.z) < 12) {
@@ -704,39 +827,29 @@ function findSpawnSpot(avoidPositions) {
     }
     if (!tooClose) return { x, z };
   }
-  // Fallback: scatter in cardinal directions
   return { x: p.x + 15 + Math.random() * 5, z: p.z + 15 + Math.random() * 5 };
 }
 
-// ─── initCar — spawn 5 cars ───────────────────────────────────────────────────
+// ─── initCar ─────────────────────────────────────────────────────────────────
 export function initCar() {
-  // state.cars (initialized in state.js) holds every enterable car — the 5
-  // spawned below plus any NPC cars stolen later; state.car is whichever one
-  // is currently driven.
   const spawnedPositions = [];
-
   for (let i = 0; i < 5; i++) {
     const spot = findSpawnSpot(spawnedPositions);
     spawnedPositions.push(spot);
-
     const car = createCarByStyle(spot.x, spot.z, i);
     car.position.y = getGroundHeight(spot.x, spot.z);
-    car.rotation.y = Math.random() * Math.PI * 2; // random heading
+    car.rotation.y = Math.random() * Math.PI * 2;
     state.scene.add(car);
     state.cars.push(car);
-
-    // First car is the default driveable one
     if (i === 0) state.car = car;
   }
 
-  // E / Enter — enter nearest car, or exit current
   document.addEventListener("keydown", (event) => {
     if (event.code !== "KeyE" && event.code !== "Enter") return;
     if (state.inCar) {
       exitCar();
       return;
     }
-    // Find closest car within range
     let closest = null,
       closestDist = 6;
     for (const car of state.cars) {
@@ -750,11 +863,16 @@ export function initCar() {
   });
 
   document.addEventListener("mousemove", (event) => {
-    if (state.inCar) carLookYawOffset += event.movementX * 0.002;
+    if (!state.inCar || state.thirdPerson) return;
+    // Accumulate and CLAMP — no spinning inside the car body
+    carLookYawOffset = Math.max(
+      -CAR_LOOK_MAX_YAW,
+      Math.min(CAR_LOOK_MAX_YAW, carLookYawOffset + event.movementX * 0.002),
+    );
   });
 }
 
-// ─── updateCar — drives state.car ────────────────────────────────────────────
+// ─── updateCar ────────────────────────────────────────────────────────────────
 export function updateCar(dt) {
   const car = state.car;
   if (!car) return;
@@ -763,17 +881,13 @@ export function updateCar(dt) {
   let carVelocity = ud.velocity;
   const absVel = Math.abs(carVelocity);
 
-  // ── Steering ──────────────────────────────────────────────────────────────
+  // Steering
   const speedRatio = Math.min(absVel / CAR_MAX_SPEED, 1);
-  const turnScale = 1 - speedRatio * 0.4; // less taper = more turn at speed
+  const turnScale = 1 - speedRatio * 0.4;
   let turnInput = 0;
   if (keys["KeyA"] || keys["ArrowLeft"]) turnInput = 1;
   if (keys["KeyD"] || keys["ArrowRight"]) turnInput = -1;
 
-  // Space = handbrake. Pulling it while turning at speed breaks rear grip:
-  // the chassis rotates faster than the car actually travels, so the travel
-  // direction (moveHeading) lags behind rotation.y and the car slides — a
-  // drift. Releasing it (or straightening out) lets grip bite again.
   const handbrake = keys["Space"];
   const isDrifting = handbrake && absVel > DRIFT_MIN_SPEED && turnInput !== 0;
   ud.isDrifting = isDrifting;
@@ -785,14 +899,11 @@ export function updateCar(dt) {
       turnInput * CAR_TURN_RATE * turnScale * turnRateMult * dt * dir;
   }
 
-  // Visual steer angle — snappier tracking
   const targetSteer = turnInput * MAX_STEER_ANGLE * turnScale;
   ud.steerAngle += (targetSteer - ud.steerAngle) * 0.22 * dt;
 
-  // ── Acceleration / braking ────────────────────────────────────────────────
+  // Acceleration / braking
   if (handbrake) {
-    // Rear wheels lock and scrub speed. Holding the throttle at the same
-    // time keeps some power down so a slide can be sustained (power-slide).
     const scrub = HANDBRAKE_DECEL * dt;
     if (keys["KeyW"] || keys["ArrowUp"]) {
       carVelocity = Math.min(
@@ -822,16 +933,13 @@ export function updateCar(dt) {
     else carVelocity = Math.min(0, carVelocity + friction);
   }
 
-  // ── Drift slip — travel direction chases the chassis heading at a rate
-  // set by how much grip the rear wheels currently have. Full grip snaps it
-  // in line with rotation.y (old behavior); low grip lets an angle build up
-  // between where the car points and where it's actually sliding.
+  // Drift slip
   const gripRate = isDrifting ? DRIFT_GRIP_RATE : GRIP_RATE;
   let headingDiff = car.rotation.y - ud.moveHeading;
   headingDiff = Math.atan2(Math.sin(headingDiff), Math.cos(headingDiff));
   ud.moveHeading += headingDiff * Math.min(1, gripRate * dt);
 
-  // ── Movement & slope ──────────────────────────────────────────────────────
+  // Movement & slope
   if (Math.abs(carVelocity) > 0.001) {
     carForwardVec.set(Math.sin(ud.moveHeading), 0, Math.cos(ud.moveHeading));
     const s = 1.5;
@@ -867,21 +975,15 @@ export function updateCar(dt) {
   car.position.x = Math.max(-boundary, Math.min(boundary, car.position.x));
   car.position.z = Math.max(-boundary, Math.min(boundary, car.position.z));
 
-  // ── Terrain following ─────────────────────────────────────────────────────
-  // Sample all four wheel/contact areas. The car body uses these samples to
-  // follow hills while maintaining a hard minimum clearance above the ground.
+  // Terrain following
   const fy = car.rotation.y;
-  const fxA = Math.sin(fy);
-  const fzA = Math.cos(fy);
-  const rxA = Math.cos(fy);
-  const rzA = -Math.sin(fy);
-
-  const L = 1.42;
-  const W = 0.95;
-
-  // Extra vertical safety margin so the chassis does not visually clip into
-  // steep terrain after the car is rotated to match the slope.
-  const CLEAR = 0.15;
+  const fxA = Math.sin(fy),
+    fzA = Math.cos(fy);
+  const rxA = Math.cos(fy),
+    rzA = -Math.sin(fy);
+  const L = 1.42,
+    W = 0.95,
+    CLEAR = 0.15;
 
   const hFL = getGroundHeight(
     car.position.x + fxA * L - rxA * W,
@@ -905,12 +1007,9 @@ export function updateCar(dt) {
   const leftH = (hFL + hRL) / 2;
   const rightH = (hFR + hRR) / 2;
 
-  // Put the car origin above the highest sampled terrain point. This is a
-  // conservative placement that prevents the wheels/chassis from sinking.
-  const highestCorner = Math.max(hFL, hFR, hRL, hRR);
-  car.position.y = highestCorner + CLEAR;
+  car.position.y = Math.max(hFL, hFR, hRL, hRR) + CLEAR;
 
-  // ── Suspension ────────────────────────────────────────────────────────────
+  // Suspension
   const cornerHeights = [hFL, hFR, hRL, hRR];
   const suspGroups = [ud.suspFL, ud.suspFR, ud.suspRL, ud.suspRR];
   const restY = ud.suspRestY;
@@ -930,36 +1029,33 @@ export function updateCar(dt) {
     suspGroups[i].position.y = restY - ud.suspOffsets[i];
   }
 
-  // ── Body roll & pitch ─────────────────────────────────────────────────────
+  // Body roll & pitch
   const targetRoll = -turnInput * speedRatio * (isDrifting ? 0.1 : 0.055);
   const accelDelta = carVelocity - ud.prevVelocity;
   const targetPitch = -accelDelta * 12;
   ud.prevVelocity = carVelocity;
-
   ud.bodyRoll += (targetRoll - ud.bodyRoll) * 0.1 * dt;
   ud.bodyPitch += (targetPitch - ud.bodyPitch) * 0.08 * dt;
   ud.bodyPitch = Math.max(-0.08, Math.min(0.08, ud.bodyPitch));
 
-  // ── Terrain roll & pitch ─────────────────────────────────────────────────
-  // Three.js uses +Z as the car's forward direction. Positive X rotation
-  // moves the +Z/front side DOWN, so terrain pitch must be NEGATED.
-  //
-  // Uphill:  front terrain is higher -> front of car rises.
-  // Downhill: rear terrain is higher -> rear of car rises.
   const terrainRoll = Math.atan2(rightH - leftH, 2 * W);
   const terrainPitch = -Math.atan2(frontH - rearH, 2 * L);
 
   car.rotation.z = terrainRoll + ud.bodyRoll;
   car.rotation.x = terrainPitch + ud.bodyPitch;
 
-  // ── Steering visual ───────────────────────────────────────────────────────
+  // Steer visual — front wheel pivots
   ud.steerPivotL.rotation.y = ud.steerAngle;
   ud.steerPivotR.rotation.y = ud.steerAngle;
 
-  // ── Wheel spin ────────────────────────────────────────────────────────────
+  // Cockpit steering wheel — spins with steer angle (×3.5 for drama,
+  // matching the lock-to-lock feel of a real steering column)
+  if (ud.cockpitWheelSpin) {
+    ud.cockpitWheelSpin.rotation.z = -ud.steerAngle * 3.5;
+  }
+
+  // Wheel spin
   const spinDelta = (carVelocity * dt) / 0.42;
-  // Rear wheels lose traction while drifting, so they spin faster than the
-  // ground speed alone would produce.
   const rearSpinDelta = isDrifting
     ? spinDelta + Math.sign(carVelocity || 1) * 0.3 * dt
     : spinDelta;
@@ -968,7 +1064,6 @@ export function updateCar(dt) {
   ud.wheelGroupRL.rotation.x += rearSpinDelta;
   ud.wheelGroupRR.rotation.x += rearSpinDelta;
 
-  // Save velocity back
   ud.velocity = carVelocity;
 
   runOverEnemies(car);
@@ -977,18 +1072,54 @@ export function updateCar(dt) {
 }
 
 // ─── updateCamera ─────────────────────────────────────────────────────────────
+// Re-usable vectors — allocated once, reused every frame.
+const _eyeLocal = new THREE.Vector3();
+const _eyeWorld = new THREE.Vector3();
+const _lookTarget = new THREE.Vector3();
+
 export function updateCamera() {
   if (state.inCar && state.car) {
-    const yaw = state.car.rotation.y + carLookYawOffset;
+    const car = state.car;
+
+    // ── First-person cockpit (V not pressed) ──────────────────────────────
+    if (!state.thirdPerson) {
+      const eye = car.userData.cockpitEye; // { x, y, z, lookAheadY }
+
+      // 1. Set local-space eye position (centred, in front of windscreen)
+      _eyeLocal.set(eye.x, eye.y, eye.z);
+
+      // 2. Convert to world space — automatically inherits the car's terrain
+      //    pitch and body-roll rotations so the view tilts naturally on hills.
+      car.localToWorld(_eyeLocal);
+      state.camera.position.copy(_eyeLocal);
+
+      // 3. Build look-at target: ahead along the car's heading, with a slight
+      //    downward pitch so a sliver of dashboard is visible at the bottom.
+      //    carLookYawOffset lets the driver glance left/right (clamped ±60°).
+      const yaw = car.rotation.y + carLookYawOffset;
+      _lookTarget.set(
+        _eyeLocal.x + Math.sin(yaw) * 20,
+        _eyeLocal.y + eye.lookAheadY,
+        _eyeLocal.z + Math.cos(yaw) * 20,
+      );
+      state.camera.lookAt(_lookTarget);
+
+      // Show dash strip only in first-person cockpit
+      if (car.userData.dashStrip) car.userData.dashStrip.visible = true;
+      return;
+    }
+
+    // Hide dash strip in third-person
+    if (car.userData.dashStrip) car.userData.dashStrip.visible = false;
+
+    // ── Third-person chase cam (V pressed while driving) ──────────────────
+    const yaw = car.rotation.y + carLookYawOffset;
     carForwardVec.set(Math.sin(yaw), 0, Math.cos(yaw));
 
-    // Ideal camera position: 8 units behind, 3 units above the car.
     const idealX = state.car.position.x - carForwardVec.x * 8;
     const idealZ = state.car.position.z - carForwardVec.z * 8;
     const idealY = state.car.position.y + 3;
 
-    // Clamp camera Y so it NEVER goes below the terrain. Use a larger
-    // clearance because the camera can sit behind the car on steep hills.
     const CAMERA_GROUND_CLEARANCE = 1.0;
     const groundAtCam =
       getGroundHeight(idealX, idealZ) + CAMERA_GROUND_CLEARANCE;
@@ -996,16 +1127,21 @@ export function updateCamera() {
 
     state.camera.position.set(idealX, camY, idealZ);
 
-    // Keep the look-at target above the terrain as well.
     const cameraLookClearance = 0.8;
     const lookGroundY =
       getGroundHeight(state.car.position.x, state.car.position.z) +
       cameraLookClearance;
     const lookY = Math.max(state.car.position.y + 1, lookGroundY);
-
     state.camera.lookAt(state.car.position.x, lookY, state.car.position.z);
     return;
   }
+
+  // ── On-foot cameras ───────────────────────────────────────────────────────
+  // Make sure all car dash strips are hidden
+  for (const car of state.cars) {
+    if (car.userData.dashStrip) car.userData.dashStrip.visible = false;
+  }
+
   if (state.thirdPerson) {
     state.camera.getWorldDirection(cameraForward);
     cameraForward.y = 0;
@@ -1018,11 +1154,9 @@ export function updateCamera() {
       state.player.position.z - cameraForward.z * thirdPersonDistance;
     const idealThirdY = state.player.position.y + thirdPersonHeight;
 
-    // Hard terrain floor for third-person camera too.
     const thirdPersonGroundClearance = 1.0;
     const thirdPersonGroundY =
       getGroundHeight(idealThirdX, idealThirdZ) + thirdPersonGroundClearance;
-
     const safeThirdY = Math.max(idealThirdY, thirdPersonGroundY);
 
     state.camera.position.set(idealThirdX, safeThirdY, idealThirdZ);
@@ -1119,9 +1253,6 @@ function getCurrentSupportingBuilding() {
 }
 
 export function updateMovement(dt) {
-  // While a car knockback/ragdoll is playing, skip normal input movement so
-  // the player's flight is driven purely by the knockback physics in npc.js
-  // (which already applies gravity and ground snapping for us).
   if (playerKnockback.active) {
     updateWalkCycle(state.player, dt, false);
     return;
@@ -1240,7 +1371,11 @@ export function updateMovement(dt) {
 // ─── Input listeners & initial camera ─────────────────────────────────────────
 export function initPlayer() {
   document.addEventListener("keydown", (event) => {
-    if (event.code === "KeyV") state.thirdPerson = !state.thirdPerson;
+    if (event.code === "KeyV") {
+      state.thirdPerson = !state.thirdPerson;
+      // Reset look offset when toggling so you don't snap sideways
+      if (!state.thirdPerson) carLookYawOffset = 0;
+    }
   });
   document.addEventListener("keydown", (event) => {
     if (event.code === "Space") {

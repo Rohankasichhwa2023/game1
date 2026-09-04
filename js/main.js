@@ -1,10 +1,25 @@
 // main.js
 // Entry point: wires up all modules, bootstraps the world, and runs the game loop.
 
-import { state, updateGoldHud, isPlayerIndoors } from "./state.js";
-import { initWorld, findClearSpawnPosition, updateEnvironment } from "./world.js";
+import {
+  state,
+  updateGoldHud,
+  isPlayerIndoors,
+  setNightMode,
+} from "./state.js";
+import {
+  initWorld,
+  findPlayerSpawnPosition,
+  updateEnvironment,
+} from "./world.js";
 import { initEnemies, updateEnemies } from "./enemies.js";
-import { initPlayer, updateMovement, updateCamera, initCar, updateCar } from "./player.js";
+import {
+  initPlayer,
+  updateMovement,
+  updateCamera,
+  initCar,
+  updateCar,
+} from "./player.js";
 import { initNpcs, updateNpcs } from "./npc.js";
 import { updateBullets, updateEnemyBullets } from "./bullets.js";
 import {
@@ -27,14 +42,21 @@ document.addEventListener("DOMContentLoaded", () => {
   });
 });
 
-// Bootstrap (order matters: world and enemies first, then things that use the player).
+// Bootstrap (order matters: world first, then the player's spawn position so
+// enemies can keep their distance from it, then everything else).
 initWorld();
+
+// Place the player at the fixed neighbourhood spawn (guaranteed clear of
+// buildings, trees, walls, roads, and building interiors) BEFORE enemies are
+// created. Logged so the spot is easy to sanity-check in the console.
+const spawn = findPlayerSpawnPosition();
+state.player.position.set(spawn.x, 1, spawn.z);
+console.log(
+  `Player spawn: (${spawn.x.toFixed(1)}, ${spawn.z.toFixed(1)}) — dist ${Math.hypot(spawn.x, spawn.z).toFixed(0)} from center`,
+);
+
 initEnemies();
 initNpcs();
-
-// Place the player on clear ground so they never spawn inside a building/tree/wall.
-const spawn = findClearSpawnPosition();
-state.player.position.set(spawn.x, 1, spawn.z);
 
 initPlayer();
 initCar();
@@ -102,5 +124,12 @@ document.addEventListener("keydown", (event) => {
     } else {
       console.log("Debug: No boss enemy present.");
     }
+  }
+});
+
+// Night mode toggle.
+document.addEventListener("keydown", (event) => {
+  if (event.key === "n" || event.key === "N") {
+    setNightMode(!state.nightMode);
   }
 });

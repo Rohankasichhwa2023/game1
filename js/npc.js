@@ -9,7 +9,13 @@
 
 import * as THREE from "three";
 import { state, updateLifeHud, playerKnockback } from "./state.js";
-import { createHumanFigure, updateWalkCycle, makeBox } from "./character.js";
+import {
+  createHumanFigure,
+  updateWalkCycle,
+  startPunch,
+  updatePunch,
+  makeBox,
+} from "./character.js";
 import { getGroundHeight, findClearSpawnPosition } from "./world.js";
 import {
   createCarByStyle,
@@ -91,7 +97,8 @@ function pickPedestrianTarget(c) {
 }
 
 function createPedestrian() {
-  const spawn = findClearSpawnPosition();
+  // Keep pedestrians from popping in right on top of the player.
+  const spawn = findClearSpawnPosition(state.player.position, 30);
   const mesh = randomCitizenMesh();
   mesh.rotation.y = Math.random() * Math.PI * 2;
   mesh.position.set(spawn.x, getGroundHeight(spawn.x, spawn.z) + 1, spawn.z);
@@ -314,6 +321,9 @@ function updateHostileCivilian(c, dt) {
     c.kind = "pedestrian"; // may have chased far from home — just lives on the street now
     c.mode = "idle";
     c.timer = 0.5 + Math.random();
+    // Drop any mid-swing punch so re-aggroing later can't fire a stale
+    // strike that was frozen mid-animation.
+    mesh.userData.punchState = null;
     updateWalkCycle(mesh, dt, false);
     return;
   }
@@ -337,10 +347,29 @@ function updateHostileCivilian(c, dt) {
     return;
   }
 
-  // Close enough to take a swing.
+  // Close enough to fight. The civilian plays a full punch animation
+  // (windup → jab → recover) and the damage lands at the moment the fist
+  // reaches extension — updatePunch() reports "strike" on exactly that frame.
   faceDirection(mesh, dirX, dirZ, dt, 0.3);
   updateWalkCycle(mesh, dt, false);
-  if (!state.playerIndoors && Date.now() - c.lastHit > MELEE_COOLDOWN_MS) {
+
+  if (state.playerIndoors) {
+    // Player is safe inside a building — no swings at all.
+    updatePunch(mesh, dt);
+    return;
+  }
+
+  const swing = updatePunch(mesh, dt);
+
+  // No swing running and the cooldown allows it → wind up the next punch,
+  // alternating hands so a flurry looks natural.
+  if (swing === false && Date.now() - c.lastHit >= MELEE_COOLDOWN_MS) {
+    c.punchHand = c.punchHand === "R" ? "L" : "R";
+    startPunch(mesh, c.punchHand);
+  }
+
+  // Damage connects exactly when the fist snaps forward.
+  if (swing === "strike") {
     c.lastHit = Date.now();
     state.playerLife -= MELEE_DAMAGE;
     updateLifeHud();

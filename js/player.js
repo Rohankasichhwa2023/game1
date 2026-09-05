@@ -3,7 +3,7 @@
 
 import * as THREE from "three";
 import { state, playerKnockback } from "./state.js";
-import { makeBox, updateWalkCycle } from "./character.js";
+import { makeBox, updateWalkCycle, createHumanFigure } from "./character.js";
 import { getBullet } from "./bullets.js";
 import { triggerGameOver } from "./ui.js";
 import { getGroundHeight } from "./world.js";
@@ -67,6 +67,31 @@ const SUSP_DAMPING = 3.5;
 const carHalfWidth = 1.1;
 const carHalfHeight = 0.9;
 const carHalfDepth = 2.3;
+
+// Bike collision footprint — much narrower and shorter than a car, so it can
+// slip through gaps cars can't but still collides with trees, lamp posts,
+// walls, buildings and other vehicles.
+const bikeHalfWidth = 0.35;
+const bikeHalfHeight = 0.7;
+const bikeHalfDepth = 1.15;
+
+// Bike physics constants — quicker off the line, tighter turning and a
+// higher top speed than any of the cars.
+const BIKE_MAX_SPEED = 1.35;
+const BIKE_ACCEL = 0.05;
+const BIKE_BRAKE = 0.075;
+const BIKE_FRICTION = 0.012;
+const BIKE_REVERSE_MAX = 0.25;
+const BIKE_TURN_RATE = 0.062;
+const BIKE_LEAN_MAX = 0.5; // radians of lean at full speed + full steer
+
+// Per-vehicle collision footprint: bikes get the narrow dims, cars keep the
+// wide ones. Every SAT helper reads the footprint from here.
+function vehicleHalfDims(vehicle) {
+  if (vehicle && vehicle.userData && vehicle.userData.isBike)
+    return { hw: bikeHalfWidth, hh: bikeHalfHeight, hd: bikeHalfDepth };
+  return { hw: carHalfWidth, hh: carHalfHeight, hd: carHalfDepth };
+}
 
 // ─── Per-car runtime state ────────────────────────────────────────────────────
 function initCarPhysics(car) {
@@ -615,20 +640,343 @@ export function createCarByStyle(x, z, styleIdx) {
   return group;
 }
 
+// ─── Motorcycle ───────────────────────────────────────────────────────────────
+// Cockpit eye for the bike — the rider sits ON the seat, so the camera is
+// higher and further back than a car driver's, looking over the handlebars.
+const BIKE_COCKPIT_EYE = { x: 0, y: 1.66, z: 0.05, lookAheadY: -0.22 };
+
+export const BIKE_STYLES = [
+  { name: "Sport", paint: 0xd41f2c, dark: 0x20121a, hub: 0xd8dde4 },
+  { name: "Cruiser", paint: 0x1b1f24, dark: 0x101317, hub: 0xc09040 },
+];
+
+// ─── Rider figure — seated on the bike, arms reaching the bars ───────────────
+function buildBikeRider() {
+  const rider = createHumanFigure({
+    shirtColor: 0x23262b,
+    pantsColor: 0x2f3b4c,
+    skinColor: 0xf1c27d,
+    scale: 0.78,
+  });
+  // Seat top sits at ~y=1.08; the figure's hips are at -0.1 in local space.
+  rider.position.set(0, 1.15, -0.5);
+  rider.rotation.x = 0.12; // lean forward over the tank like a real rider
+  const limbs = rider.userData.limbs;
+  if (limbs) {
+    // Swing both arms forward so the hands rest on the handlebars.
+    limbs.shoulderL.rotation.x = -1.15;
+    limbs.shoulderR.rotation.x = -1.15;
+  }
+  rider.visible = false; // only shown while the bike is being ridden
+  return rider;
+}
+
+// ─── First-person overlay: speedo pod + handlebar assembly ───────────────────
+// Same idea as the car dashboard overlay: sits below the cockpit eye, and the
+// "bars" group is stored as cockpitWheelSpin so updateBike() can yaw it with
+// the steer angle.
+function buildBikeCockpitOverlay(group) {
+  const eye = BIKE_COCKPIT_EYE;
+
+  const podMat = new THREE.MeshPhongMaterial({
+    color: 0x14161a,
+    shininess: 30,
+  });
+  const chromeMat = new THREE.MeshPhongMaterial({
+    color: 0xb8c2cc,
+    shininess: 180,
+  });
+  const rubberMat = new THREE.MeshPhongMaterial({
+    color: 0x111111,
+    shininess: 8,
+  });
+
+  const overlay = new THREE.Group();
+  overlay.visible = false;
+
+  // Speedo pod just below the eye line, tilted toward the rider
+  const pod = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.09, 0.09, 0.05, 12),
+    podMat,
+  );
+  pod.position.set(0, eye.y - 0.32, eye.z + 0.32);
+  pod.rotation.x = Math.PI / 2 - 0.5;
+  overlay.add(pod);
+  const dial = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.075, 0.075, 0.012, 12),
+    chromeMat,
+  );
+  dial.position.set(0, eye.y - 0.3, eye.z + 0.34);
+  dial.rotation.x = Math.PI / 2 - 0.5;
+  overlay.add(dial);
+
+  // Handlebar crossbar — this group yaws with the steer angle
+  const bars = new THREE.Group();
+  bars.position.set(0, eye.y - 0.42, eye.z + 0.42);
+  bars.rotation.x = 0.35; // same rake as the fork
+  overlay.add(bars);
+
+  const barGeo = new THREE.CylinderGeometry(0.022, 0.022, 0.64, 8);
+  barGeo.rotateZ(Math.PI / 2);
+  const bar = new THREE.Mesh(barGeo, podMat);
+  bars.add(bar);
+  const gripGeo = new THREE.CylinderGeometry(0.03, 0.03, 0.14, 8);
+  gripGeo.rotateZ(Math.PI / 2);
+  for (const side of [-1, 1]) {
+    const grip = new THREE.Mesh(gripGeo, rubberMat);
+    grip.position.set(side * 0.3, 0, 0);
+    bars.add(grip);
+  }
+
+  overlay.visible = false;
+  group.add(overlay);
+  group.userData.cockpitOverlay = overlay;
+  group.userData.cockpitWheelSpin = bars; // yawed each frame in updateBike
+  group.userData.dashStrip = overlay; // legacy alias for visibility toggles
+}
+
+// ─── createBike ───────────────────────────────────────────────────────────────
+// Low-poly motorcycle. Forward = +Z, origin at ground level, wheel centres at
+// local y = 0.42. The front wheel + fork + bars live in one steering group
+// that yaws with the steer angle; both wheels bob on simple spring suspensions
+// reusing the car suspension maths.
+export function createBike(x, z, styleIdx) {
+  const def = BIKE_STYLES[styleIdx % BIKE_STYLES.length];
+  const group = new THREE.Group();
+
+  const paintMat = new THREE.MeshPhongMaterial({
+    color: def.paint,
+    shininess: 110,
+  });
+  const darkMat = new THREE.MeshPhongMaterial({
+    color: def.dark,
+    shininess: 60,
+  });
+  const metalMat = new THREE.MeshPhongMaterial({
+    color: 0x555a60,
+    shininess: 90,
+  });
+  const chromeMat = new THREE.MeshPhongMaterial({
+    color: 0xd0d8e0,
+    shininess: 200,
+  });
+  const rubberMat = new THREE.MeshPhongMaterial({
+    color: 0x111111,
+    shininess: 8,
+  });
+  const seatMat = new THREE.MeshPhongMaterial({
+    color: 0x14161a,
+    shininess: 25,
+  });
+  const lightMat = new THREE.MeshPhongMaterial({
+    color: 0xfff5b0,
+    shininess: 200,
+    emissive: 0xffd040,
+    emissiveIntensity: 0.35,
+  });
+  const tailMat = new THREE.MeshPhongMaterial({
+    color: 0xff2200,
+    shininess: 100,
+    emissive: 0xdd1100,
+    emissiveIntensity: 0.25,
+  });
+
+  function add(geo, mat, lx, ly, lz, parent, rx = 0) {
+    const m = new THREE.Mesh(geo, mat);
+    m.castShadow = true;
+    m.receiveShadow = true;
+    m.position.set(lx, ly, lz);
+    m.rotation.x = rx;
+    (parent || group).add(m);
+    return m;
+  }
+
+  // ── Frame & body (all static parts) ───────────────────────────────────────
+  add(new THREE.BoxGeometry(0.16, 0.16, 1.5), paintMat, 0, 0.92, -0.05); // main spine
+  add(
+    new THREE.BoxGeometry(0.14, 0.62, 0.14),
+    metalMat,
+    0,
+    0.78,
+    0.42,
+    group,
+    0.35,
+  ); // steering-head downtube
+  add(new THREE.BoxGeometry(0.5, 0.44, 0.72), metalMat, 0, 0.56, -0.08); // engine block
+  add(new THREE.BoxGeometry(0.42, 0.3, 0.66), paintMat, 0, 1.06, 0.12); // fuel tank
+  add(new THREE.BoxGeometry(0.4, 0.11, 0.56), seatMat, 0, 1.03, -0.46); // seat
+  add(new THREE.BoxGeometry(0.36, 0.12, 0.42), paintMat, 0, 1.05, -0.86); // tail piece
+  add(new THREE.BoxGeometry(0.3, 0.06, 0.24), tailMat, 0, 1.08, -1.06); // tail light
+  add(new THREE.BoxGeometry(0.08, 0.08, 0.5), metalMat, -0.24, 0.5, -0.35); // footpeg rail L
+  add(new THREE.BoxGeometry(0.08, 0.08, 0.5), metalMat, 0.24, 0.5, -0.35); // footpeg rail R
+  // Exhaust — right side, sweeping back into a muffler
+  add(
+    new THREE.CylinderGeometry(0.045, 0.045, 0.9, 10),
+    chromeMat,
+    0.18,
+    0.5,
+    -0.45,
+    group,
+    Math.PI / 2,
+  );
+  add(
+    new THREE.CylinderGeometry(0.075, 0.075, 0.42, 10),
+    chromeMat,
+    0.18,
+    0.48,
+    -0.88,
+    group,
+    Math.PI / 2,
+  );
+  // Chain guard + rear hugger
+  add(new THREE.BoxGeometry(0.1, 0.16, 0.5), darkMat, 0.2, 0.42, -0.55);
+  add(new THREE.BoxGeometry(0.26, 0.06, 0.6), paintMat, 0, 0.66, -0.78);
+
+  // ── Rear wheel — bobs on its own spring (swingarm group) ─────────────────
+  // Rest Y is 0.42 + SUSP_TRAVEL: the suspension code settles it back to 0.42.
+  const rearGroup = new THREE.Group();
+  rearGroup.position.set(0, 0.64, -0.78);
+  group.add(rearGroup);
+  const wheelRear = makeWheel(def.hub);
+  rearGroup.add(wheelRear);
+  add(
+    new THREE.BoxGeometry(0.08, 0.08, 0.55),
+    metalMat,
+    -0.08,
+    0.06,
+    0.28,
+    rearGroup,
+  );
+  add(
+    new THREE.BoxGeometry(0.08, 0.08, 0.55),
+    metalMat,
+    0.08,
+    0.06,
+    0.28,
+    rearGroup,
+  );
+
+  // ── Front end — steering fork pivots at the steering head ────────────────
+  const fork = new THREE.Group();
+  fork.position.set(0, 1.28, 0.58); // rest + SUSP_TRAVEL; settles to 1.06
+  group.add(fork);
+  // Raked fork tubes running down to the front axle
+  add(
+    new THREE.CylinderGeometry(0.03, 0.03, 0.74, 8),
+    chromeMat,
+    -0.08,
+    -0.3,
+    0.12,
+    fork,
+    0.35,
+  );
+  add(
+    new THREE.CylinderGeometry(0.03, 0.03, 0.74, 8),
+    chromeMat,
+    0.08,
+    -0.3,
+    0.12,
+    fork,
+    0.35,
+  );
+  // Front wheel hangs below the head, slightly ahead of it
+  const wheelFront = makeWheel(def.hub);
+  wheelFront.position.set(0, -0.64, 0.28);
+  fork.add(wheelFront);
+  // Front fender riding above the wheel
+  add(new THREE.BoxGeometry(0.26, 0.07, 0.75), paintMat, 0, -0.38, 0.3, fork);
+  // Headlight housing + lens, aimed forward
+  add(
+    new THREE.CylinderGeometry(0.11, 0.13, 0.1, 12),
+    darkMat,
+    0,
+    0.02,
+    0.2,
+    fork,
+    Math.PI / 2,
+  );
+  add(
+    new THREE.CylinderGeometry(0.09, 0.09, 0.02, 12),
+    lightMat,
+    0,
+    0.02,
+    0.26,
+    fork,
+    Math.PI / 2,
+  );
+  // Handlebars + grips (third-person set; yaws with the fork)
+  const barGeo3 = new THREE.CylinderGeometry(0.02, 0.02, 0.62, 8);
+  barGeo3.rotateZ(Math.PI / 2);
+  add(barGeo3, darkMat, 0, 0.14, -0.02, fork);
+  const gripGeo3 = new THREE.CylinderGeometry(0.028, 0.028, 0.12, 8);
+  gripGeo3.rotateZ(Math.PI / 2);
+  for (const side of [-1, 1]) {
+    add(gripGeo3, rubberMat, side * 0.29, 0.14, -0.02, fork);
+    add(
+      new THREE.BoxGeometry(0.14, 0.08, 0.03),
+      darkMat,
+      side * 0.2,
+      0.3,
+      -0.06,
+      fork,
+    );
+  }
+
+  // ── Rider figure ──────────────────────────────────────────────────────────
+  const rider = buildBikeRider();
+  group.add(rider);
+
+  // ── First-person cockpit overlay ──────────────────────────────────────────
+  buildBikeCockpitOverlay(group);
+
+  // ── Headlight beam (night mode) — same pattern as the cars ───────────────
+  const spot = new THREE.SpotLight(0xfff0c4, 0, 95, Math.PI / 7, 0.45, 1.1);
+  spot.position.set(0, 0.9, 0.9);
+  spot.target.position.set(0, 0, 24);
+  spot.castShadow = false;
+  group.add(spot);
+  group.add(spot.target);
+  group.userData.headLights = [spot];
+  spot.intensity = state.nightMode ? 2.6 : 0;
+
+  // ── Runtime data ──────────────────────────────────────────────────────────
+  group.userData.isBike = true;
+  group.userData.steerFork = fork;
+  group.userData.wheelFront = wheelFront;
+  group.userData.wheelRear = wheelRear;
+  group.userData.suspF = fork;
+  group.userData.suspFRestY = fork.position.y;
+  group.userData.suspR = rearGroup;
+  group.userData.suspRRestY = rearGroup.position.y;
+  group.userData.suspRestY = 0.42; // wheel radius — same suspension maths as cars
+  group.userData.rider = rider;
+  group.userData.cockpitEye = BIKE_COCKPIT_EYE;
+  group.userData.styleIndex = styleIdx;
+  group.userData.styleName = def.name;
+  group.position.set(x, 0, z);
+  initCarPhysics(group);
+  return group;
+}
+
 // ─── SAT collision helpers ────────────────────────────────────────────────────
-function carOverlapWithAabb(carPos, yaw, aabb, shrink = 0) {
-  if (
-    carPos.y + carHalfHeight < aabb.min.y ||
-    carPos.y - carHalfHeight > aabb.max.y
-  )
-    return null;
+// hw/hh/hd are the vehicle's half-dims (car or bike footprint).
+function carOverlapWithAabb(
+  carPos,
+  yaw,
+  aabb,
+  shrink = 0,
+  hw = carHalfWidth,
+  hh = carHalfHeight,
+  hd = carHalfDepth,
+) {
+  if (carPos.y + hh < aabb.min.y || carPos.y - hh > aabb.max.y) return null;
   const cosY = Math.cos(yaw),
     sinY = Math.sin(yaw);
   const carAxisX = { x: cosY, z: sinY };
   const carAxisZ = { x: -sinY, z: cosY };
   const axes = [carAxisX, carAxisZ, { x: 1, z: 0 }, { x: 0, z: 1 }];
-  const hw = carHalfWidth - shrink,
-    hd = carHalfDepth - shrink;
+  const halfW = hw - shrink,
+    halfD = hd - shrink;
   const aabbCx = (aabb.min.x + aabb.max.x) / 2,
     aabbCz = (aabb.min.z + aabb.max.z) / 2;
   const aabbHx = (aabb.max.x - aabb.min.x) / 2,
@@ -639,8 +987,8 @@ function carOverlapWithAabb(carPos, yaw, aabb, shrink = 0) {
     n = { x: 0, z: 0 };
   for (const axis of axes) {
     const carRadius =
-      hw * Math.abs(axis.x * carAxisX.x + axis.z * carAxisX.z) +
-      hd * Math.abs(axis.x * carAxisZ.x + axis.z * carAxisZ.z);
+      halfW * Math.abs(axis.x * carAxisX.x + axis.z * carAxisX.z) +
+      halfD * Math.abs(axis.x * carAxisZ.x + axis.z * carAxisZ.z);
     const aabbRadius = aabbHx * Math.abs(axis.x) + aabbHz * Math.abs(axis.z);
     const distance = axis.x * dx + axis.z * dz;
     const overlap = carRadius + aabbRadius - Math.abs(distance);
@@ -653,27 +1001,49 @@ function carOverlapWithAabb(carPos, yaw, aabb, shrink = 0) {
   }
   return { depth: minDepth, nx: n.x, nz: n.z };
 }
-function carIntersectsAabb(carPos, yaw, aabb) {
-  return carOverlapWithAabb(carPos, yaw, aabb, 0) !== null;
+function carIntersectsAabb(carPos, yaw, aabb, dims = null) {
+  const d = dims || { hw: carHalfWidth, hh: carHalfHeight, hd: carHalfDepth };
+  return carOverlapWithAabb(carPos, yaw, aabb, 0, d.hw, d.hh, d.hd) !== null;
 }
 export function carHitsBox(car, box) {
-  return carIntersectsAabb(car.position, car.rotation.y, box);
+  return carIntersectsAabb(
+    car.position,
+    car.rotation.y,
+    box,
+    vehicleHalfDims(car),
+  );
 }
-function carCollides(position, yaw, shrink = 0) {
+function carCollides(
+  position,
+  yaw,
+  shrink = 0,
+  hw = carHalfWidth,
+  hh = carHalfHeight,
+  hd = carHalfDepth,
+) {
   for (const t of state.treeBoxes)
-    if (carOverlapWithAabb(position, yaw, t, shrink)) return true;
+    if (carOverlapWithAabb(position, yaw, t, shrink, hw, hh, hd)) return true;
   for (const b of state.buildingBoxes)
-    if (carOverlapWithAabb(position, yaw, b, shrink)) return true;
+    if (carOverlapWithAabb(position, yaw, b, shrink, hw, hh, hd)) return true;
   for (const w of state.wallBoxes)
-    if (carOverlapWithAabb(position, yaw, w, shrink)) return true;
+    if (carOverlapWithAabb(position, yaw, w, shrink, hw, hh, hd)) return true;
   return false;
 }
 function resolveCarOverlaps(car) {
+  const dims = vehicleHalfDims(car);
   for (let iter = 0; iter < 4; iter++) {
     let worst = null;
     for (const list of [state.treeBoxes, state.buildingBoxes, state.wallBoxes])
       for (const box of list) {
-        const o = carOverlapWithAabb(car.position, car.rotation.y, box, 0);
+        const o = carOverlapWithAabb(
+          car.position,
+          car.rotation.y,
+          box,
+          0,
+          dims.hw,
+          dims.hh,
+          dims.hd,
+        );
         if (o && (!worst || o.depth > worst.depth)) worst = o;
       }
     if (!worst) break;
@@ -681,7 +1051,23 @@ function resolveCarOverlaps(car) {
     car.position.z += worst.nz * (worst.depth + 0.02);
   }
 }
-function carOverlapWithCar(posA, yawA, posB, yawB, shrink = 0) {
+// dimsA / dimsB let a bike test against a car (or another bike) with the
+// correct footprint for each vehicle.
+function carOverlapWithCar(
+  posA,
+  yawA,
+  posB,
+  yawB,
+  shrink = 0,
+  dimsA = null,
+  dimsB = null,
+) {
+  const dA = dimsA || { hw: carHalfWidth, hd: carHalfDepth };
+  const dB = dimsB || { hw: carHalfWidth, hd: carHalfDepth };
+  const hwA = dA.hw - shrink,
+    hdA = dA.hd - shrink;
+  const hwB = dB.hw - shrink,
+    hdB = dB.hd - shrink;
   const cosA = Math.cos(yawA),
     sinA = Math.sin(yawA);
   const cosB = Math.cos(yawB),
@@ -691,19 +1077,17 @@ function carOverlapWithCar(posA, yawA, posB, yawB, shrink = 0) {
   const axisBx = { x: cosB, z: sinB };
   const axisBz = { x: -sinB, z: cosB };
   const axes = [axisAx, axisAz, axisBx, axisBz];
-  const hw = carHalfWidth - shrink,
-    hd = carHalfDepth - shrink;
   const dx = posA.x - posB.x,
     dz = posA.z - posB.z;
   let minDepth = Infinity,
     n = { x: 0, z: 0 };
   for (const axis of axes) {
     const radiusA =
-      hw * Math.abs(axis.x * axisAx.x + axis.z * axisAx.z) +
-      hd * Math.abs(axis.x * axisAz.x + axis.z * axisAz.z);
+      hwA * Math.abs(axis.x * axisAx.x + axis.z * axisAx.z) +
+      hdA * Math.abs(axis.x * axisAz.x + axis.z * axisAz.z);
     const radiusB =
-      hw * Math.abs(axis.x * axisBx.x + axis.z * axisBx.z) +
-      hd * Math.abs(axis.x * axisBz.x + axis.z * axisBz.z);
+      hwB * Math.abs(axis.x * axisBx.x + axis.z * axisBx.z) +
+      hdB * Math.abs(axis.x * axisBz.x + axis.z * axisBz.z);
     const distance = axis.x * dx + axis.z * dz;
     const overlap = radiusA + radiusB - Math.abs(distance);
     if (overlap < 0) return null;
@@ -716,6 +1100,7 @@ function carOverlapWithCar(posA, yawA, posB, yawB, shrink = 0) {
   return { depth: minDepth, nx: n.x, nz: n.z };
 }
 export function findCarOverlap(position, yaw, selfCar, shrink = 0) {
+  const dimsSelf = vehicleHalfDims(selfCar);
   for (const other of state.cars) {
     if (other === selfCar) continue;
     const o = carOverlapWithCar(
@@ -724,6 +1109,8 @@ export function findCarOverlap(position, yaw, selfCar, shrink = 0) {
       other.position,
       other.rotation.y,
       shrink,
+      dimsSelf,
+      vehicleHalfDims(other),
     );
     if (o) return o;
   }
@@ -744,6 +1131,7 @@ function staticCollides(box) {
   return false;
 }
 function runOverEnemies(car) {
+  const dims = vehicleHalfDims(car);
   for (let i = state.enemies.length - 1; i >= 0; i--) {
     const enemy = state.enemies[i];
     const enemyBox = makeBox(
@@ -752,7 +1140,7 @@ function runOverEnemies(car) {
       enemy.halfHeight,
       enemy.halfDepth,
     );
-    if (carIntersectsAabb(car.position, car.rotation.y, enemyBox)) {
+    if (carIntersectsAabb(car.position, car.rotation.y, enemyBox, dims)) {
       state.scene.remove(enemy.mesh);
       state.enemies.splice(i, 1);
     }
@@ -770,6 +1158,9 @@ function enterCar(car) {
 
   // Show the dash strip for this car
   if (car.userData.dashStrip) car.userData.dashStrip.visible = false; // hidden by default; shown in updateCamera
+
+  // Bikes: show the seated rider figure (updateCamera refines per view mode).
+  if (car.userData.rider) car.userData.rider.visible = true;
 }
 function exitCar() {
   const car = state.car;
@@ -779,6 +1170,9 @@ function exitCar() {
 
   // Hide dash strip
   if (car.userData.dashStrip) car.userData.dashStrip.visible = false;
+
+  // Bikes: hide the rider figure again
+  if (car.userData.rider) car.userData.rider.visible = false;
 
   const carPos = car.position;
   const offsets = [
@@ -844,6 +1238,22 @@ export function initCar() {
     if (i === 0) state.car = car;
   }
 
+  // Two motorcycles spawn alongside the cars — enterable with E/Enter just
+  // like any car since they live in the same state.cars list.
+  for (let i = 0; i < 2; i++) {
+    const spot = findSpawnSpot(spawnedPositions, {
+      hw: bikeHalfWidth,
+      hh: bikeHalfHeight,
+      hd: bikeHalfDepth,
+    });
+    spawnedPositions.push(spot);
+    const bike = createBike(spot.x, spot.z, i);
+    bike.position.y = getGroundHeight(spot.x, spot.z);
+    bike.rotation.y = Math.random() * Math.PI * 2;
+    state.scene.add(bike);
+    state.cars.push(bike);
+  }
+
   document.addEventListener("keydown", (event) => {
     if (event.code !== "KeyE" && event.code !== "Enter") return;
     if (state.inCar) {
@@ -876,6 +1286,12 @@ export function initCar() {
 export function updateCar(dt) {
   const car = state.car;
   if (!car) return;
+  // Bikes share the same input model but get their own physics loop
+  // (lean instead of body roll, fork steering, 2-wheel suspension).
+  if (car.userData.isBike) {
+    updateBike(dt);
+    return;
+  }
 
   const ud = car.userData;
   let carVelocity = ud.velocity;
@@ -1071,6 +1487,211 @@ export function updateCar(dt) {
   state.player.position.set(car.position.x, car.position.y + 1, car.position.z);
 }
 
+// ─── updateBike ───────────────────────────────────────────────────────────────
+// Motorcycle physics: identical throttle/brake/steer/slope/collision model to
+// the cars, but with a narrower footprint, tighter turning, higher top speed,
+// and a lean-into-corners animation instead of body roll. All static collision
+// (trees, lamp posts, walls, buildings) and car-vs-car resolution use the bike
+// footprint, so the bike can't pass through anything a car can't.
+export function updateBike(dt) {
+  const bike = state.car;
+  if (!bike) return;
+  const ud = bike.userData;
+  let bikeVelocity = ud.velocity;
+  const absVel = Math.abs(bikeVelocity);
+
+  // Steering
+  const speedRatio = Math.min(absVel / BIKE_MAX_SPEED, 1);
+  const turnScale = 1 - speedRatio * 0.25;
+  let turnInput = 0;
+  if (keys["KeyA"] || keys["ArrowLeft"]) turnInput = 1;
+  if (keys["KeyD"] || keys["ArrowRight"]) turnInput = -1;
+
+  const handbrake = keys["Space"];
+  const isDrifting = handbrake && absVel > DRIFT_MIN_SPEED && turnInput !== 0;
+  ud.isDrifting = isDrifting;
+
+  const turnRateMult = isDrifting ? DRIFT_TURN_BOOST : 1;
+  if (absVel > 0.01) {
+    const dir = bikeVelocity >= 0 ? 1 : -1;
+    bike.rotation.y +=
+      turnInput * BIKE_TURN_RATE * turnScale * turnRateMult * dt * dir;
+  }
+
+  const targetSteer = turnInput * MAX_STEER_ANGLE * turnScale;
+  ud.steerAngle += (targetSteer - ud.steerAngle) * 0.3 * dt;
+
+  // Acceleration / braking
+  if (handbrake) {
+    const scrub = HANDBRAKE_DECEL * dt;
+    if (keys["KeyW"] || keys["ArrowUp"]) {
+      bikeVelocity = Math.min(
+        bikeVelocity + BIKE_ACCEL * 0.4 * dt,
+        BIKE_MAX_SPEED * 0.85,
+      );
+      bikeVelocity -= scrub * 0.35;
+    } else if (bikeVelocity > 0) {
+      bikeVelocity = Math.max(0, bikeVelocity - scrub);
+    } else {
+      bikeVelocity = Math.min(0, bikeVelocity + scrub);
+    }
+  } else if (keys["KeyW"] || keys["ArrowUp"]) {
+    bikeVelocity = Math.min(bikeVelocity + BIKE_ACCEL * dt, BIKE_MAX_SPEED);
+  } else if (keys["KeyS"] || keys["ArrowDown"]) {
+    if (bikeVelocity > 0.05) {
+      bikeVelocity = Math.max(0, bikeVelocity - BIKE_BRAKE * dt);
+    } else {
+      bikeVelocity = Math.max(
+        bikeVelocity - BIKE_ACCEL * 0.55 * dt,
+        -BIKE_REVERSE_MAX,
+      );
+    }
+  } else {
+    const friction = BIKE_FRICTION * dt;
+    if (bikeVelocity > 0) bikeVelocity = Math.max(0, bikeVelocity - friction);
+    else bikeVelocity = Math.min(0, bikeVelocity + friction);
+  }
+
+  // Drift slip
+  const gripRate = isDrifting ? DRIFT_GRIP_RATE : GRIP_RATE;
+  let headingDiff = bike.rotation.y - ud.moveHeading;
+  headingDiff = Math.atan2(Math.sin(headingDiff), Math.cos(headingDiff));
+  ud.moveHeading += headingDiff * Math.min(1, gripRate * dt);
+
+  // Movement & slope
+  if (Math.abs(bikeVelocity) > 0.001) {
+    carForwardVec.set(Math.sin(ud.moveHeading), 0, Math.cos(ud.moveHeading));
+    const s = 1.0;
+    const slopeH =
+      (getGroundHeight(
+        bike.position.x + carForwardVec.x * s,
+        bike.position.z + carForwardVec.z * s,
+      ) -
+        getGroundHeight(
+          bike.position.x - carForwardVec.x * s,
+          bike.position.z - carForwardVec.z * s,
+        )) /
+      (2 * s);
+    const slopeScale = Math.max(0.35, Math.min(1.5, 1 - slopeH * 1.2));
+    const move = carForwardVec
+      .clone()
+      .multiplyScalar(bikeVelocity * slopeScale * dt);
+    const nextPos = bike.position.clone().add(move);
+    if (
+      !carCollides(
+        nextPos,
+        bike.rotation.y,
+        0.05,
+        bikeHalfWidth,
+        bikeHalfHeight,
+        bikeHalfDepth,
+      ) &&
+      !findCarOverlap(nextPos, bike.rotation.y, bike, 0.04)
+    ) {
+      bike.position.add(move);
+    } else {
+      bikeVelocity *= 0.3;
+    }
+  }
+
+  resolveCarOverlaps(bike);
+  resolveCarVsCarOverlap(bike);
+
+  const boundary = state.groundSize / 2 - 2;
+  bike.position.x = Math.max(-boundary, Math.min(boundary, bike.position.x));
+  bike.position.z = Math.max(-boundary, Math.min(boundary, bike.position.z));
+
+  // Terrain following — two contact patches (front & rear axle), plus a
+  // narrow left/right pair so the lean doesn't sink a wheel into a hillside.
+  const fy = bike.rotation.y;
+  const fxA = Math.sin(fy),
+    fzA = Math.cos(fy);
+  const rxA = Math.cos(fy),
+    rzA = -Math.sin(fy);
+  const L = 0.82,
+    W = 0.22,
+    CLEAR = 0;
+
+  const hF = getGroundHeight(
+    bike.position.x + fxA * L,
+    bike.position.z + fzA * L,
+  );
+  const hR = getGroundHeight(
+    bike.position.x - fxA * L,
+    bike.position.z - fzA * L,
+  );
+  const hL = getGroundHeight(
+    bike.position.x - rxA * W,
+    bike.position.z - rzA * W,
+  );
+  const hRt = getGroundHeight(
+    bike.position.x + rxA * W,
+    bike.position.z + rzA * W,
+  );
+
+  bike.position.y = Math.max(hF, hR);
+
+  // Front/rear suspension bob — same spring maths as the cars.
+  const restY = ud.suspRestY;
+  const cornerHeights = [hF, hR];
+  const suspGroups = [ud.suspF, ud.suspR];
+  const suspRests = [ud.suspFRestY, ud.suspRRestY];
+  for (let i = 0; i < 2; i++) {
+    const groundLocal = cornerHeights[i] - bike.position.y;
+    const compression = Math.max(
+      0,
+      Math.min(SUSP_TRAVEL, restY - groundLocal - CLEAR),
+    );
+    const springF = SUSP_STIFFNESS * (compression - ud.suspOffsets[i]);
+    const dampF = SUSP_DAMPING * ud.suspVels[i];
+    ud.suspVels[i] += (springF - dampF) * 0.016;
+    ud.suspOffsets[i] += ud.suspVels[i] * 0.016;
+    ud.suspOffsets[i] = Math.max(0, Math.min(SUSP_TRAVEL, ud.suspOffsets[i]));
+    suspGroups[i].position.y = suspRests[i] - ud.suspOffsets[i];
+  }
+
+  // Lean into corners instead of body roll, plus wheelie/dive from accel.
+  const targetLean =
+    -turnInput * speedRatio * BIKE_LEAN_MAX * (isDrifting ? 1.3 : 1);
+  const accelDelta = bikeVelocity - ud.prevVelocity;
+  ud.prevVelocity = bikeVelocity;
+  let targetPitch = -accelDelta * 20;
+  targetPitch = Math.max(-0.12, Math.min(0.12, targetPitch));
+  ud.bodyRoll += (targetLean - ud.bodyRoll) * 0.08 * dt;
+  ud.bodyPitch += (targetPitch - ud.bodyPitch) * 0.08 * dt;
+  ud.bodyPitch = Math.max(-0.12, Math.min(0.12, ud.bodyPitch));
+
+  const terrainRoll = Math.atan2(hRt - hL, 2 * W) * 0.4;
+  const terrainPitch = -Math.atan2(hF - hR, 2 * L);
+
+  bike.rotation.z = terrainRoll + ud.bodyRoll;
+  bike.rotation.x = terrainPitch + ud.bodyPitch;
+
+  // Steer visuals — front fork yaws, cockpit bars yaw with it.
+  if (ud.steerFork) ud.steerFork.rotation.y = ud.steerAngle;
+  if (ud.cockpitWheelSpin) {
+    ud.cockpitWheelSpin.rotation.y = ud.steerAngle * 1.3;
+  }
+
+  // Wheel spin (rear breaks traction while drifting)
+  const spinDelta = (bikeVelocity * dt) / 0.42;
+  const rearSpinDelta = isDrifting
+    ? spinDelta + Math.sign(bikeVelocity || 1) * 0.3 * dt
+    : spinDelta;
+  ud.wheelFront.rotation.x += spinDelta;
+  ud.wheelRear.rotation.x += rearSpinDelta;
+
+  ud.velocity = bikeVelocity;
+
+  runOverEnemies(bike);
+
+  state.player.position.set(
+    bike.position.x,
+    bike.position.y + 1,
+    bike.position.z,
+  );
+}
+
 // ─── updateCamera ─────────────────────────────────────────────────────────────
 // Re-usable vectors — allocated once, reused every frame.
 const _eyeLocal = new THREE.Vector3();
@@ -1106,6 +1727,9 @@ export function updateCamera() {
 
       // Show dash strip only in first-person cockpit
       if (car.userData.dashStrip) car.userData.dashStrip.visible = true;
+      // Hide the rider in first person — the camera sits at the rider's
+      // head, and the cockpit overlay (speedo + bars) takes its place.
+      if (car.userData.rider) car.userData.rider.visible = false;
       return;
     }
 
@@ -1116,9 +1740,18 @@ export function updateCamera() {
     const yaw = car.rotation.y + carLookYawOffset;
     carForwardVec.set(Math.sin(yaw), 0, Math.cos(yaw));
 
-    const idealX = state.car.position.x - carForwardVec.x * 8;
-    const idealZ = state.car.position.z - carForwardVec.z * 8;
-    const idealY = state.car.position.y + 3;
+    const carForward = carForwardVec; // alias for readability below
+    const isBike = !!car.userData.isBike;
+    // Rider figure is visible in third person, seated on the bike.
+    if (car.userData.rider) car.userData.rider.visible = true;
+
+    // Bikes get a closer chase camera — they're much smaller than cars.
+    const chaseDist = isBike ? 5.5 : 8;
+    const chaseHeight = isBike ? 2.4 : 3;
+
+    const idealX = state.car.position.x - carForward.x * chaseDist;
+    const idealZ = state.car.position.z - carForward.z * chaseDist;
+    const idealY = state.car.position.y + chaseHeight;
 
     const CAMERA_GROUND_CLEARANCE = 1.0;
     const groundAtCam =
@@ -1140,6 +1773,7 @@ export function updateCamera() {
   // Make sure all car dash strips are hidden
   for (const car of state.cars) {
     if (car.userData.dashStrip) car.userData.dashStrip.visible = false;
+    if (car.userData.rider) car.userData.rider.visible = false;
   }
 
   if (state.thirdPerson) {

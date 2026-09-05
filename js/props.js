@@ -293,6 +293,18 @@ function createLampPost(x, z, yaw) {
   group.rotation.y = yaw;
   addFrozenStatic(group);
 
+  // Solid pole — cars and players must not drive/walk straight through it.
+  // A small box around the base goes into the shared obstacle list, which
+  // every mover (player, car, NPC pedestrians) already checks each frame.
+  addIndexedBox(
+    state.wallBoxes,
+    wallIndex,
+    new THREE.Box3(
+      new THREE.Vector3(x - 0.35, 0, z - 0.35),
+      new THREE.Vector3(x + 0.35, 5.2, z + 0.35),
+    ),
+  );
+
   // A subset of posts also carry a real point light (toggled by night mode).
   lampLightCounter++;
   if (lampLightCounter % 4 === 0) {

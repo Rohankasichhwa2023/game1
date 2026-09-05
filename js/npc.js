@@ -380,12 +380,87 @@ function updateHostileCivilian(c, dt) {
 }
 
 function updateCivilian(c, dt) {
+  // Mid-air from a car hit — fly the ragdoll arc instead of normal AI.
+  if (c.knockTime > 0) {
+    updateCivilianKnockback(c, dt);
+    return;
+  }
   if (c.hostile) {
     updateHostileCivilian(c, dt);
     return;
   }
   if (c.kind === "resident") updateResidentPassive(c, dt);
   else updatePedestrianPassive(c, dt);
+}
+
+// ─── Car vs civilian ───────────────────────────────────────────────────────
+// A moving car that reaches a civilian launches them out of the way — the
+// same knockback arc the player gets from NPC traffic. Being flattened also
+// interrupts any hostile chase.
+function launchCivilian(c, car) {
+  const dir = knockDirectionFor(car, c.mesh.position);
+
+  c.knockVX = dir.x * CIV_KNOCKBACK_FORCE;
+  c.knockVZ = dir.z * CIV_KNOCKBACK_FORCE;
+  c.knockVY = CIV_KNOCKBACK_UP;
+  c.knockTime = CIV_KNOCKBACK_DURATION;
+
+  if (c.hostile) {
+    c.hostile = false;
+    c.mesh.userData.punchState = null;
+  }
+}
+
+function updateCivilianKnockback(c, dt) {
+  const p = c.mesh.position;
+
+  c.knockTime -= dt / 60;
+
+  p.x += c.knockVX * dt;
+  p.z += c.knockVZ * dt;
+  p.y += c.knockVY * dt;
+
+  // Gravity + air resistance, matching the player's flight profile.
+  c.knockVY -= CIV_KNOCKBACK_GRAVITY * dt;
+  c.knockVX *= Math.pow(0.94, dt);
+  c.knockVZ *= Math.pow(0.94, dt);
+
+  const groundY = getGroundHeight(p.x, p.z) + 1;
+
+  if (p.y <= groundY) {
+    p.y = groundY;
+    c.knockTime = 0;
+    c.knockVX = 0;
+    c.knockVY = 0;
+    c.knockVZ = 0;
+    // Stunned for a moment, then resume ordinary street life.
+    c.mode = "idle";
+    c.timer = 0.6 + Math.random();
+    return;
+  }
+
+  // Safety timeout — never leave a civilian frozen mid-air.
+  if (c.knockTime <= 0) {
+    p.y = groundY;
+    c.knockTime = 0;
+    c.knockVX = 0;
+    c.knockVY = 0;
+    c.knockVZ = 0;
+    c.mode = "idle";
+    c.timer = 0.6 + Math.random();
+  }
+}
+
+// Launch every civilian overlapping this car's footprint. Called with the
+// player-driven car (its `velocity` is in units/frame) and with NPC cars
+// (their per-frame `speed`). Parked cars don't fling anyone.
+function pushCiviliansFromCar(car, speed) {
+  if (Math.abs(speed) < CIV_HIT_MIN_SPEED) return;
+  for (const c of civilians) {
+    if (c.knockTime > 0) continue;
+    const civBox = makeBox(c.mesh.position, 0.5, 1, 0.5);
+    if (carHitsBox(car, civBox)) launchCivilian(c, car);
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -426,6 +501,67 @@ const CAR_KNOCKBACK_FORCE = 0.55;
 const CAR_KNOCKBACK_UP = 0.32;
 const CAR_KNOCKBACK_DURATION = 0.65;
 const CAR_KNOCKBACK_GRAVITY = 0.025;
+
+// Same treatment for civilians caught in a car's path — they get thrown the
+// same way the player does instead of cars ghosting straight through them.
+const CIV_KNOCKBACK_FORCE = 0.5;
+const CIV_KNOCKBACK_UP = 0.3;
+const CIV_KNOCKBACK_DURATION = 0.6;
+const CIV_KNOCKBACK_GRAVITY = 0.025;
+const CIV_HIT_MIN_SPEED = 0.05; // a parked / barely-rolling car won't launch anyone
+
+// The direction from the car toward the target decides which way they are
+// thrown: front hit → backward, left side → right, right side → left,
+// angle hit → diagonal. A glancing (side) hit also mixes in the car's own
+// movement for a more natural throw. Shared by the player and civilian
+// knockback paths.
+function knockDirectionFor(car, targetPos) {
+  let hitX = targetPos.x - car.position.x;
+  let hitZ = targetPos.z - car.position.z;
+
+  const distance = Math.hypot(hitX, hitZ);
+
+  if (distance < 0.001) {
+    // Extremely unlikely fallback:
+    // push in the direction the car is traveling.
+    hitX = Math.sin(car.rotation.y);
+    hitZ = Math.cos(car.rotation.y);
+  } else {
+    hitX /= distance;
+    hitZ /= distance;
+  }
+
+  const carForwardX = Math.sin(car.rotation.y);
+  const carForwardZ = Math.cos(car.rotation.y);
+
+  // High when the car is driving into the target, near zero for side hits.
+  const forwardImpact = carForwardX * hitX + carForwardZ * hitZ;
+
+  let knockX;
+  let knockZ;
+
+  if (forwardImpact > 0.35) {
+    // Strong frontal impact → mostly straight away from the car.
+    knockX = hitX;
+    knockZ = hitZ;
+  } else {
+    // Side / glancing impact → keep the hit direction but mix in some of
+    // the vehicle's movement for a more natural throw.
+    const mix = 0.7;
+
+    knockX = hitX * (1 - mix) + carForwardX * mix;
+    knockZ = hitZ * (1 - mix) + carForwardZ * mix;
+
+    const len = Math.hypot(knockX, knockZ);
+
+    if (len > 0.001) {
+      knockX /= len;
+      knockZ /= len;
+    }
+  }
+
+  return { x: knockX, z: knockZ };
+}
 
 function classifyRoads() {
   const verticals = []; // travel along Z, fixed X
@@ -557,76 +693,9 @@ function attemptEscape(drv, car) {
 function applyCarKnockback(car) {
   const player = state.player;
 
-  // Direction from the car toward the player.
-  // This automatically determines whether the player was hit
-  // from the front, back, left, right, or at an angle.
-  let hitX = player.position.x - car.position.x;
-  let hitZ = player.position.z - car.position.z;
-
-  const distance = Math.hypot(hitX, hitZ);
-
-  if (distance < 0.001) {
-    // Extremely unlikely fallback:
-    // push the player in the direction the car is traveling.
-    hitX = Math.sin(car.rotation.y);
-    hitZ = Math.cos(car.rotation.y);
-  } else {
-    hitX /= distance;
-    hitZ /= distance;
-  }
-
-  // ------------------------------------------------------------
-  // Car movement direction
-  // ------------------------------------------------------------
-
-  const carForwardX = Math.sin(car.rotation.y);
-  const carForwardZ = Math.cos(car.rotation.y);
-
-  // Determine how directly the car is hitting the player.
-  //
-  // If the car is moving toward the player, this value is high.
-  // If it hits from the side, the value is closer to zero.
-  const forwardImpact = carForwardX * hitX + carForwardZ * hitZ;
-
-  // ------------------------------------------------------------
-  // Combine impact direction with the car's movement.
-  // ------------------------------------------------------------
-  //
-  // This gives much more natural results:
-  //
-  // Front hit  -> mostly backward
-  // Side hit   -> mostly sideways
-  // Angle hit  -> diagonal
-  //
-  let knockX;
-  let knockZ;
-
-  if (forwardImpact > 0.35) {
-    // Strong frontal impact.
-    // Push mostly in the direction away from the car.
-    knockX = hitX;
-    knockZ = hitZ;
-  } else {
-    // Side / glancing impact.
-    //
-    // Keep the player's actual hit direction, but mix in
-    // some of the vehicle's movement for a more natural throw.
-    const mix = 0.7;
-
-    knockX = hitX * (1 - mix) + carForwardX * mix;
-    knockZ = hitZ * (1 - mix) + carForwardZ * mix;
-
-    const len = Math.hypot(knockX, knockZ);
-
-    if (len > 0.001) {
-      knockX /= len;
-      knockZ /= len;
-    }
-  }
-
-  // ------------------------------------------------------------
-  // Apply knockback
-  // ------------------------------------------------------------
+  const knock = knockDirectionFor(car, player.position);
+  const knockX = knock.x;
+  const knockZ = knock.z;
 
   playerKnockback.active = true;
   playerKnockback.velocityX = knockX * CAR_KNOCKBACK_FORCE;
@@ -825,6 +894,9 @@ function updateDriver(drv, dt) {
 
   checkCarHitsPlayer(car);
 
+  // NPC traffic doesn't ghost through pedestrians either.
+  if (actualMove > 0) pushCiviliansFromCar(car, drv.speed);
+
   let diff = targetHeading - car.rotation.y;
   diff = Math.atan2(Math.sin(diff), Math.cos(diff));
   car.rotation.y += diff * Math.min(1, 0.12 * dt);
@@ -868,6 +940,13 @@ export function updateNpcs(dt) {
 
   for (const c of civilians) updateCivilian(c, dt);
   for (const drv of drivers) updateDriver(drv, dt);
+
+  // The player's car flings pedestrians it reaches, exactly like NPC
+  // traffic flings the player. velocity is units/frame; parked cars are
+  // filtered out inside pushCiviliansFromCar.
+  if (state.inCar && state.car) {
+    pushCiviliansFromCar(state.car, state.car.userData.velocity || 0);
+  }
 
   // Advance the car-knockback/ragdoll flight (if any).
   updatePlayerKnockback(dt);

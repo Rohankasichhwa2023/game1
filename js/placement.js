@@ -199,9 +199,13 @@ export function placeTree(x, z, treePositions) {
   if (!isStaticPlacementClear(treeBox)) return false;
 
   treePositions.push({ x, z });
+  // IMPORTANT: Box3 stores its min/max vectors BY REFERENCE (no copy), so the
+  // stored box must own fresh vectors — never the shared _v1/_v2 temps. Using
+  // the temps made every tree box alias whatever _v1/_v2 held last, which
+  // silently broke all car/tree collision.
   const storedBox = new THREE.Box3(
-    _v1.set(x - 0.5, 0, z - 0.5),
-    _v2.set(x + 0.5, 5, z + 0.5),
+    new THREE.Vector3(x - 0.5, 0, z - 0.5),
+    new THREE.Vector3(x + 0.5, 5, z + 0.5),
   );
   addIndexedBox(state.treeBoxes, treeIndex, storedBox);
   return true;

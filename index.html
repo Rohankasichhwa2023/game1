@@ -4,90 +4,390 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Game One</title>
-    <link rel="stylesheet" href="style.css">
-    <script type="importmap">
-        {
-            "imports": {
-                "three": "https://cdn.jsdelivr.net/npm/three@latest/build/three.module.js",
-                "three/examples/jsm/controls/PointerLockControls.js": "https://cdn.jsdelivr.net/npm/three@latest/examples/jsm/controls/PointerLockControls.js"
-            }
+    <title>Babylon City</title>
+    <script src="https://cdn.jsdelivr.net/npm/babylonjs@7.54.3/babylon.js"></script>
+    <style>
+        html,
+        body {
+            margin: 0;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background: #9ec7ec;
+            font-family: "Segoe UI", system-ui, sans-serif;
         }
-    </script>
-    <script>
-        window.va = window.va || function () {
-            (window.vaq = window.vaq || []).push(arguments);
-        };
-    </script>
-    <script defer src="/_vercel/insights/script.js"></script>
+
+        #renderCanvas {
+            width: 100%;
+            height: 100%;
+            display: block;
+            outline: none;
+            touch-action: none;
+        }
+
+        .hud {
+            position: fixed;
+            pointer-events: none;
+            color: #fff;
+            text-shadow: 0 1px 3px rgba(0, 0, 0, .55);
+            user-select: none;
+        }
+
+        #title {
+            top: 22px;
+            left: 32px;
+        }
+
+        #title h1 {
+            margin: 0;
+            font-size: 30px;
+            letter-spacing: 2px;
+            font-weight: 800;
+        }
+
+        #title p {
+            margin: 6px 0 0;
+            font-size: 17px;
+            opacity: .85;
+        }
+
+        #minimap {
+            left: 34px;
+            bottom: 86px;
+            width: 230px;
+            height: 230px;
+            border-radius: 50%;
+            border: 3px solid rgba(255, 255, 255, .85);
+            box-shadow: 0 4px 18px rgba(0, 0, 0, .35);
+        }
+
+        #hint {
+            left: 34px;
+            bottom: 24px;
+            padding: 8px 16px;
+            background: rgba(40, 40, 40, .72);
+            font-size: 19px;
+            text-shadow: none;
+        }
+
+        #hint b {
+            font-weight: 700;
+        }
+
+        #controls {
+            left: 50%;
+            top: 50%;
+            transform: translate(-50%, -50%);
+            background: rgba(20, 22, 26, .85);
+            padding: 22px 30px;
+            border-radius: 10px;
+            font-size: 16px;
+            line-height: 1.9;
+            display: none;
+            text-shadow: none;
+        }
+
+        #controls.show {
+            display: block;
+        }
+
+        #controls h2 {
+            margin: 0 0 8px;
+            font-size: 20px;
+        }
+
+        kbd {
+            display: inline-block;
+            min-width: 22px;
+            padding: 0 6px;
+            margin-right: 4px;
+            border-radius: 4px;
+            background: #eee;
+            color: #222;
+            font: 600 13px/22px monospace;
+            text-align: center;
+        }
+
+        #location {
+            top: 112px;
+            left: 32px;
+            display: none;
+            padding: 6px 14px;
+            background: rgba(196, 144, 47, .88);
+            border-radius: 4px;
+            font-size: 17px;
+            font-weight: 600;
+        }
+
+        #crosshair {
+            left: 50%;
+            top: 50%;
+            width: 18px;
+            height: 18px;
+            margin: -9px 0 0 -9px;
+            display: none;
+            text-shadow: none;
+        }
+
+        #crosshair::before,
+        #crosshair::after {
+            content: "";
+            position: absolute;
+            background: rgba(255, 255, 255, .9);
+            box-shadow: 0 0 2px rgba(0, 0, 0, .8);
+        }
+
+        #crosshair::before {
+            left: 8px;
+            top: 0;
+            width: 2px;
+            height: 18px;
+        }
+
+        #crosshair::after {
+            top: 8px;
+            left: 0;
+            width: 18px;
+            height: 2px;
+        }
+
+        #crosshair.aim {
+            transform: scale(.7);
+        }
+
+        #prompt {
+            left: 50%;
+            bottom: 70px;
+            transform: translateX(-50%);
+            display: none;
+            padding: 8px 16px;
+            background: rgba(20, 22, 26, .72);
+            border-radius: 6px;
+            font-size: 18px;
+            text-shadow: none;
+        }
+
+        #speed {
+            right: 40px;
+            bottom: 34px;
+            display: none;
+            font-size: 44px;
+            font-weight: 800;
+            font-style: italic;
+        }
+
+        #speed small {
+            font-size: 18px;
+            font-weight: 600;
+        }
+
+        body.night #hint,
+        body.night #prompt {
+            background: rgba(10, 12, 20, .8);
+        }
+
+        #bigmap {
+            position: fixed;
+            inset: 0;
+            display: none;
+            background: #0e0f13;
+            z-index: 20;
+            color: #fff;
+            user-select: none;
+        }
+
+        #bigmap.show {
+            display: block;
+        }
+
+        #bigmapCanvas {
+            width: 100%;
+            height: 100%;
+            display: block;
+            cursor: grab;
+        }
+
+        #bigmapCanvas:active {
+            cursor: grabbing;
+        }
+
+        .bm-title {
+            position: absolute;
+            top: 22px;
+            left: 32px;
+            font-size: 30px;
+            font-weight: 800;
+            letter-spacing: 4px;
+            text-shadow: 0 2px 6px rgba(0, 0, 0, .6);
+            pointer-events: none;
+        }
+
+        #bigmapClose {
+            position: absolute;
+            top: 70px;
+            right: 30px;
+            width: 40px;
+            height: 40px;
+            border: 0;
+            border-radius: 50%;
+            background: rgba(255, 255, 255, .14);
+            color: #fff;
+            font-size: 18px;
+            cursor: pointer;
+        }
+
+        #bigmapClose:hover {
+            background: rgba(255, 255, 255, .26);
+        }
+
+        .bm-legend {
+            position: absolute;
+            left: 28px;
+            bottom: 24px;
+            padding: 12px 16px;
+            background: rgba(14, 15, 19, .82);
+            border-radius: 8px;
+            font-size: 14px;
+            line-height: 1.9;
+            pointer-events: none;
+        }
+
+        .bm-legend i {
+            display: inline-block;
+            width: 11px;
+            height: 11px;
+            border-radius: 50%;
+            margin-right: 9px;
+            vertical-align: -1px;
+            box-sizing: border-box;
+        }
+
+        .bm-help {
+            margin-top: 4px;
+            opacity: .75;
+            font-size: 13px;
+        }
+
+        #clock {
+            top: 24px;
+            right: 34px;
+            padding: 6px 14px;
+            background: rgba(20, 22, 26, .55);
+            border-radius: 6px;
+            font-size: 22px;
+            font-weight: 700;
+            letter-spacing: 1px;
+            font-variant-numeric: tabular-nums;
+            text-shadow: none;
+        }
+
+        #district {
+            left: 50%;
+            top: 17%;
+            transform: translate(-50%, -8px);
+            text-align: center;
+            font-size: 46px;
+            font-weight: 800;
+            letter-spacing: 6px;
+            opacity: 0;
+            transition: opacity .6s, transform .6s;
+            text-shadow: 0 2px 8px rgba(0, 0, 0, .6);
+        }
+
+        #district small {
+            display: block;
+            font-size: 18px;
+            font-weight: 500;
+            letter-spacing: 2px;
+            opacity: .9;
+        }
+
+        #district.show {
+            opacity: 1;
+            transform: translate(-50%, 0);
+        }
+
+        #loading {
+            position: fixed;
+            inset: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: #9ec7ec;
+            color: #fff;
+            font-size: 28px;
+            font-weight: 700;
+            letter-spacing: 2px;
+            text-shadow: 0 2px 6px rgba(0, 0, 0, .4);
+        }
+
+        #clickToPlay {
+            left: 50%;
+            top: 24px;
+            transform: translateX(-50%);
+            font-size: 20px;
+            background: rgba(0, 0, 0, .45);
+            padding: 10px 20px;
+            border-radius: 6px;
+        }
+    </style>
 </head>
 
 <body>
-    <!-- Instructions Overlay -->
-    <div id="instructionsOverlay">
-        <div class="panel">
-            <h1>Game One</h1>
-            <p class="tagline">Clear the map, grab the gold, and escape through the portal.</p>
+    <canvas id="renderCanvas"></canvas>
 
-            <section>
-                <h2>🎯 Objective</h2>
-                <ol class="steps">
-                    <li>Defeat the <strong>6 enemies</strong> roaming the map.</li>
-                    <li>Collect <strong>5 gold coins</strong> 🪙 scattered around.</li>
-                    <li>When the last enemy falls, a <strong>boss</strong> appears.</li>
-                    <li>Defeat the boss to open a <strong>portal</strong>.</li>
-                    <li>Walk into the portal <em>with 5 coins</em> to win.</li>
-                </ol>
-            </section>
+    <div id="title" class="hud">
+        <h1>BABYLON CITY</h1>
+        <p>By: Rohan Kasichhwa</p>
+    </div>
 
-            <section>
-                <h2>🕹️ Controls</h2>
-                <ul class="controls-list">
-                    <li><span><kbd>W</kbd> <kbd>A</kbd> <kbd>S</kbd> <kbd>D</kbd></span> Move</li>
-                    <li><span><kbd>Space</kbd></span> Jump</li>
-                    <li><span><kbd>Space</kbd> <kbd>Space</kbd></span> Double-tap near a building to jump to its roof
-                    </li>
-                    <li><span><kbd>Left Click</kbd></span> Shoot</li>
-                    <li><span><kbd>Right Click</kbd></span> Hold to aim, release to snipe</li>
-                    <li><span><kbd>V</kbd></span> Toggle third-person view / in-car cockpit view</li>
-                    <li><span><kbd>N</kbd></span> Toggle night mode</li>
-                    <li><span><kbd>Esc</kbd></span> Pause / Resume</li>
-                </ul>
-            </section>
+    <canvas id="minimap" class="hud" width="230" height="230"></canvas>
+    <div id="hint" class="hud"><b>Tab</b> controls &nbsp;·&nbsp; <b>M</b> map</div>
 
-            <section>
-                <h2>🧰 Pickups</h2>
-                <ul class="pickups-list">
-                    <li>❤️ <strong>Lifeline</strong> — restores 2 life</li>
-                    <li>🪙 <strong>Gold coin</strong> — collect 5 to win</li>
-                    <li>🔫 <strong>Rifle</strong> (blue) — 2 damage</li>
-                    <li>🔫 <strong>Shotgun</strong> (green) — 5 damage</li>
-                </ul>
-            </section>
-
-            <button id="playButton" class="play-button" type="button">▶ Click to Play</button>
+    <div id="bigmap">
+        <canvas id="bigmapCanvas"></canvas>
+        <div class="bm-title">MAP</div>
+        <button id="bigmapClose" type="button" aria-label="Close map">✕</button>
+        <div class="bm-legend">
+            <div><i style="background:#fff;border:2px solid #e0322b"></i>You</div>
+            <div><i style="background:#ffe08a"></i>Enterable building</div>
+            <div><i style="background:#c4902f;border-radius:2px"></i>Enterable (footprint)</div>
+            <div><i style="background:#ff4fd8"></i>Supercar / superbike</div>
+            <div><i style="background:#7ee3a1"></i>Bike</div>
+            <div><i style="background:#4a8cff"></i>Traffic</div>
+            <div class="bm-help">Scroll to zoom · drag to pan · <b>C</b> centre on you · <b>M</b>/<b>Esc</b> close</div>
         </div>
     </div>
+    <div id="clickToPlay" class="hud">Click to look around</div>
+    <div id="location" class="hud"></div>
+    <div id="clock" class="hud"></div>
+    <div id="crosshair" class="hud"></div>
+    <div id="prompt" class="hud"></div>
+    <div id="speed" class="hud"></div>
 
-    <!-- Gun power display -->
-    <div id="gunPowerDisplay" class="hud-pill">
-        <span class="hud-icon">🔫</span>
-        <span class="hud-value"><span id="gunName">Pistol</span> <span class="hud-value-dim" id="gunDamage">DMG
-                1</span></span>
+    <div id="controls" class="hud">
+        <h2>Controls</h2>
+        <div><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> Move</div>
+        <div><kbd>Shift</kbd> Run</div>
+        <div><kbd>Space</kbd> Jump · <kbd>Space</kbd><kbd>Space</kbd> next to a building: leap onto its roof</div>
+        <div><kbd>Left click</kbd> Shoot · <kbd>Right click</kbd> hold to aim</div>
+        <div><kbd>E</kbd> Get in / out of cars and bikes (works on moving traffic too)</div>
+        <div>Driving: <kbd>W</kbd><kbd>S</kbd> gas / reverse · <kbd>A</kbd><kbd>D</kbd> steer · <kbd>Space</kbd> brake ·
+            <kbd>Shift</kbd> boost</div>
+        <div><kbd>M</kbd> Full map (scroll to zoom, drag to pan)</div>
+        <div><kbd>N</kbd> Skip ahead to night / morning (time passes on its own: a full day ≈ 12 min)</div>
+        <div><kbd>Mouse</kbd> Look (click to lock pointer)</div>
+        <div><kbd>Wheel</kbd> Camera distance</div>
+        <div><kbd>Esc</kbd> Release pointer</div>
+        <div style="margin-top:8px;opacity:.85">Buildings with a lit sign (amber on the minimap) can be entered —<br>
+            walk in, take the stairs up, explore the rooms and the roof.<br>
+            You start in Saint-Clair; follow the boulevard east through the park to reach the city.</div>
     </div>
 
-    <!-- Controls hint -->
-    <div id="hintDisplay">
-        <span class="hint-item"><kbd>V</kbd> View</span>
-        <span class="hint-sep">·</span>
-        <span class="hint-item"><kbd>E</kbd> Car</span>
-        <span class="hint-sep">·</span>
-        <span class="hint-item"><kbd>N</kbd> Night</span>
-        <span class="hint-sep">·</span>
-        <span class="hint-item"><kbd>Esc</kbd> Pause</span>
-    </div>
+    <div id="district" class="hud"></div>
+    <div id="loading">Building the city…</div>
 
-    <script type="module" src="js/main.js"></script>
+    <script type="module" src="main.js"></script>
 </body>
 
 </html>

@@ -58,156 +58,496 @@ export const vehicles = []; // parked / usable (and wrecks)
 export const traffic = [];
 
 // ---------------------------------------------------------------- model builders
+// Vehicles are sculpted from Babylon primitives: lofted ribbons for the body
+// shells (rounded cross-sections swept along the car's length), tori for
+// tyres, arc-cylinders for wheel arches / mudguards, and oriented struts for
+// pillars, forks and frames. Parts are merged per material so each template
+// is only a handful of draw calls, then instanced.
 const MB = BABYLON.MeshBuilder;
-let headM, tailM, tyreM, chromeM, darkM, glassM, burntM, burntGlassM;
+const V3b = BABYLON.Vector3;
+let headM, tailM, tyreM, chromeM, darkM, glassM, rimM, plateM, burntM, burntGlassM;
 const burntCache = {};
+// Level of detail (instances follow their template's levels automatically):
+//   < LOD_NEAR  full model
+//   < LOD_MID   level 1: no spokes / handles / small trim, fewer segments
+//   < LOD_FAR   level 2: body shells, glass, lights and plain wheels only
+//   beyond      not drawn (the fog hides them anyway)
+const LOD_NEAR = 25, LOD_MID = 80, LOD_FAR = 230;
+let LO = 0;                                       // detail level being built (0 = full)
 
-// Build a template from a parts function. P.box / P.wheel / P.cyl add parts
-// with a material key: body, accent, glass, dark, chrome, tyre, light, tail.
-function build(name, colors, partsFn, burnt = false) {
-  const M = burnt
-    ? { body: burntM, accent: burntM, glass: burntGlassM, dark: burntM, chrome: burntM, tyre: tyreM, light: null, tail: null }
+// Cross-section of a lofted panel at station z: flat bottom with small
+// chamfers, sides from half-width hb (bottom) to ht (top), rounded top corners
+// of radius c. Points run counter-clockwise seen from +z (outward normals).
+function ring(z, y0, y1, hb, ht, c, cx = 0) {
+  const h = y1 - y0;
+  c = Math.max(0.004, Math.min(c, h * 0.48, ht * 0.9));
+  const cb = Math.min(c, 0.05, h * 0.25, hb * 0.5);
+  const pts = [[hb - cb, y0], [hb, y0 + cb], [ht, y1 - c]];
+  if (!LO) for (const a of [Math.PI / 6, Math.PI / 3]) pts.push([ht - c + c * Math.cos(a), y1 - c + c * Math.sin(a)]);
+  pts.push([ht - c, y1], [c - ht, y1]);
+  if (!LO) for (const a of [Math.PI * 2 / 3, Math.PI * 5 / 6]) pts.push([c - ht + c * Math.cos(a), y1 - c + c * Math.sin(a)]);
+  pts.push([-ht, y1 - c], [-hb, y0 + cb], [cb - hb, y0]);
+  return pts.map(([x, y]) => new V3b(x + cx, y, z));
+}
+
+// Build a template from a parts function. The P.* helpers add parts with a
+// material key: body, accent, glass, dark, chrome, rim, tyre, plate, light, tail.
+function mats(name, colors, burnt = false) {
+  const paint = (n, c) => { const m = litMat(n, hex(c), 0.5); m.specularPower = 80; return m; };
+  return burnt
+    ? { body: burntM, accent: burntM, glass: burntGlassM, dark: burntM, chrome: burntM, rim: burntM, tyre: tyreM, plate: burntM, light: null, tail: null }
     : {
-      body: (() => { const m = litMat(name + "Body", hex(colors.body), 0.35); m.specularPower = 64; return m; })(),
-      accent: litMat(name + "Accent", hex(colors.accent || colors.body), 0.25),
-      glass: glassM, dark: darkM, chrome: chromeM, tyre: tyreM, light: headM, tail: tailM,
+      body: paint(name + "Body", colors.body),
+      accent: paint(name + "Accent", colors.accent || colors.body),
+      glass: glassM, dark: darkM, chrome: chromeM, rim: rimM, tyre: tyreM, plate: plateM, light: headM, tail: tailM,
     };
-  const parts = [];
+}
+// Low-detail levels skip parts smaller than this (lights are always kept).
+const small = (mat, ...dims) => LO > 0 && mat !== "light" && mat !== "tail" && Math.max(...dims) < (LO > 1 ? 0.6 : 0.2);
+function build(name, M, partsFn, glowIt, lo = 0) {
+  LO = lo;
+  const groups = new Map();                      // material -> meshes
+  const add = (mesh, key) => {
+    const m = M[key];
+    if (!m) { mesh.dispose(); return; }
+    if (!groups.has(m)) groups.set(m, []);
+    groups.get(m).push(mesh);
+  };
   const P = {
-    box(w, h, d, x, y, z, mat, rx = 0) {
-      if (!M[mat]) return;
+    box(w, h, d, x, y, z, mat, rx = 0, ry = 0, rz = 0) {
+      if (!M[mat] || small(mat, w, h, d)) return;
       const m = MB.CreateBox("p", { width: w, height: h, depth: d }, scene);
-      m.position.set(x, y, z); m.rotation.x = rx;
-      parts.push({ mesh: m, mat: M[mat] });
+      m.position.set(x, y, z); m.rotation.set(rx, ry, rz);
+      add(m, mat);
     },
-    wheel(dia, width, x, y, z) {
-      const w = MB.CreateCylinder("w", { diameter: dia, height: width, tessellation: 14 }, scene);
-      w.rotation.z = Math.PI / 2; w.position.set(x, y, z);
-      parts.push({ mesh: w, mat: M.tyre });
-    },
-    cyl(dia, h, x, y, z, mat, rx = 0, rz = 0) {
-      if (!M[mat]) return;
-      const c = MB.CreateCylinder("c", { diameter: dia, height: h, tessellation: 14 }, scene);
+    // cylinder: axis is Y, turned by rx / rz (rz = PI/2 → axis along X, rx = PI/2 → along Z)
+    cyl(dia, h, x, y, z, mat, rx = 0, rz = 0, tess = 16) {
+      if (!M[mat] || small(mat, dia, h)) return;
+      const c = MB.CreateCylinder("c", { diameter: dia, height: h, tessellation: LO > 1 ? 6 : LO ? 8 : Math.min(tess, 14) }, scene);
       c.position.set(x, y, z); c.rotation.x = rx; c.rotation.z = rz;
-      parts.push({ mesh: c, mat: M[mat] });
+      add(c, mat);
+    },
+    torus(dia, thick, x, y, z, mat, rx = 0, rz = 0, sy = 1) {
+      if (!M[mat]) return;
+      const t = MB.CreateTorus("t", { diameter: dia, thickness: thick, tessellation: LO > 1 ? 6 : LO ? 8 : 12 }, scene);
+      t.scaling.y = sy; t.rotation.x = rx; t.rotation.z = rz; t.position.set(x, y, z);
+      add(t, mat);
+    },
+    // Rod / bar between points a and b. d = width; box = false → round,
+    // true → square, number → box of that height.
+    strut(mat, a, b, d, box = false) {
+      const A = new V3b(a[0], a[1], a[2]), B = new V3b(b[0], b[1], b[2]), len = V3b.Distance(A, B);
+      if (!M[mat] || (LO === 1 && d < 0.07 && box !== true) || (LO > 1 && len < 0.5)) return;
+      let m;
+      if (box) m = MB.CreateBox("s", { width: d, height: box === true ? d : box, depth: len }, scene);
+      else {
+        m = MB.CreateCylinder("s", { diameter: d, height: len, tessellation: LO > 1 ? 4 : LO ? 5 : 8 }, scene);
+        m.rotation.x = Math.PI / 2; m.bakeCurrentTransformIntoVertices();
+      }
+      m.position = A.add(B).scaleInPlace(0.5);
+      m.lookAt(B);
+      add(m, mat);
+    },
+    // Lofted shell through stations [z, y0, y1, hb, ht, c, cx?] (any order).
+    loft(mat, stations, caps = true) {
+      if (!M[mat]) return;
+      const rings = [...stations].sort((p, q) => p[0] - q[0]).map((s) => ring(...s));
+      add(MB.CreateRibbon("l", { pathArray: rings, closePath: true }, scene), mat);
+      if (!caps) return;
+      const centre = (r) => {
+        const c = r.reduce((acc, p) => acc.addInPlace(p), new V3b(0, 0, 0)).scaleInPlace(1 / r.length);
+        return r.map(() => c.clone());
+      };
+      const first = rings[0], last = rings[rings.length - 1];
+      add(MB.CreateRibbon("cap", { pathArray: [centre(first), first], closePath: true }, scene), mat);
+      add(MB.CreateRibbon("cap", { pathArray: [last, centre(last)], closePath: true }, scene), mat);
+    },
+    // Wheel with axis along X: rounded tyre, rim barrel, spoked face + hub on
+    // the outward side (both sides for bikes).
+    wheel(dia, width, x, y, z, o = {}) {
+      const tk = dia * (o.profile ?? 0.2);
+      if (LO > 1) { P.cyl(dia, width, x, y, z, "tyre", 0, Math.PI / 2); return; }
+      P.torus(dia - tk, tk, x, y, z, "tyre", 0, Math.PI / 2, width / tk);
+      const rd = dia - tk * 1.6, rimMat = o.rimMat ?? "rim";
+      P.cyl(rd, width * 0.8, x, y, z, rimMat, 0, Math.PI / 2);
+      if (LO) return;
+      const sides = o.both ? [-1, 1] : [Math.sign(x) || 1];
+      for (const s of sides) {
+        const fx = x + s * width * 0.41;
+        P.cyl(rd * 0.82, 0.012, fx, y, z, "dark", 0, Math.PI / 2);
+        const n = o.spokes ?? 5;
+        for (let i = 0; i < n; i++) {
+          const a = (i / n) * Math.PI * 2;
+          P.box(0.02, rd * 0.4, rd * 0.11, fx + s * 0.008, y + Math.cos(a) * rd * 0.2, z + Math.sin(a) * rd * 0.2, rimMat, a);
+        }
+        P.cyl(rd * 0.2, 0.03, fx + s * 0.012, y, z, "chrome", 0, Math.PI / 2, 10);
+      }
+    },
+    // Dark half-disc on a car's flank behind a wheel: reads as the wheel well.
+    arch(r, x, y, z, mat = "dark", th = 0.02) {
+      if (!M[mat]) return;
+      const a = MB.CreateCylinder("a", { diameter: r * 2, height: th, arc: 0.5, enclose: true, tessellation: LO ? 6 : 12 }, scene);
+      a.rotation.set(Math.PI / 2, Math.PI / 2, 0); a.position.set(x, y, z);
+      add(a, mat);
+    },
+    // Open curved mudguard over a wheel (axis X). a0 = start angle measured
+    // from straight back (0) over the top (PI/2) to straight forward (PI).
+    fender(r, w, x, y, z, a0, span, mat) {
+      if (!M[mat]) return;
+      const f = MB.CreateCylinder("f", {
+        diameter: r * 2, height: w, arc: span / (Math.PI * 2), tessellation: LO ? 5 : 9,
+        cap: BABYLON.Mesh.NO_CAP, sideOrientation: BABYLON.Mesh.DOUBLESIDE,
+      }, scene);
+      f.rotation.set(Math.PI / 2, Math.PI / 2, 0); f.bakeCurrentTransformIntoVertices();
+      f.rotation.set(a0, 0, 0); f.position.set(x, y, z);
+      add(f, mat);
     },
   };
   partsFn(P);
-  return mergedTemplate(burnt ? name + "Burnt" : name, parts, !burnt);
+  LO = 0;
+  // one mesh per material → few draw calls per instanced template
+  const parts = [];
+  for (const [mat, list] of groups) {
+    const mesh = list.length === 1 ? list[0] : BABYLON.Mesh.MergeMeshes(list, true, true);
+    parts.push({ mesh, mat });
+  }
+  const t = mergedTemplate(name, parts, glowIt);
+  if (!lo) t.addLODLevel(LOD_FAR, null);          // not drawn beyond LOD_FAR
+  return t;
 }
 // Template factory: remembers its spec + how to build its burnt wreck.
+// Instances follow their template's LOD levels automatically.
 function model(specKey, name, colors, partsFn) {
-  const t = build(name, colors, partsFn);
+  const M = mats(name, colors);
+  const t = build(name, M, partsFn, true);
+  // Only the near, full model blooms; the glow pass re-renders every included
+  // mesh, so the far levels stay out of it (their lights are still bright).
+  t.addLODLevel(LOD_NEAR, build(name + "Lo", M, partsFn, false, 1));
+  t.addLODLevel(LOD_MID, build(name + "Lo2", M, partsFn, false, 2));
   t.specKey = specKey;
-  t.burnKey = specKey + ":" + partsFn.name;
-  t.buildBurnt = () => build(name, colors, partsFn, true);
+  t.burnKey = specKey + ":" + name.replace(/\d+$/, "");
+  t.buildBurnt = () => build(name + "Burnt", mats(name, colors, true), partsFn, false);
   return t;
 }
 
-// ---- shapes ----
-function sedanParts(o = {}) {
-  const len = o.len ?? 4.4, cabLen = o.cabLen ?? 2.2, cabOff = o.cabOff ?? -0.25, cabH = o.cabH ?? 0.55;
-  return function sedan(P) {
-    P.box(1.9, 0.62, len, 0, 0.6, 0, "body");
-    P.box(1.66, cabH, cabLen, 0, 0.91 + cabH / 2, cabOff, "glass");
-    const wz = len / 2 - 0.8;
-    for (const sx of [-0.88, 0.88]) for (const sz of [-wz, wz]) P.wheel(0.68, 0.26, sx, 0.34, sz);
-    for (const sx of [-0.65, 0.65]) {
-      P.box(0.35, 0.14, 0.05, sx, 0.68, len / 2, "light");
-      P.box(0.3, 0.12, 0.05, sx, 0.7, -len / 2, "tail");
+// ---- cars (sedan / hatch / taxi / SUV / supercar / van share one body generator) ----
+// Lengths along Z (front = +Z). The body is a lower shell (belt line from the
+// bonnet at wsBase to the boot deck at rearBase), a glass house on top with a
+// painted roof skin and A/B/C pillars, and trim: lights, grille, bumpers,
+// mirrors, handles, sills, wheel arches.
+function carParts(o) {
+  const L = o.len, W = o.hw, h2 = L / 2, y0 = o.y0, wd = o.wheel, ww = o.ww ?? 0.24;
+  const zf = o.zf, zr = o.zr, rY = o.roofY, gW = W - 0.1, rw = o.roofW ?? W - 0.2;
+  const beltAt = (z) => o.deckY + (o.hoodY - o.deckY) * clamp((z - o.rearBase) / (o.wsBase - o.rearBase), 0, 1);
+  return function car(P) {
+    // lower body shell
+    const st = [[-h2, y0 + 0.1, o.tailY - 0.07, W - 0.1, W - 0.16, 0.1], [-h2 + 0.14, y0, o.tailY, W - 0.01, W - 0.07, 0.12]];
+    if (o.rearBase > -h2 + 0.3) st.push([o.rearBase, y0, o.deckY, W, W - 0.05, 0.12]);
+    for (const z of o.mid ?? []) st.push([z, y0, beltAt(z), W, W - 0.05, 0.12]);
+    if (o.wsBase < h2 - 0.3) st.push([o.wsBase, y0, o.hoodY, W, W - 0.05, 0.12]);
+    st.push([h2 - 0.14, y0, o.noseY, W - 0.01, W - 0.09, 0.12], [h2, y0 + 0.1, o.noseY - 0.08, W - 0.12, W - 0.2, 0.1]);
+    P.loft("body", st);
+
+    // glass house (windscreen, side windows, rear window)
+    P.loft("glass", [
+      [o.rearBase, beltAt(o.rearBase) - 0.07, beltAt(o.rearBase) + 0.01, gW, gW - 0.02, 0.02],
+      [o.roofR, beltAt(o.roofR) - 0.07, rY, gW, rw, 0.1],
+      [o.roofF, beltAt(o.roofF) - 0.07, rY, gW, rw, 0.1],
+      [o.wsBase, o.hoodY - 0.07, o.hoodY + 0.01, gW, gW - 0.02, 0.02],
+    ]);
+    // painted roof skin
+    const rf = o.roofF - 0.04, rb = o.roofR + 0.04;
+    P.loft("body", [
+      [rb, rY - 0.05, rY + 0.01, rw + 0.01, rw - 0.04, 0.04],
+      [rb + 0.1, rY - 0.06, rY + 0.03, rw + 0.025, rw - 0.03, 0.05],
+      [rf - 0.1, rY - 0.06, rY + 0.03, rw + 0.025, rw - 0.03, 0.05],
+      [rf, rY - 0.05, rY + 0.01, rw + 0.01, rw - 0.04, 0.04],
+    ]);
+    // panel van: painted cargo sides cover the glass behind the cab
+    if (o.cargo != null) {
+      P.loft("body", [
+        [o.rearBase - 0.01, beltAt(o.rearBase) - 0.08, rY - 0.01, gW + 0.012, rw + 0.012, 0.1],
+        [o.cargo, beltAt(o.cargo) - 0.08, rY - 0.01, gW + 0.012, rw + 0.012, 0.1],
+      ]);
     }
-    if (o.taxi) {
-      P.box(0.75, 0.22, 0.28, 0, 0.91 + cabH + 0.11, cabOff, "light");
-      P.box(1.92, 0.08, len * 0.7, 0, 0.7, 0, "dark");
+    const pm = o.pillar ?? "body";
+    for (const s of [-1, 1]) {
+      P.strut(pm, [s * gW, o.hoodY - 0.01, o.wsBase - 0.02], [s * rw, rY - 0.03, o.roofF + 0.02], 0.075, true);
+      P.strut(pm, [s * gW, o.deckY - 0.01, o.rearBase + 0.03], [s * rw, rY - 0.03, o.roofR - 0.02], 0.075, o.cW ?? 0.16);
+      if (o.bPillar != null) P.strut("dark", [s * (gW + 0.01), beltAt(o.bPillar) - 0.03, o.bPillar], [s * (rw + 0.012), rY - 0.03, o.bPillar - 0.05], 0.05, 0.11);
+      // lights
+      P.box(o.headW ?? 0.36, o.headH ?? 0.11, 0.12, s * (W - 0.3), o.noseY - 0.12, h2 - 0.05, "light");
+      P.box(o.tailW ?? 0.38, o.tailH ?? 0.11, 0.12, s * (W - 0.28), o.tailY - 0.13, -h2 + 0.05, "tail");
+      // mirror on a stalk
+      P.box(0.07, 0.11, 0.17, s * (W + 0.05), o.hoodY + 0.1, o.wsBase - 0.2, "body");
+      P.box(0.12, 0.04, 0.06, s * (W - 0.02), o.hoodY + 0.07, o.wsBase - 0.17, "dark");
+      // sill + door handles
+      P.box(0.04, 0.08, zf - zr - wd - 0.1, s * (W - 0.01), y0 + 0.06, (zf + zr) / 2, "dark");
+      for (const z of o.handles ?? []) P.box(0.04, 0.03, 0.13, s * (W - 0.02), beltAt(z) - 0.1, z, "chrome");
+      // wheels in dark arches
+      for (const [z, d] of [[zf, wd], [zr, o.wheelR ?? wd]]) {
+        P.arch(d / 2 + (o.archPad ?? 0.07), s * W, d / 2, z, "dark");
+        P.wheel(d, ww, s * (W + 0.05 - ww / 2), d / 2, z, { spokes: o.spokes });
+      }
     }
+    // grille, intakes, bumpers, number plates
+    P.box(o.grilleW ?? (W - 0.42) * 2, o.grilleH ?? 0.13, 0.1, 0, o.noseY - 0.13, h2 - 0.04, "dark");
+    P.box((W - 0.2) * 2, 0.09, 0.1, 0, y0 + 0.13, h2 - 0.04, "dark");
+    P.box((W - 0.2) * 2, 0.09, 0.1, 0, y0 + 0.11, -h2 + 0.04, "dark");
+    P.box(0.44, 0.11, 0.03, 0, (y0 + o.noseY) / 2, h2 + 0.005, "plate");
+    P.box(0.44, 0.12, 0.03, 0, (y0 + 0.11 + o.tailY - 0.13) / 2, -h2 - 0.005, "plate");
+    if (o.extra) o.extra(P, { W, h2, rY, rw, gW, beltAt });
   };
 }
-function suvParts(P) {
-  P.box(2.0, 0.85, 4.7, 0, 0.82, 0, "body");
-  P.box(1.86, 0.75, 2.9, 0, 1.6, -0.35, "glass");
-  P.box(1.88, 0.08, 2.92, 0, 2.0, -0.35, "body");
-  P.box(1.5, 0.06, 2.0, 0, 2.1, -0.35, "dark");
-  for (const sx of [-0.7, 0.7]) P.box(0.06, 0.1, 2.3, sx, 2.07, -0.35, "chrome");
-  for (const sz of [-1.5, 1.5]) P.box(2.12, 0.2, 1.05, 0, 0.78, sz, "dark");
-  P.cyl(0.8, 0.26, 0, 1.05, -2.48, "dark", Math.PI / 2);
-  P.box(1.9, 0.2, 0.2, 0, 0.5, 2.42, "chrome");
-  P.box(1.9, 0.2, 0.2, 0, 0.5, -2.42, "dark");
-  for (const sx of [-0.95, 0.95]) for (const sz of [-1.5, 1.5]) P.wheel(0.86, 0.32, sx, 0.43, sz);
-  for (const sx of [-0.68, 0.68]) { P.box(0.36, 0.16, 0.05, sx, 1.0, 2.36, "light"); P.box(0.18, 0.32, 0.05, sx * 1.25, 1.05, -2.36, "tail"); }
-}
-function vanParts(P) {
-  P.box(2.0, 1.95, 4.6, 0, 1.4, -0.3, "body");
-  P.box(1.95, 0.8, 0.95, 0, 0.82, 2.45, "body");
-  P.box(1.84, 0.9, 0.06, 0, 1.75, 2.05, "glass", -0.45);
-  P.box(2.02, 0.62, 1.0, 0, 1.95, 1.45, "glass");
-  P.box(2.02, 0.2, 4.6, 0, 1.05, -0.3, "accent");
-  P.box(2.0, 0.25, 0.15, 0, 0.5, 2.9, "dark");
-  P.box(2.0, 0.25, 0.15, 0, 0.55, -2.62, "dark");
-  for (const sx of [-0.95, 0.95]) for (const sz of [-1.75, 1.85]) P.wheel(0.74, 0.28, sx, 0.37, sz);
-  for (const sx of [-0.7, 0.7]) { P.box(0.34, 0.16, 0.05, sx, 0.98, 2.93, "light"); P.box(0.2, 0.42, 0.05, sx * 1.22, 1.25, -2.62, "tail"); }
-}
+
+const SEDAN = {
+  len: 4.4, hw: 0.9, y0: 0.3, wheel: 0.68, zf: 1.35, zr: -1.3,
+  noseY: 0.8, hoodY: 0.9, wsBase: 0.95, roofF: 0.2, roofR: -0.85, roofY: 1.42, rearBase: -1.45, deckY: 0.96, tailY: 0.94,
+  bPillar: -0.3, handles: [-0.05, -0.85],
+};
+const sedanParts = (extra) => carParts(extra ? { ...SEDAN, ...extra } : SEDAN);
+const hatchParts = () => carParts({
+  len: 3.8, hw: 0.88, y0: 0.3, wheel: 0.64, zf: 1.2, zr: -1.2,
+  noseY: 0.84, hoodY: 0.92, wsBase: 0.8, roofF: 0.05, roofR: -1.45, roofY: 1.5, rearBase: -1.72, deckY: 0.98, tailY: 0.98,
+  bPillar: -0.45, handles: [-0.2, -1.0], cW: 0.2,
+});
+const taxiParts = () => sedanParts({
+  extra(P, k) {
+    // roof sign
+    P.loft("light", [[-0.5, k.rY + 0.02, k.rY + 0.2, 0.34, 0.28, 0.06], [-0.22, k.rY + 0.02, k.rY + 0.2, 0.34, 0.28, 0.06]]);
+    P.box(0.5, 0.03, 0.3, 0, k.rY + 0.03, -0.36, "dark");
+    // checker band along the doors
+    for (const s of [-1, 1]) for (let i = 0; i < 14; i++) {
+      P.box(0.025, 0.07, 0.15, s * (k.W - 0.005), i % 2 ? 0.66 : 0.73, -1.2 + i * 0.15, "dark");
+    }
+  },
+});
+const suvParts = () => carParts({
+  len: 4.85, hw: 0.95, y0: 0.45, wheel: 0.84, ww: 0.3, zf: 1.5, zr: -1.5, archPad: 0.1,
+  noseY: 1.12, hoodY: 1.22, wsBase: 1.2, roofF: 0.5, roofR: -2.05, roofY: 1.95, roofW: 0.8, rearBase: -2.2, deckY: 1.24, tailY: 1.24,
+  bPillar: -0.1, handles: [0.15, -0.75], cW: 0.24, grilleH: 0.24, headH: 0.13,
+  extra(P, k) {
+    for (const s of [-1, 1]) {
+      P.strut("chrome", [s * 0.62, k.rY + 0.1, -1.85], [s * 0.62, k.rY + 0.1, 0.3], 0.04);
+      for (const z of [-1.8, 0.25]) P.box(0.05, 0.1, 0.08, s * 0.62, k.rY + 0.06, z, "dark");
+    }
+    // spare wheel on the tailgate + skid plates
+    P.torus(0.62, 0.18, 0, 1.0, -k.h2 - 0.1, "tyre", Math.PI / 2, 0, 1.4);
+    P.cyl(0.6, 0.2, 0, 1.0, -k.h2 - 0.1, "body", Math.PI / 2);
+    P.box(1.1, 0.07, 0.3, 0, 0.5, k.h2 - 0.02, "chrome");
+    P.box(1.1, 0.07, 0.3, 0, 0.5, -k.h2 + 0.02, "chrome");
+  },
+});
+const supercarParts = () => carParts({
+  len: 4.6, hw: 0.98, y0: 0.18, wheel: 0.68, wheelR: 0.72, ww: 0.3, zf: 1.45, zr: -1.45, archPad: 0.05,
+  noseY: 0.52, hoodY: 0.68, wsBase: 0.7, roofF: -0.05, roofR: -0.75, roofY: 1.13, roofW: 0.68, rearBase: -1.8, deckY: 0.86, tailY: 0.84,
+  handles: [-0.5], cW: 0.12, pillar: "dark", headW: 0.42, headH: 0.06, tailW: 0.5, tailH: 0.06, grilleW: 0.9, grilleH: 0.07, spokes: 10,
+  extra(P, k) {
+    // flared hips over the wheels
+    for (const s of [-1, 1]) for (const [z, top] of [[1.45, 0.74], [-1.45, 0.86]]) {
+      P.loft("body", [
+        [z - 0.62, 0.3, top - 0.14, 0.12, 0.1, 0.08, s * (k.W - 0.15)],
+        [z - 0.3, 0.3, top, 0.15, 0.13, 0.1, s * (k.W - 0.15)],
+        [z + 0.3, 0.3, top, 0.15, 0.13, 0.1, s * (k.W - 0.15)],
+        [z + 0.62, 0.3, top - 0.14, 0.12, 0.1, 0.08, s * (k.W - 0.15)],
+      ]);
+      P.box(0.04, 0.2, 0.55, s * (k.W + 0.0), 0.55, -0.62, "dark");            // side intake
+    }
+    // rear wing
+    for (const s of [-1, 1]) P.strut("dark", [s * 0.55, 0.84, -1.98], [s * 0.55, 1.08, -2.1], 0.05, 0.14);
+    P.loft("dark", [[-2.28, 1.06, 1.11, 0.96, 0.96, 0.02], [-2.0, 1.08, 1.12, 0.96, 0.96, 0.02]]);
+    // racing stripes over bonnet + roof
+    for (const sx of [-0.2, 0.2]) {
+      P.strut("accent", [sx, 0.525, k.h2 - 0.16], [sx, 0.688, 0.72], 0.13, 0.012);
+      P.box(0.13, 0.012, 0.5, sx, k.rY + 0.035, -0.4, "accent");
+    }
+    // diffuser fins + exhaust tips
+    for (const x of [-0.45, -0.15, 0.15, 0.45]) P.box(0.03, 0.14, 0.3, x, 0.27, -k.h2 + 0.1, "dark");
+    for (const s of [-1, 1]) P.cyl(0.1, 0.14, s * 0.28, 0.34, -k.h2 - 0.02, "chrome", Math.PI / 2);
+  },
+});
+const vanParts = () => carParts({
+  len: 5.4, hw: 0.95, y0: 0.38, wheel: 0.74, ww: 0.28, zf: 1.85, zr: -1.75,
+  noseY: 1.0, hoodY: 1.1, wsBase: 1.95, roofF: 1.15, roofR: -2.6, roofY: 2.32, roofW: 0.86, rearBase: -2.66, deckY: 1.12, tailY: 1.12,
+  bPillar: 0.85, cargo: 0.8, handles: [1.1], cW: 0.1, grilleH: 0.2, headH: 0.15, tailW: 0.2, tailH: 0.4,
+  extra(P, k) {
+    for (const s of [-1, 1]) {
+      P.box(0.03, 0.2, 4.2, s * (k.W - 0.01), 0.82, -0.5, "accent");             // livery stripe
+      P.box(0.02, 1.1, 0.02, s * (k.W + 0.0), 1.55, -0.1, "dark");               // sliding-door seam
+      P.box(0.62, 0.4, 0.03, s * 0.42, 1.8, -k.h2 + 0.02, "glass");              // rear door windows
+    }
+    P.box(0.02, 1.8, 0.03, 0, 1.3, -k.h2 + 0.02, "dark");                         // rear door split
+  },
+});
 function truckParts(P) {
-  P.box(2.0, 0.35, 8.4, 0, 0.75, 0, "dark");
-  P.box(2.4, 2.1, 2.2, 0, 1.95, 3.05, "body");
-  P.box(2.2, 0.85, 0.06, 0, 2.45, 4.16, "glass");
-  P.box(2.44, 0.7, 1.0, 0, 2.45, 3.45, "glass");
-  P.box(1.6, 0.6, 0.06, 0, 1.3, 4.16, "chrome");
-  P.box(2.5, 2.9, 5.7, 0, 2.4, -1.1, "accent");
-  P.box(2.52, 0.12, 5.72, 0, 3.86, -1.1, "dark");
-  for (const sx of [-1.1, 1.1]) for (const sz of [3.1, -2.2, -3.4]) P.wheel(1.0, 0.36, sx, 0.5, sz);
-  for (const sx of [-0.85, 0.85]) { P.box(0.4, 0.2, 0.05, sx, 1.25, 4.17, "light"); P.box(0.3, 0.25, 0.05, sx * 1.23, 1.0, -3.96, "tail"); }
+  const W = 1.2;
+  P.box(1.6, 0.28, 8.3, 0, 0.72, -0.1, "dark");                               // chassis
+  // cab-over cab with a raked windscreen
+  P.loft("body", [
+    [2.2, 0.62, 3.2, W, W - 0.08, 0.2],
+    [3.85, 0.62, 3.2, W, W - 0.08, 0.2],
+    [4.12, 0.64, 2.9, W - 0.02, W - 0.1, 0.18],
+    [4.28, 0.66, 1.95, W - 0.04, W - 0.08, 0.12],
+  ]);
+  P.strut("glass", [0, 2.0, 4.3], [0, 2.86, 4.15], 2.0, 0.03);
+  P.box(2.1, 0.08, 0.25, 0, 2.95, 4.15, "dark");                               // sun visor
+  P.box(1.5, 0.55, 0.05, 0, 1.3, 4.29, "chrome");                              // grille
+  for (let i = 0; i < 4; i++) P.box(1.4, 0.04, 0.06, 0, 1.1 + i * 0.13, 4.31, "dark");
+  P.box(2.4, 0.3, 0.25, 0, 0.6, 4.25, "dark");                                 // bumper
+  for (let i = -2; i <= 2; i++) P.box(0.1, 0.05, 0.06, i * 0.3, 3.22, 4.0, "light"); // cab marker lights
+  for (const s of [-1, 1]) {
+    P.box(0.38, 0.18, 0.06, s * 0.82, 1.0, 4.29, "light");
+    P.box(0.03, 0.75, 1.05, s * (W - 0.04), 2.45, 3.5, "glass");              // side window
+    P.box(0.02, 1.6, 0.02, s * (W - 0.005), 1.5, 2.9, "dark");                 // door seam
+    P.box(0.1, 0.06, 0.4, s * (W - 0.02), 0.85, 3.55, "dark");                 // step
+    P.strut("dark", [s * W, 2.55, 3.9], [s * (W + 0.18), 2.45, 4.05], 0.035);
+    P.box(0.08, 0.38, 0.2, s * (W + 0.2), 2.28, 4.05, "dark");                 // mirror
+    P.arch(0.58, s * W, 0.5, 3.1, "dark");
+  }
+  // cargo box with ribs, rear doors and lights
+  P.loft("accent", [[-4.3, 1.02, 3.85, 1.25, 1.25, 0.05], [2.05, 1.02, 3.85, 1.25, 1.25, 0.05]]);
+  P.box(2.52, 0.12, 6.36, 0, 1.0, -1.125, "dark");
+  for (const s of [-1, 1]) for (let z = -3.7; z < 2; z += 1.05) P.box(0.03, 2.72, 0.06, s * 1.255, 2.43, z, "chrome");
+  P.box(0.03, 2.65, 0.02, 0, 2.43, -4.31, "dark");
+  for (const x of [-0.35, 0.35]) P.strut("chrome", [x, 1.2, -4.32], [x, 3.65, -4.32], 0.035);
+  P.box(2.2, 0.15, 0.1, 0, 0.55, -4.2, "dark");                                // under-ride bar
+  for (const s of [-1, 1]) P.box(0.3, 0.14, 0.05, s * 0.95, 0.78, -4.27, "tail");
+  // fuel tank + side guard
+  P.cyl(0.5, 1.0, -0.95, 0.62, 1.4, "chrome", Math.PI / 2);
+  P.strut("dark", [1.12, 0.6, -1.6], [1.12, 0.6, 0.6], 0.05, 0.12);
+  // wheels: single front axle, tandem rear axles under mudguards
+  for (const s of [-1, 1]) for (const z of [3.1, -2.2, -3.4]) P.wheel(1.0, 0.32, s * 1.06, 0.5, z, { spokes: 6 });
+  for (const s of [-1, 1]) P.fender(0.58, 0.38, s * 1.06, 0.5, -2.8, Math.PI * 0.15, Math.PI * 0.7, "dark");
+  P.loft("dark", [[-3.95, 0.98, 1.04, 1.24, 1.24, 0.02], [-1.65, 0.98, 1.04, 1.24, 1.24, 0.02]]);
 }
 function busParts(P) {
-  P.box(2.6, 2.75, 11.6, 0, 1.75, 0, "body");
-  P.box(2.64, 0.95, 10.4, 0, 2.35, -0.3, "glass");
-  P.box(2.4, 1.5, 0.06, 0, 2.15, 5.81, "glass");
-  P.box(2.64, 0.38, 11.62, 0, 1.0, 0, "accent");
-  P.box(1.8, 0.3, 3.0, 0, 3.27, -2, "dark");
-  P.box(1.8, 0.28, 0.06, 0, 2.98, 5.83, "light");
-  for (const sx of [-1.15, 1.15]) for (const sz of [3.9, -3.4]) P.wheel(1.0, 0.36, sx, 0.5, sz);
-  for (const sx of [-0.95, 0.95]) { P.box(0.35, 0.18, 0.05, sx, 0.85, 5.82, "light"); P.box(0.3, 0.3, 0.05, sx * 1.05, 1.0, -5.82, "tail"); }
+  const W = 1.27, h2 = 5.8;
+  P.loft("body", [
+    [-h2, 0.38, 3.12, W - 0.05, W - 0.1, 0.26],
+    [-h2 + 0.15, 0.32, 3.2, W, W - 0.05, 0.3],
+    [h2 - 0.2, 0.32, 3.2, W, W - 0.05, 0.3],
+    [h2, 0.36, 3.1, W - 0.04, W - 0.1, 0.25],
+  ]);
+  // window bays (door side is +X)
+  const bays = [[-5.3, -4.05], [-3.95, -2.7], [-2.6, -1.35], [-1.25, 0.0], [0.1, 1.35], [1.45, 2.7], [2.8, 4.05], [4.15, 5.55]];
+  const doors = [[0.1, 1.35], [4.15, 5.2]];
+  for (const s of [-1, 1]) {
+    const x = s * (W - 0.025);
+    for (const [z0, z1] of bays) {
+      if (s > 0 && doors.some(([a]) => a === z0)) continue;
+      P.box(0.03, 0.95, z1 - z0, x, 2.32, (z0 + z1) / 2, "glass");
+    }
+    for (const z of [-5.35, -4.0, -2.65, -1.3, 0.05, 1.4, 2.75, 4.1]) P.box(0.035, 0.97, 0.1, s * (W - 0.02), 2.32, z, "body");
+    // livery band (broken by the doors on the kerb side)
+    for (const [z0, z1] of s > 0 ? [[-5.6, 0.0], [1.45, 4.1]] : [[-5.6, 5.6]]) P.box(0.02, 0.32, z1 - z0, s * (W - 0.012), 1.45, (z0 + z1) / 2, "accent");
+    P.strut("dark", [s * (W - 0.05), 2.75, 5.7], [s * (W + 0.15), 2.62, 5.95], 0.04);
+    P.box(0.1, 0.4, 0.06, s * (W + 0.17), 2.4, 5.97, "dark");                  // mirror
+    P.box(0.36, 0.16, 0.04, s * 0.95, 0.85, h2 + 0.01, "light");
+    P.box(0.22, 0.5, 0.05, s * 1.0, 1.1, -h2 - 0.01, "tail");
+    for (const z of [3.9, -3.4]) {
+      P.arch(0.6, s * W, 0.5, z, "dark");
+      P.wheel(1.0, 0.32, s * (W + 0.04 - 0.16), 0.5, z, { spokes: 8 });
+    }
+  }
+  P.box(0.03, 0.95, 0.3, -(W - 0.025), 2.32, 5.4, "glass");
+  P.box(0.03, 0.95, 0.3, W - 0.025, 2.32, 5.4, "glass");
+  for (const [z0, z1] of doors) {                                                 // glazed folding doors
+    P.box(0.025, 2.33, z1 - z0 + 0.08, W - 0.03, 1.62, (z0 + z1) / 2, "dark");
+    P.box(0.03, 2.25, z1 - z0, W - 0.025, 1.62, (z0 + z1) / 2, "glass");
+    P.box(0.035, 2.25, 0.03, W - 0.02, 1.62, (z0 + z1) / 2, "dark");
+  }
+  // front: windscreen, destination sign, grille, bumper
+  P.box(2.3, 1.45, 0.04, 0, 2.15, h2, "glass");
+  P.box(1.8, 0.24, 0.04, 0, 2.97, h2, "light");
+  P.box(1.2, 0.2, 0.04, 0, 0.9, h2 + 0.01, "dark");
+  P.box(2.5, 0.3, 0.15, 0, 0.48, h2, "dark");
+  P.box(0.5, 0.13, 0.03, 0, 0.7, h2 + 0.07, "plate");
+  // rear: window, engine grille, bumper
+  P.box(2.0, 0.7, 0.04, 0, 2.45, -h2, "glass");
+  P.box(1.8, 0.5, 0.04, 0, 1.2, -h2 - 0.01, "dark");
+  P.box(2.5, 0.3, 0.15, 0, 0.5, -h2, "dark");
+  P.box(0.5, 0.13, 0.03, 0, 0.75, -h2 - 0.04, "plate");
+  // roof air-con pod
+  P.loft("body", [[-2.2, 3.1, 3.4, 0.85, 0.75, 0.12], [0.6, 3.1, 3.4, 0.85, 0.75, 0.12]]);
 }
-function supercarParts(P) {
-  P.box(2.0, 0.42, 4.6, 0, 0.42, 0, "body");
-  P.box(1.9, 0.16, 1.3, 0, 0.66, 1.55, "body", 0.16);
-  P.box(1.9, 0.22, 1.5, 0, 0.7, -1.45, "body");
-  P.box(1.55, 0.42, 1.7, 0, 0.83, -0.15, "glass");
-  P.box(2.04, 0.22, 0.85, 0, 0.45, -0.7, "dark");
-  P.box(2.0, 0.06, 0.45, 0, 1.12, -2.15, "dark");
-  for (const sx of [-0.6, 0.6]) P.box(0.08, 0.3, 0.1, sx, 0.95, -2.1, "dark");
-  P.box(1.8, 0.12, 0.3, 0, 0.25, -2.32, "dark");
-  for (const sx of [-0.25, 0.25]) P.box(0.16, 0.012, 1.25, sx, 0.745, 1.55, "accent", 0.16);
-  for (const sx of [-0.95, 0.95]) { P.wheel(0.7, 0.32, sx, 0.35, 1.45); P.wheel(0.74, 0.36, sx, 0.37, -1.45); }
-  for (const sx of [-0.62, 0.62]) { P.box(0.45, 0.07, 0.05, sx, 0.6, 2.31, "light"); P.box(0.6, 0.07, 0.05, sx, 0.72, -2.31, "tail"); }
-}
+
+// ---- motorbikes ----
 function bikeParts(P) {
-  for (const z of [-0.68, 0.7]) P.wheel(0.64, 0.13, 0, 0.32, z);
-  P.box(0.12, 0.12, 1.05, 0, 0.6, 0.02, "body", -0.12);
-  P.box(0.3, 0.24, 0.55, 0, 0.84, 0.22, "body");
-  P.box(0.27, 0.1, 0.62, 0, 0.88, -0.28, "dark");
-  P.box(0.3, 0.32, 0.42, 0, 0.47, 0.02, "chrome");
-  P.box(0.07, 0.62, 0.07, 0, 0.62, 0.6, "chrome", -0.32);
-  P.box(0.72, 0.05, 0.05, 0, 1.0, 0.5, "chrome");
-  P.box(0.08, 0.06, 0.55, 0.12, 0.36, -0.35, "chrome", 0.12);
-  P.box(0.2, 0.06, 0.4, 0, 0.66, -0.62, "body", 0.25);
-  P.box(0.17, 0.13, 0.06, 0, 0.9, 0.72, "light");
-  P.box(0.13, 0.06, 0.04, 0, 0.78, -0.82, "tail");
+  const fz = 0.68, rz = -0.66, wy = 0.32;
+  for (const z of [rz, fz]) P.wheel(0.64, 0.12, 0, wy, z, { both: true, profile: 0.17, rimMat: "dark", spokes: 5 });
+  for (const s of [-1, 1]) P.cyl(0.26, 0.012, s * 0.068, wy, fz, "chrome", 0, Math.PI / 2);   // brake discs
+  P.fender(0.37, 0.13, 0, wy, fz, Math.PI * 0.3, Math.PI * 0.5, "body");
+  P.fender(0.37, 0.15, 0, wy, rz, Math.PI * 0.3, Math.PI * 0.35, "dark");
+  // front end: forks, clamps, round headlight, bars, mirrors
+  for (const s of [-1, 1]) P.strut("chrome", [s * 0.085, wy, fz], [s * 0.085, 0.98, 0.47], 0.045);
+  P.box(0.26, 0.05, 0.09, 0, 0.98, 0.47, "dark");
+  P.cyl(0.2, 0.09, 0, 0.9, 0.6, "chrome", Math.PI / 2);
+  P.cyl(0.17, 0.02, 0, 0.9, 0.65, "light", Math.PI / 2);
+  P.strut("chrome", [-0.36, 1.07, 0.4], [0.36, 1.07, 0.4], 0.028);
+  for (const s of [-1, 1]) {
+    P.strut("chrome", [s * 0.08, 0.99, 0.46], [s * 0.12, 1.07, 0.41], 0.03);
+    P.cyl(0.045, 0.12, s * 0.32, 1.07, 0.4, "dark", 0, Math.PI / 2);
+    P.strut("dark", [s * 0.24, 1.07, 0.41], [s * 0.3, 1.25, 0.36], 0.015);
+    P.box(0.11, 0.06, 0.02, s * 0.3, 1.27, 0.36, "dark");
+  }
+  // tank, seat, tail
+  P.loft("body", [[-0.05, 0.76, 0.95, 0.1, 0.13, 0.08], [0.15, 0.73, 1.0, 0.13, 0.16, 0.09], [0.38, 0.8, 0.98, 0.09, 0.11, 0.07]]);
+  P.loft("dark", [[-0.62, 0.86, 0.92, 0.09, 0.09, 0.03], [-0.32, 0.84, 0.94, 0.13, 0.13, 0.04], [-0.04, 0.83, 0.92, 0.12, 0.12, 0.04]]);
+  P.loft("body", [[-0.86, 0.85, 0.9, 0.05, 0.05, 0.02], [-0.6, 0.79, 0.9, 0.1, 0.1, 0.04]]);
+  P.box(0.12, 0.05, 0.04, 0, 0.87, -0.87, "tail");
+  P.box(0.16, 0.1, 0.01, 0, 0.74, -0.86, "plate", -0.3);
+  // frame, engine, exhaust, swingarm, shocks
+  P.strut("dark", [0, 0.95, 0.45], [0, 0.48, -0.12], 0.06);
+  P.strut("dark", [0, 0.95, 0.45], [0, 0.8, -0.05], 0.05);
+  for (const s of [-1, 1]) P.strut("dark", [s * 0.08, 0.8, -0.05], [s * 0.07, 0.84, -0.7], 0.035);
+  P.box(0.3, 0.3, 0.42, 0, 0.48, 0.08, "dark");
+  for (let i = 0; i < 4; i++) P.box(0.32, 0.025, 0.2, 0, 0.66 + i * 0.035, 0.2, "chrome", -0.35);
+  for (const s of [-1, 1]) P.cyl(0.22, 0.04, s * 0.16, 0.44, 0.02, "chrome", 0, Math.PI / 2);
+  P.strut("chrome", [0.06, 0.52, 0.3], [0.13, 0.3, 0.1], 0.055);
+  P.strut("chrome", [0.13, 0.3, 0.1], [0.15, 0.37, -0.32], 0.06);
+  P.strut("chrome", [0.15, 0.37, -0.3], [0.16, 0.47, -0.74], 0.11);
+  P.cyl(0.08, 0.02, 0.16, 0.47, -0.745, "dark", Math.PI / 2 - 0.22);
+  for (const s of [-1, 1]) {
+    P.strut("dark", [s * 0.08, 0.42, -0.1], [s * 0.08, wy, rz], 0.05, 0.07);
+    P.strut("chrome", [s * 0.09, 0.38, -0.52], [s * 0.09, 0.84, -0.34], 0.03);
+    P.strut("body", [s * 0.09, 0.47, -0.48], [s * 0.09, 0.76, -0.37], 0.055);
+  }
 }
 function superbikeParts(P) {
-  for (const z of [-0.72, 0.72]) P.wheel(0.62, 0.18, 0, 0.31, z);
-  P.box(0.42, 0.5, 0.9, 0, 0.72, 0.38, "body", -0.25);
-  P.box(0.32, 0.22, 0.05, 0, 1.02, 0.66, "glass", -0.6);
-  P.box(0.36, 0.22, 0.5, 0, 0.9, 0.0, "body");
-  P.box(0.26, 0.08, 0.45, 0, 0.86, -0.38, "dark");
-  P.box(0.28, 0.16, 0.5, 0, 0.92, -0.72, "body", 0.35);
-  P.box(0.44, 0.06, 0.6, 0, 0.62, 0.3, "accent", -0.25);
-  P.box(0.34, 0.3, 0.6, 0, 0.42, 0.05, "dark");
-  P.box(0.1, 0.08, 0.7, 0.12, 0.35, -0.38, "chrome");
-  for (const sx of [-0.09, 0.09]) P.box(0.07, 0.55, 0.07, sx, 0.6, 0.62, "chrome", -0.4);
-  P.box(0.6, 0.04, 0.04, 0, 0.98, 0.42, "chrome");
-  P.box(0.1, 0.1, 0.45, 0.15, 0.62, -0.6, "chrome", 0.25);
-  P.box(0.22, 0.08, 0.05, 0, 0.82, 0.86, "light");
-  P.box(0.16, 0.05, 0.04, 0, 0.98, -0.97, "tail");
+  const fz = 0.72, rz = -0.72, wy = 0.31;
+  P.wheel(0.62, 0.15, 0, wy, fz, { both: true, profile: 0.18, rimMat: "accent", spokes: 3 });
+  P.wheel(0.62, 0.2, 0, wy, rz, { both: true, profile: 0.2, rimMat: "accent", spokes: 3 });
+  for (const s of [-1, 1]) P.cyl(0.3, 0.012, s * 0.085, wy, fz, "chrome", 0, Math.PI / 2);
+  P.fender(0.36, 0.14, 0, wy, fz, Math.PI * 0.35, Math.PI * 0.45, "body");
+  P.fender(0.36, 0.2, 0, wy, rz, Math.PI * 0.3, Math.PI * 0.3, "dark");
+  // front: fairing with twin slit headlights, windscreen, forks, clip-ons
+  P.loft("body", [
+    [0.08, 0.38, 0.92, 0.17, 0.15, 0.08],
+    [0.45, 0.42, 1.0, 0.2, 0.15, 0.1],
+    [0.72, 0.55, 0.93, 0.15, 0.1, 0.08],
+    [0.87, 0.66, 0.84, 0.07, 0.05, 0.04],
+  ]);
+  P.strut("glass", [0, 0.93, 0.74], [0, 1.1, 0.46], 0.24, 0.012);
+  for (const s of [-1, 1]) {
+    P.box(0.06, 0.04, 0.06, s * 0.045, 0.78, 0.86, "light", 0, s * 0.3);
+    P.strut("accent", [s * 0.205, 0.6, 0.12], [s * 0.17, 0.74, 0.68], 0.012, 0.07);  // fairing flash
+    P.box(0.1, 0.05, 0.08, s * 0.22, 0.95, 0.6, "dark");                            // mirrors
+    P.strut("chrome", [s * 0.085, wy, fz], [s * 0.085, 0.96, 0.5], 0.05);
+    P.strut("dark", [s * 0.09, 0.94, 0.5], [s * 0.3, 0.91, 0.42], 0.03);
+  }
+  // tank, seat, pointed tail, belly pan
+  P.loft("body", [[-0.3, 0.82, 1.0, 0.12, 0.11, 0.07], [0.12, 0.8, 1.05, 0.16, 0.15, 0.08], [0.35, 0.82, 1.0, 0.13, 0.12, 0.07]]);
+  P.loft("dark", [[-0.62, 0.9, 0.97, 0.1, 0.09, 0.03], [-0.28, 0.88, 0.98, 0.13, 0.12, 0.04]]);
+  P.loft("body", [[-1.0, 0.99, 1.04, 0.03, 0.03, 0.01], [-0.62, 0.86, 1.02, 0.12, 0.1, 0.04]]);
+  P.loft("accent", [[-0.2, 0.25, 0.42, 0.13, 0.17, 0.05], [0.35, 0.3, 0.5, 0.15, 0.19, 0.05]]);
+  P.box(0.1, 0.04, 0.04, 0, 1.0, -0.99, "tail");
+  P.strut("dark", [0, 0.9, -0.8], [0, 0.72, -0.94], 0.03);
+  P.box(0.16, 0.1, 0.01, 0, 0.7, -0.95, "plate", -0.3);
+  // engine, swingarm, exhaust
+  P.box(0.3, 0.32, 0.5, 0, 0.5, 0.0, "dark");
+  for (const s of [-1, 1]) P.strut("chrome", [s * 0.1, 0.44, -0.1], [s * 0.1, wy, rz], 0.07, 0.1);
+  P.strut("chrome", [0.12, 0.3, 0.0], [0.18, 0.55, -0.55], 0.13);
+  P.cyl(0.1, 0.02, 0.185, 0.565, -0.57, "dark", Math.PI / 2 - 0.43);
 }
 
 // Pools (weighted by repetition).
@@ -216,26 +556,28 @@ const T = { cityTraffic: [], parisTraffic: [], cityParked: [], parisParked: [], 
 export function initVehicleTemplates() {
   headM = flatMat("headLightM", hex("#f2efe2"), 1);
   tailM = flatMat("tailLightM", hex("#c0261d"), 1);
-  tyreM = litMat("tyreM", hex("#151515"));
-  chromeM = litMat("chromeM", hex("#55595e"), 0.5);
-  darkM = litMat("trimDarkM", hex("#1c1d20"), 0.2);
-  glassM = litMat("carGlassM", hex("#1b2126"), 0.4);
+  tyreM = litMat("tyreM", hex("#161616"), 0.08);
+  chromeM = litMat("chromeM", hex("#9aa1a8"), 0.9); chromeM.specularPower = 96;
+  rimM = litMat("rimM", hex("#c4c8cd"), 0.8); rimM.specularPower = 64;
+  darkM = litMat("trimDarkM", hex("#1c1d20"), 0.25);
+  glassM = litMat("carGlassM", hex("#1c2630"), 0.9); glassM.specularPower = 128;
+  plateM = litMat("plateM", hex("#e9e7dc"), 0.1);
   burntM = litMat("burntM", hex("#1b1817"));
   burntGlassM = litMat("burntGlassM", hex("#0a0a0a"));
 
-  const sedan = sedanParts(), hatch = sedanParts({ len: 3.8, cabLen: 2.0, cabOff: -0.3, cabH: 0.62 });
-  const taxi = model("car", "taxi", { body: "#f2c230" }, sedanParts({ taxi: true }));
+  const sedan = sedanParts(), hatch = hatchParts(), suv = suvParts(), van = vanParts(), sup = supercarParts();
+  const taxi = model("car", "taxi", { body: "#f2c230" }, taxiParts());
   const sedans = ["#1d1f22", "#22314a", "#d8d8d4", "#9da3a8", "#7a1f1f"].map((c, i) => model("car", "sedan" + i, { body: c }, sedan));
   const hatches = ["#ecebe6", "#b32d2a", "#9fd1c0", "#efe3c3", "#2f5d8a"].map((c, i) => model("car", "hatch" + i, { body: c }, hatch));
-  const suvs = ["#18191b", "#e6e6e2", "#5b6b3a", "#6d1f24", "#2e3f55"].map((c, i) => model("suv", "suv" + i, { body: c }, suvParts));
+  const suvs = ["#18191b", "#e6e6e2", "#5b6b3a", "#6d1f24", "#2e3f55"].map((c, i) => model("suv", "suv" + i, { body: c }, suv));
   const vans = [["#f1f1ee", "#2a6fb5"], ["#a9adb2", "#1d1f22"], ["#2f5d3e", "#f1f1ee"], ["#f1f1ee", "#c0392b"]]
-    .map(([b, a], i) => model("van", "van" + i, { body: b, accent: a }, vanParts));
+    .map(([b, a], i) => model("van", "van" + i, { body: b, accent: a }, van));
   const trucks = [["#c0392b", "#f1f1ee"], ["#1f4f9a", "#e9e4d6"], ["#f1f1ee", "#2f7d4a"]]
     .map(([b, a], i) => model("truck", "truck" + i, { body: b, accent: a }, truckParts));
   const cityBus = model("bus", "busCity", { body: "#e9ecef", accent: "#1d5fa8" }, busParts);
   const parisBus = model("bus", "busParis", { body: "#2f7d55", accent: "#e9ecef" }, busParts);
   const supers = [["#e8b100", "#111"], ["#d81b1b", "#fff"], ["#ff6a00", "#111"], ["#1565c0", "#fff"], ["#7ed321", "#111"]]
-    .map(([b, a], i) => model("supercar", "supercar" + i, { body: b, accent: a }, supercarParts));
+    .map(([b, a], i) => model("supercar", "supercar" + i, { body: b, accent: a }, sup));
   const bikes = ["#a3262a", "#1f4f9a", "#222326", "#c8681a"].map((c, i) => model("bike", "bike" + i, { body: c }, bikeParts));
   const superbikes = [["#00a86b", "#111"], ["#c62828", "#fff"], ["#1e88e5", "#fff"], ["#f5f5f5", "#d32f2f"]]
     .map(([b, a], i) => model("superbike", "superbike" + i, { body: b, accent: a }, superbikeParts));
@@ -318,7 +660,7 @@ export function spawnParked(START) {
 }
 export function swapToBurnt(v) {
   const key = v.tpl ? v.tpl.burnKey : v.kind;
-  if (!burntCache[key]) burntCache[key] = v.tpl ? v.tpl.buildBurnt() : build(v.kind, {}, v.kind === "bike" ? bikeParts : sedanParts(), true);
+  if (!burntCache[key]) burntCache[key] = v.tpl ? v.tpl.buildBurnt() : build(v.kind + "Burnt", mats(v.kind, {}, true), v.kind === "bike" ? bikeParts : sedanParts(), false);
   const m = burntCache[key].createInstance("wreck");
   m.position.copyFrom(v.mesh.position);
   m.rotation.y = v.mesh.rotation.y;

@@ -155,6 +155,42 @@
             transform: scale(.7);
         }
 
+        /* web shooter: a ring instead of a cross */
+        #crosshair.web::before {
+            left: 2px;
+            top: 2px;
+            width: 10px;
+            height: 10px;
+            background: none;
+            border: 2px solid rgba(255, 255, 255, .9);
+            border-radius: 50%;
+        }
+
+        #crosshair.web::after {
+            left: 8px;
+            top: 8px;
+            width: 2px;
+            height: 2px;
+        }
+
+        #weapon {
+            right: 34px;
+            bottom: 34px;
+            display: none;
+            padding: 6px 14px;
+            background: rgba(20, 22, 26, .55);
+            border-radius: 6px;
+            font-size: 18px;
+            font-weight: 700;
+        }
+
+        #weapon small {
+            font-size: 13px;
+            font-weight: 500;
+            opacity: .8;
+            margin-left: 6px;
+        }
+
         #prompt {
             left: 50%;
             bottom: 70px;
@@ -364,13 +400,17 @@
     <div id="crosshair" class="hud"></div>
     <div id="prompt" class="hud"></div>
     <div id="speed" class="hud"></div>
+    <div id="weapon" class="hud"></div>
 
     <div id="controls" class="hud">
         <h2>Controls</h2>
         <div><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> Move</div>
         <div><kbd>Shift</kbd> Run</div>
         <div><kbd>Space</kbd> Jump · <kbd>Space</kbd><kbd>Space</kbd> next to a building: leap onto its roof</div>
-        <div><kbd>Left click</kbd> Shoot · <kbd>Right click</kbd> hold to aim</div>
+        <div><kbd>F</kbd> Switch between web shooter and gun</div>
+        <div>Web shooter: <kbd>Left click</kbd> shoot a web at a building ahead · hold to swing · release to fly ·
+            click again mid-air to chain · <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> pump the swing</div>
+        <div>Gun: <kbd>Left click</kbd> Shoot · <kbd>Right click</kbd> hold to aim</div>
         <div><kbd>E</kbd> Get in / out of cars and bikes (works on moving traffic too)</div>
         <div>Driving: <kbd>W</kbd><kbd>S</kbd> gas / reverse · <kbd>A</kbd><kbd>D</kbd> steer · <kbd>Space</kbd> brake ·
             <kbd>Shift</kbd> boost</div>

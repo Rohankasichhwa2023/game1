@@ -276,7 +276,7 @@ function setTime(h) { tod = ((h % 24) + 24) % 24; applyTimeOfDay(); }
 
 // ---------------------------------------------------------------- input
 const keys = {};
-let lastSpaceAt = 0, superJumpQueued = false, interactQueued = false;
+let lastSpaceAt = 0, superJumpQueued = false, interactQueued = false, swingQueued = false;
 window.addEventListener("keydown", (e) => {
   if (e.code === "Tab") { e.preventDefault(); document.getElementById("controls").classList.toggle("show"); }
   if (e.code === "Space") e.preventDefault();
@@ -295,21 +295,39 @@ window.addEventListener("keydown", (e) => {
     lastSpaceAt = now;
   }
   if (e.code === "KeyE" || e.code === "Enter") interactQueued = true;
+  if (e.code === "KeyF") toggleWeapon();
   if (e.code === "KeyN") skipTime();
 });
 window.addEventListener("keyup", (e) => { keys[e.code] = false; });
-window.addEventListener("blur", () => { for (const k in keys) keys[k] = false; firing = false; aiming = false; });
+window.addEventListener("blur", () => { for (const k in keys) keys[k] = false; firing = false; aiming = false; webHeld = false; });
 
 let yaw = 0, pitch = 0.12, camDist = 6;
 let firing = false, aiming = false, lastMouseAt = 0;
+// Left click uses the selected tool: "gun" (shoot, right click aims) or
+// "web" (press = shoot a web line, hold = swing, release = let go). F toggles.
+let weapon = "gun", webHeld = false;
 const locked = () => document.pointerLockElement === canvas;
 // Pointer events (Babylon's preventDefault on pointerdown suppresses mouse
 // events). Buttons come from the bitmask so left+right together works.
 const syncButtons = (e) => {
   if (!locked()) return;
-  firing = (e.buttons & 1) !== 0;
-  aiming = (e.buttons & 2) !== 0;
+  const left = (e.buttons & 1) !== 0;
+  if (weapon === "gun") {
+    firing = left;
+    aiming = (e.buttons & 2) !== 0;
+  } else {
+    if (left && !webHeld) swingQueued = true;      // fresh press → fire a web
+    webHeld = left;
+    firing = false; aiming = false;
+  }
 };
+function toggleWeapon() {
+  weapon = weapon === "gun" ? "web" : "gun";
+  firing = false; aiming = false; webHeld = false;  // a swing in progress lets go
+  if (!vehicle) gun.setEnabled(weapon === "gun");
+}
+const weaponLabel = () => (weapon === "gun" ? "Gun" : "Web shooter") + " <small><kbd>F</kbd> switch</small>";
+gun.setEnabled(weapon === "gun");
 canvas.addEventListener("pointerdown", (e) => {
   if (!locked()) {
     const p = canvas.requestPointerLock && canvas.requestPointerLock();
@@ -322,7 +340,7 @@ window.addEventListener("pointerup", syncButtons);
 canvas.addEventListener("contextmenu", (e) => e.preventDefault());
 document.addEventListener("pointerlockchange", () => {
   document.getElementById("clickToPlay").style.display = locked() ? "none" : "block";
-  if (!locked()) { firing = false; aiming = false; }
+  if (!locked()) { firing = false; aiming = false; webHeld = false; }
 });
 document.addEventListener("pointermove", (e) => {
   if (!locked()) return;
@@ -410,7 +428,157 @@ function startSuperJump() {
   return true;
 }
 
+// ---------------------------------------------------------------- web swinging
+// Press F to shoot a web at a building above and ahead (the way the camera
+// faces), hold F to swing on it as a pendulum, release to let go and fly on
+// with the momentum. Press F again mid-air to chain the next swing.
+// W/A/S/D pump the swing; swinging up past the anchor lets go automatically.
+const WEB_RANGE = 75, SWING_MAX = 46, HAND = 1.6;
+let swing = null;                      // { a: anchor V3, len, minLen, vx, vy, vz }
+const airVel = { x: 0, z: 0 };         // horizontal momentum carried after a swing
+const webMat = new BABYLON.StandardMaterial("webM", scene);
+webMat.disableLighting = true;
+webMat.emissiveColor = new C3(0.9, 0.92, 0.95);
+const web = MB.CreateCylinder("web", { diameter: 0.035, height: 1, tessellation: 5 }, scene);
+web.rotation.x = Math.PI / 2; web.bakeCurrentTransformIntoVertices();   // length along +z
+web.material = webMat; web.isPickable = false; web.setEnabled(false);
+
+// Distance along a ray to the first building/wall (not vehicles), or null.
+function rayToSolid(o, d, max) {
+  let best = max, hit = false;
+  for (let t = 0; t < best; t += 8) {
+    const t2 = Math.min(t + 8, best);
+    const ax = o.x + d.x * t, az = o.z + d.z * t, bx = o.x + d.x * t2, bz = o.z + d.z * t2;
+    for (const s of query(Math.min(ax, bx), Math.max(ax, bx), Math.min(az, bz), Math.max(az, bz))) {
+      if (s.vehicle || s.off || s.maxY < 4) continue;
+      const th = rayBox(o, d, s, 0.5, best);
+      if (th !== null && th < best) { best = th; hit = true; }
+    }
+  }
+  return hit ? best : null;
+}
+// Fan rays upward around the camera heading; prefer high anchors well ahead.
+function findAnchor() {
+  const o = new V3(pos.x, pos.y + HAND, pos.z);
+  let best = null, bestScore = -Infinity;
+  for (const yo of [0, -0.3, 0.3, -0.6, 0.6, -0.9, 0.9]) {
+    for (const el of [0.55, 0.8, 1.05, 1.3]) {
+      const h = yaw + yo, c = Math.cos(el);
+      const d = new V3(Math.sin(h) * c, Math.sin(el), Math.cos(h) * c);
+      const t = rayToSolid(o, d, WEB_RANGE);
+      if (t === null || t < 7) continue;
+      const rise = d.y * t;
+      if (rise < 5) continue;
+      const score = c * t * 0.7 + Math.min(rise, 35) * 0.5 - Math.abs(yo) * 10 - Math.abs(t - 32) * 0.2;
+      if (score > bestScore) { bestScore = score; best = o.add(d.scale(t)); }
+    }
+  }
+  return best;
+}
+function startSwing() {
+  if (vehicle || downTimer > 0 || indoorsNow()) return false;
+  const a = findAnchor();
+  if (!a) return false;
+  const fx = Math.sin(yaw), fz = Math.cos(yaw);
+  const prev = swing;
+  const len = V3.Distance(a, new V3(pos.x, pos.y + HAND, pos.z));
+  swing = {
+    a, len, minLen: Math.max(6, len * 0.85),
+    // keep the current momentum and add a forward kick
+    vx: (prev ? prev.vx : airVel.x) + fx * 7,
+    vy: onGround ? 7 : Math.max(prev ? prev.vy : vy, -6),
+    vz: (prev ? prev.vz : airVel.z) + fz * 7,
+  };
+  onGround = false; superJump = null;
+  web.setEnabled(true);
+  return true;
+}
+function endSwing(fling) {
+  if (!swing) return;
+  airVel.x = swing.vx; airVel.z = swing.vz;
+  vy = swing.vy + (fling ? 3 : 0);
+  swing = null;
+  web.setEnabled(false);
+}
+function updateSwing(dt) {
+  const s = swing;
+  const fx = Math.sin(yaw), fz = Math.cos(yaw), rx = Math.cos(yaw), rz = -Math.sin(yaw);
+  let ix = 0, iz = 0;
+  if (keys.KeyW || keys.ArrowUp) { ix += fx; iz += fz; }
+  if (keys.KeyS || keys.ArrowDown) { ix -= fx; iz -= fz; }
+  if (keys.KeyD || keys.ArrowRight) { ix += rx; iz += rz; }
+  if (keys.KeyA || keys.ArrowLeft) { ix -= rx; iz -= rz; }
+  const il = Math.hypot(ix, iz);
+  s.len = Math.max(s.minLen, s.len - 6 * dt);            // reel in a little: gives the tug
+  const sp0 = Math.hypot(s.vx, s.vy, s.vz);
+  const n = Math.max(1, Math.ceil((sp0 * dt) / 0.3));     // sub-step so we can't tunnel through walls
+  const h = dt / n;
+  for (let i = 0; i < n && swing; i++) {
+    if (il) { s.vx += (ix / il) * 10 * h; s.vz += (iz / il) * 10 * h; }
+    s.vy -= GRAV * h;
+    let hx = pos.x + s.vx * h, hy = pos.y + HAND + s.vy * h, hz = pos.z + s.vz * h;
+    // rope: can't get further than len from the anchor
+    let ox = hx - s.a.x, oy = hy - s.a.y, oz = hz - s.a.z;
+    const d = Math.hypot(ox, oy, oz);
+    if (d > s.len) {
+      ox /= d; oy /= d; oz /= d;
+      hx = s.a.x + ox * s.len; hy = s.a.y + oy * s.len; hz = s.a.z + oz * s.len;
+      const vr = s.vx * ox + s.vy * oy + s.vz * oz;
+      if (vr > 0) { s.vx -= vr * ox; s.vy -= vr * oy; s.vz -= vr * oz; }
+    }
+    const sp = Math.hypot(s.vx, s.vy, s.vz);
+    if (sp > SWING_MAX) { const k = SWING_MAX / sp; s.vx *= k; s.vy *= k; s.vz *= k; }
+    pos.set(hx, hy - HAND, hz);
+    // walls: slide along them, losing the speed going into them
+    const bx = pos.x, bz = pos.z;
+    collideHoriz(pos);
+    const nx = pos.x - bx, nz = pos.z - bz, nl = Math.hypot(nx, nz);
+    if (nl > 1e-4) {
+      const vn = (s.vx * nx + s.vz * nz) / nl;
+      if (vn < 0) { s.vx -= (vn * nx) / nl; s.vz -= (vn * nz) / nl; }
+    }
+    // landed on the street or a roof
+    const gh = supportHeight(pos.x, pos.z, pos.y);
+    if (pos.y <= gh && s.vy <= 0) {
+      pos.y = gh; swing = null; web.setEnabled(false);
+      vy = 0; onGround = true; airVel.x = airVel.z = 0;
+    }
+  }
+  if (!swing) return;
+  pos.x = clamp(pos.x, WORLD.x0 + 2, WORLD.x1 - 2);
+  pos.z = clamp(pos.z, WORLD.z0 + 2, WORLD.z1 - 2);
+  // swung up level with the anchor, or let go of F → release with a fling
+  if (pos.y + HAND > s.a.y - 1) endSwing(true);
+  else if (!webHeld) endSwing(true);
+}
+// Swing pose + web line (also runs on the frame the swing ends).
+function poseSwing(dt) {
+  const s = swing;
+  const vx = s ? s.vx : airVel.x, vz = s ? s.vz : airVel.z;
+  if (Math.hypot(vx, vz) > 1) facing += angDiff(Math.atan2(vx, vz), facing) * Math.min(1, dt * 8);
+  player.position.copyFrom(pos);
+  player.rotation.y = facing;
+  const shadowY = supportHeight(pos.x, pos.z, pos.y + 0.01);
+  blob.position.set(pos.x, shadowY + 0.1, pos.z);
+  const bs = Math.max(0.3, 1 - (pos.y - shadowY) * 0.25);
+  blob.scaling.set(bs, 1, bs);
+  body.position.y = 0;
+  body.rotation.x += (0.35 - body.rotation.x) * Math.min(1, dt * 6);
+  armR.sh.rotation.x = -2.9; armR.sh.rotation.z = 0.25; armR.el.rotation.x = -0.1;
+  armL.sh.rotation.x = -0.7; armL.el.rotation.x = -0.9;
+  legL.hip.rotation.x = -1.0; legL.knee.rotation.x = 1.4;
+  legR.hip.rotation.x = -0.35; legR.knee.rotation.x = 0.6;
+  if (!s) return;
+  // web from the raised right hand to the anchor
+  const hx = pos.x + Math.cos(facing) * 0.25, hy = pos.y + 2.25, hz = pos.z - Math.sin(facing) * 0.25;
+  const len = Math.hypot(s.a.x - hx, s.a.y - hy, s.a.z - hz);
+  web.position.set((hx + s.a.x) / 2, (hy + s.a.y) / 2, (hz + s.a.z) / 2);
+  web.scaling.z = len;
+  web.lookAt(s.a);
+}
+
 function updatePlayer(dt) {
+  if (swing) { updateSwing(dt); poseSwing(dt); return; }
   const fwdX = Math.sin(yaw), fwdZ = Math.cos(yaw), rightX = Math.cos(yaw), rightZ = -Math.sin(yaw);
   let mx = 0, mz = 0;
   const downed = downTimer > 0;               // thrown from a crash: lie there for a moment
@@ -430,6 +598,13 @@ function updatePlayer(dt) {
   if (len > 0) { dx += (mx / len) * speed * dt; dz += (mz / len) * speed * dt; }
   dx += pushX * dt; dz += pushZ * dt;
   const pk = Math.exp(-4 * dt); pushX *= pk; pushZ *= pk;
+  // momentum left over from a web swing carries us through the air
+  const flying = !onGround && (airVel.x || airVel.z);
+  if (flying) {
+    dx += airVel.x * dt; dz += airVel.z * dt;
+    const ak = Math.exp(-0.35 * dt); airVel.x *= ak; airVel.z *= ak;
+  }
+  const sx = pos.x, sz = pos.z, wantX = dx, wantZ = dz;
   if (superJump && pos.y > superJump.clearY) {
     const gx = superJump.x - pos.x, gz = superJump.z - pos.z, gd = Math.hypot(gx, gz);
     if (gd > 0.05) { const s = Math.min(gd, 14 * dt); dx += (gx / gd) * s; dz += (gz / gd) * s; }
@@ -439,6 +614,11 @@ function updatePlayer(dt) {
     pos.x += dx / n; pos.z += dz / n;
     collideHoriz(pos);
     if (onGround) { const g = supportHeight(pos.x, pos.z, pos.y); if (g > pos.y) pos.y = g; }
+  }
+  // flew into a wall: lose the swing momentum instead of grinding along it
+  if (flying) {
+    const w2 = wantX * wantX + wantZ * wantZ;
+    if (w2 > 1e-6 && ((pos.x - sx) * wantX + (pos.z - sz) * wantZ) < 0.5 * w2) airVel.x = airVel.z = 0;
   }
   // bump into pedestrians
   for (const p of peds) {
@@ -459,7 +639,7 @@ function updatePlayer(dt) {
   const gh = supportHeight(pos.x, pos.z, pos.y);
   let ny = pos.y + vy * dt;
   if (vy > 0) { const c = ceilingAt(pos.x, pos.z, pos.y); if (ny + HEIGHT > c) { ny = c - HEIGHT; vy = 0; } }
-  if (vy <= 0 && ny <= gh) { pos.y = gh; vy = 0; onGround = true; superJump = null; }
+  if (vy <= 0 && ny <= gh) { pos.y = gh; vy = 0; onGround = true; superJump = null; airVel.x = airVel.z = 0; }
   else if (onGround && vy <= 0 && pos.y - gh < 0.45) { pos.y = gh; vy = 0; }
   else { pos.y = ny; onGround = false; }
   pos.x = clamp(pos.x, WORLD.x0 + 2, WORLD.x1 - 2);
@@ -514,6 +694,8 @@ function playerFits(x, y, z) {
   return true;
 }
 function enterVehicle(v) {
+  if (swing) { swing = null; web.setEnabled(false); }
+  airVel.x = airVel.z = 0;
   vehicle = v;
   v.solid.off = true;
   v.speed = 0;
@@ -555,7 +737,7 @@ function exitVehicle() {
   beam.setEnabled(false);
   player.parent = null; player.setEnabled(true);
   body.rotation.x = 0; armR.sh.rotation.z = 0.16;
-  blob.setEnabled(true); gun.setEnabled(true);
+  blob.setEnabled(true); gun.setEnabled(weapon === "gun");
   pos.set(spot[0], spot[1], spot[2]);
   vy = 0; onGround = true; facing = h;
 }
@@ -927,12 +1109,15 @@ function updateCamera(dt) {
     shake = Math.max(0, shake - dt * 1.6);
   }
   camera.setTarget(camTarget);
-  const fovT = aiming && !vehicle ? 0.62 : vehicle ? 1.05 + clamp(Math.abs(vehicle.speed) / 40, 0, 1) * 0.15 : 1.0;
+  const airSpeed = swing ? Math.hypot(swing.vx, swing.vy, swing.vz) : onGround ? 0 : Math.hypot(airVel.x, airVel.z);
+  const fovT = aiming && !vehicle ? 0.62 : vehicle ? 1.05 + clamp(Math.abs(vehicle.speed) / 40, 0, 1) * 0.15
+    : 1.0 + clamp(airSpeed / SWING_MAX, 0, 1) * 0.25;   // widen while web-swinging
   camera.fov += (fovT - camera.fov) * Math.min(1, dt * 10);
 }
 
 // ---------------------------------------------------------------- HUD
 const el = (id) => document.getElementById(id);
+const weaponEl = el("weapon");
 const locEl = el("location"), promptEl = el("prompt"), speedEl = el("speed"), crossEl = el("crosshair"), distEl = el("district");
 const hud = {};
 function setHud(key, node, html) {
@@ -958,7 +1143,8 @@ function updateHud(dt) {
   if (!loc && !vehicle && pos.y > 8 && onGround) loc = "Rooftop";
   setHud("loc", locEl, loc);
   setHud("speed", speedEl, vehicle ? `${Math.round(Math.abs(vehicle.speed) * 3.6)} <small>km/h</small>` : "");
-  crossEl.className = aiming ? "hud aim" : "hud";
+  setHud("weapon", weaponEl, vehicle ? "" : weaponLabel());
+  crossEl.className = aiming ? "hud aim" : weapon === "web" ? "hud web" : "hud";
   crossEl.style.display = locked() && !vehicle ? "block" : "none";
 
   hudTimer -= dt;
@@ -975,6 +1161,8 @@ function updateHud(dt) {
   }
   let pr = "";
   if (vehicle) pr = "<kbd>E</kbd> Get out";
+  else if (swing) pr = "Hold <kbd>Left click</kbd> to swing · release to let go";
+  else if (!onGround && weapon === "web") pr = "<kbd>Left click</kbd> Web swing";
   else {
     const u = nearestUsable();
     if (u) pr = `<kbd>E</kbd> ${u.e ? "Take the " + u.spec.name : u.spec.label}`;
@@ -1081,7 +1269,7 @@ function toggleBigMap(force) {
   bigEl.classList.toggle("show", bigMapOpen);
   if (!bigMapOpen) return;
   for (const k in keys) keys[k] = false;
-  firing = false; aiming = false;
+  firing = false; aiming = false; webHeld = false;
   if (locked()) document.exitPointerLock();
   big.width = window.innerWidth; big.height = window.innerHeight;
   bigFit = Math.min(big.width / baked.width, big.height / baked.height) * 0.94;
@@ -1217,6 +1405,7 @@ engine.runRenderLoop(() => {
     else if (downTimer <= 0) { const u = nearestUsable(); if (u) enterVehicle(u.e ? stealTraffic(u) : u); }
   }
   if (superJumpQueued) { superJumpQueued = false; if (!vehicle) startSuperJump(); }
+  if (swingQueued) { swingQueued = false; if (!vehicle) startSwing(); }
 
   updateTraffic(dt, now, { pos, vehicle, peds });
   if (vehicle) updateVehicle(dt);

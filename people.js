@@ -220,6 +220,15 @@ function nextEdge(p, overflow) {
     }
     p.route = null;
   }
+  // a scripted runner (mission target) picks its own way at every junction
+  if (p.chooser) {
+    const opts2 = nd.edges.filter((e) => e !== p.e);
+    const e = opts2.length ? p.chooser(p, nd, opts2) : p.e;
+    if (e === p.e) { p.dir = -p.dir; p.s = p.dir > 0 ? overflow : e.len - overflow; return; }
+    p.e = e;
+    if (e.a === nd) { p.dir = 1; p.s = overflow; } else { p.dir = -1; p.s = e.len - overflow; }
+    return;
+  }
   const opts = nd.edges.filter((e) => e !== p.e);
   const e = opts.length && rand() < 0.92 ? pick(opts) : p.e;
   if (e === p.e) { p.dir = -p.dir; p.s = p.dir > 0 ? overflow : e.len - overflow; return; }
@@ -237,9 +246,10 @@ const crossable = (e) => !["roundabout", "circus", "bridge", "parkway", "plaza"]
 
 // ---------------------------------------------------------------- reactions (public)
 export function knockDown(p, fx = 0, fz = 0) {
-  if (p.state === "down" || p.state === "away") return;
+  if (p.dead || p.state === "away") return;
+  if (p.state === "down") { if (pedHooks.onDown && p.scripted) pedHooks.onDown(p, Math.hypot(fx, fz)); return; }   // a target can still be finished off
   if (p.char && pedHooks.onHurt) pedHooks.onHurt(p);
-  if (pedHooks.onDown) pedHooks.onDown(p);
+  if (pedHooks.onDown) pedHooks.onDown(p, Math.hypot(fx, fz));
   endSocial(p);
   p.state = "down";
   p.timer = rr(3.5, 5.5);
@@ -251,7 +261,7 @@ export function knockDown(p, fx = 0, fz = 0) {
 // and film it.
 export function scare(x, z, r) {
   for (const p of peds) {
-    if (p.state === "down" || p.state === "away") continue;
+    if (p.state === "down" || p.state === "away" || p.scripted) continue;
     const d = Math.hypot(p.x - x, p.z - z);
     if (d > r * 1.6) continue;
     if (p.char && pedHooks.onScare) pedHooks.onScare(p, x, z, d / r);
@@ -390,6 +400,7 @@ export function updatePeds(dt, ctx) {
       p.root.rotation.y = p.heading;
       poseArms(p, dt, -0.4, -0.4, 1.2, 1.2);
       p.headPivot.rotation.set(0, 0, 0);
+      if (p.dead) continue;                 // killed: stays where they fell
       if (p.timer <= 0) {
         p.root.rotation.x = 0;
         if (p.persona.brave > 0.75 && onFoot && Math.hypot(pos.x - p.x, pos.z - p.z) < 6) { p.state = "annoyed"; p.timer = rr(2, 3); }
@@ -429,7 +440,7 @@ export function updatePeds(dt, ctx) {
       }
     }
     // ---- a gun pointed at them
-    if (ctx.armed && onFoot && d < 14 && !["flee", "cower", "dodge", "surrender"].includes(p.state)) {
+    if (ctx.armed && onFoot && d < 14 && !p.scripted && !["flee", "cower", "dodge", "surrender"].includes(p.state)) {
       const cosA = (-dx * aimX - dz * aimZ) / (d || 1);
       if (cosA > 0.93) {
         endSocial(p);
@@ -517,7 +528,7 @@ export function updatePeds(dt, ctx) {
     }
 
     // ---- calm states: notice the player, start activities / chats / crossings
-    if (p.char && (p.state === "walk" || p.state === "work") && onFoot && d < 0.9 && playerSpeed > 2.2 && p.cool <= 0) {
+    if (p.char && !p.scripted && (p.state === "walk" || p.state === "work") && onFoot && d < 0.9 && playerSpeed > 2.2 && p.cool <= 0) {
       p.cool = 4;
       if (pedHooks.onBarged) pedHooks.onBarged(p);
       p.prevState = p.state; p.state = "annoyed"; p.timer = rr(1.8, 2.8);

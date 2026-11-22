@@ -938,6 +938,7 @@ export function spawnCharacters() {
 const charOf = (p) => byId[p.char && p.char.id];
 
 function slotOf(c, hour) {
+  if (c.forceSlot) { const f = c.forceSlot; return { hour: 0, spot: f.spot, pose: f.pose || "stand", doing: f.doing || "", key: "force:" + f.spot + ":" + f.pose }; }
   const S = c.def.schedule;
   let cur = S[S.length - 1];
   for (const s of S) if (s[0] <= hour) cur = s;
@@ -977,6 +978,8 @@ function hide(c) {
 const BUSY = new Set(["down", "flee", "cower", "surrender", "dodge", "annoyed", "watch", "talk"]);
 function schedule(c, ctx) {
   const p = c.p;
+  if (c.gone) { if (p.state !== "away") hide(c); return; }       // out of the story for good
+  if (c.scripted) return;                                         // a mission is driving them
   if (c.hold > 0 || (convo && convo.c === c)) return;
   const slot = slotOf(c, hourNow());
   const pd = dist2(p.x, p.z, ctx.pos.x, ctx.pos.z);
@@ -1245,6 +1248,7 @@ function apply(c, r) {
 }
 function choices(c) {
   const d = c.def, m = c.mem;
+  if (convo.sub === "story") return storyHooks.choices ? storyHooks.choices(c) : [];
   if (convo.sub === "people") {
     const known = Object.keys(d.opinions).filter((id) => byId[id]);
     return [
@@ -1253,6 +1257,8 @@ function choices(c) {
     ];
   }
   const list = [
+    // mission lines come first when the story has something to say here
+    ...(storyHooks.choices ? storyHooks.choices(c) : []),
     { label: "How's it going?", go: () => say(c, "small", null, "How's it going?") },
     { label: "Heard anything interesting?", go: () => say(c, "rumor", null, "Heard anything interesting?") },
     { label: "Tell me about yourself.", go: () => say(c, "personal", null, "Tell me about yourself.") },
@@ -1297,11 +1303,27 @@ function onKey(e) {
   if (e.code === "KeyT" && candidate) openConvo(candidate);
 }
 export const inConversation = () => !!convo;
+
+// ---------------------------------------------------------------- story / mission hooks
+// storyHooks.choices(c) → extra dialogue options [{ label, go }] for character c
+export const storyHooks = { choices: null };
+export const charById = (id) => byId[id];
+// Say a scripted line as character c in the open conversation.
+export function speakAs(c, dialogue, emotion = "neutral", playerLine = "", action = "none") {
+  if (!convo || convo.c !== c) return;
+  convo.sub = null;
+  convo.playerLine = playerLine;
+  apply(c, out(dialogue, emotion, action));
+}
+export function addCash(n) { save.wallet += n; persist(); }
+export const wallet = () => save.wallet;
+export function setGone(id) { const c = byId[id]; if (c) { c.gone = true; c.scripted = false; } }
+export function endConversation() { if (convo) endConvo(); }
 // For the maps: where the story characters are right now (not those at home).
 export function characterMarkers() {
   const out = [];
   for (const c of chars) {
-    if (c.p.state === "away") continue;
+    if (c.p.state === "away" || c.p.dead) continue;
     out.push({ x: c.p.x, z: c.p.z, label: c.mem.known ? c.def.short : c.def.role });
   }
   return out;
@@ -1415,7 +1437,7 @@ export function updateCharacters(dt, hour, ctx) {
 
     const pd = dist2(p.x, p.z, ctx.pos.x, ctx.pos.z);
     // who can we talk to? (not someone running, hurt, or fast asleep)
-    if (onFoot && !convo && pd < bestD && !["down", "flee", "cower", "surrender", "dodge", "away"].includes(p.state) && !(p.state === "work" && p.pose === "sleep")) { bestD = pd; candidate = c; }
+    if (onFoot && !convo && !c.scripted && !p.dead && pd < bestD && !["down", "flee", "cower", "surrender", "dodge", "away"].includes(p.state) && !(p.state === "work" && p.pose === "sleep")) { bestD = pd; candidate = c; }
     // barks as you pass
     if (onFoot && !convo && pd < 7 && c.barkCool <= 0 && (p.state === "work" || p.state === "walk")) {
       c.barkCool = 22 + R() * 18;

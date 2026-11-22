@@ -13,7 +13,8 @@ import {
 import { planBuildings, buildBuildings, mapBuildings, roofs, enterables, billboards, drawAd, postFlush, homes, pulseHomeMarkers } from "./buildings.js";
 import { nearestHome, enterHome, leaveHome, atExit, WORLD_MASK, INSIDE_MASK, BOTH_MASK } from "./interiors.js";
 import { buildGround, buildNature, POND } from "./nature.js";
-import { RW, river, riverDist, LONDON } from "./london.js";
+import { RW, river, riverDist } from "./london.js";
+import { initMission, updateMission, missionObjective, missionOnPedDown } from "./mission.js";
 import { buildLondonGround, buildLondonWorld, updateLondon } from "./londonWorld.js";
 import {
   initVehicleTemplates, spawnParked, spawnTraffic, updateTraffic, vehicles, traffic, VEH, specOf, vehicleSolid, stealTraffic, swapToBurnt, driveVehicle, knockTraffic,
@@ -27,21 +28,21 @@ const t0 = performance.now();
 createFacades();
 generateRoads();
 
-// Start in the middle of London, on the pavement a few steps before a busy
-// junction (just short of the zebra crossing), looking into it. High streets
-// are preferred; the river is kept at a distance. The starter bikes stand on
-// the pavement behind you, the cars are parked at the kerb.
+// Start in the middle of Saint-Clair: on the pavement of one of the radial
+// boulevards just outside the fountain plaza, a few steps before the junction,
+// looking in toward the fountain. The starter bikes stand on the pavement
+// behind you, the cars are parked at the kerb.
 const START = (() => {
   const fallback = { x: PARIS.x + 14, z: PARIS.z, yaw: Math.PI / 2 };
-  const mid = { x: (LONDON.x0 + LONDON.x1) / 2, z: (LONDON.z0 + LONDON.z1) / 2 };
+  const r = (n) => Math.hypot(n.x - PARIS.x, n.z - PARIS.z);
   let best = null, bd = Infinity;
   for (const n of nodes) {
-    if (n.edges.length < 3 || n.edges.some((e) => e.district !== "london" || !["high", "lane"].includes(e.kind))) continue;
-    if (riverDist(n.x, n.z) < RW + 40) continue;
-    const e = n.edges.find((x) => x.kind === "high" && x.len > 45) || n.edges.find((x) => x.len > 45);
+    if (n.edges.length < 3 || n.edges.some((e) => e.district !== "paris")) continue;
+    if (r(n) < 70) continue;                                    // not on the plaza ring itself
+    // the radial boulevard leading outward from this junction (so we face inward)
+    const e = n.edges.find((x) => x.kind === "radial" && x.len > 40 && r(x.a === n ? x.b : x.a) > r(n));
     if (!e) continue;
-    const dd = Math.hypot(n.x - mid.x, n.z - mid.z) + (e.kind === "high" ? 0 : 60);   // a lane only if no high street is close
-    if (dd < bd) { bd = dd; best = { n, e }; }
+    if (r(n) < bd) { bd = r(n); best = { n, e }; }
   }
   if (!best) return fallback;
   const { n, e } = best;
@@ -78,6 +79,7 @@ spawnParked(START);
 spawnTraffic();
 spawnPeds(280);
 spawnCharacters();
+initMission();
 console.log(`World built in ${Math.round(performance.now() - t0)} ms — ${edges.length} roads, ${mapBuildings.length} buildings (${homes.length} homes), ${traffic.length} cars, ${peds.length} people`);
 
 // ---------------------------------------------------------------- player model
@@ -1100,7 +1102,10 @@ function panOf(x, z) {
 // People: a cry when someone is knocked down; a casual remark when you walk
 // up to someone (at most one every few seconds, so a crowd isn't a chorus).
 let nextTalkAt = 0;
-pedHooks.onDown = (p) => sfx.npcDeath(Math.hypot(p.x - pos.x, p.z - pos.z), panOf(p.x, p.z));
+pedHooks.onDown = (p, force) => {
+  sfx.npcDeath(Math.hypot(p.x - pos.x, p.z - pos.z), panOf(p.x, p.z));
+  missionOnPedDown(p, force);
+};
 pedHooks.onNear = (p, d) => {
   const now = performance.now();
   if (now < nextTalkAt || inConversation()) return;
@@ -1487,6 +1492,16 @@ function drawMinimap() {
   };
   // story characters: pink dots with a white ring
   for (const m of characterMarkers()) { dot(m.x, m.z, 5.2, "#ffffff"); dot(m.x, m.z, 3.8, "#ff4fb8"); }
+  // mission objective: a yellow marker, pinned to the rim when it's off the minimap
+  const obj = missionObjective();
+  if (obj) {
+    const [ox, oz] = toMap(obj.x, obj.z);
+    let dx = ox - px, dz = oz - pz;
+    const d = Math.hypot(dx, dz), rim = R / 0.9 - 12;
+    if (d > rim) { dx *= rim / d; dz *= rim / d; }
+    mctx.fillStyle = "#1a1a1a"; mctx.beginPath(); mctx.arc(dx, dz, 8, 0, Math.PI * 2); mctx.fill();
+    mctx.fillStyle = "#ffcf4a"; mctx.beginPath(); mctx.arc(dx, dz, 6, 0, Math.PI * 2); mctx.fill();
+  }
   mctx.restore();
   mctx.save();
   mctx.translate(R, R); mctx.rotate((vehicle ? vehicle.heading : facing) - yaw);
@@ -1555,6 +1570,15 @@ function drawBigMap() {
       bctx.fillStyle = "rgba(0,0,0,.65)"; bctx.fillText(m.label, sx + 1, sy - 11);
       bctx.fillStyle = "#ff8fd0"; bctx.fillText(m.label, sx, sy - 12);
     }
+  }
+  // mission objective
+  const obj = missionObjective();
+  if (obj) {
+    dot(obj.x, obj.z, r * 2.4 + 3, "#1a1a1a"); dot(obj.x, obj.z, r * 2.4, "#ffcf4a");
+    const [sx, sy] = bigToScreen(obj.x, obj.z);
+    bctx.font = "800 14px Segoe UI, sans-serif"; bctx.textAlign = "center";
+    bctx.fillStyle = "rgba(0,0,0,.7)"; bctx.fillText("★ " + obj.label, sx + 1, sy - 15);
+    bctx.fillStyle = "#ffcf4a"; bctx.fillText("★ " + obj.label, sx, sy - 16);
   }
 
   bctx.textAlign = "center"; bctx.textBaseline = "middle";
@@ -1710,6 +1734,7 @@ engine.runRenderLoop(() => {
   });
   if (!home) updateCharacters(dt, tod, { pos, vehicle, armed: !vehicle && weapon === "gun" && (aiming || firing), shove: shovePlayer });
   else hideCharacterUI();
+  updateMission(dt, { pos, vehicle });
   updateCamera(dt);
   updateTimeOfDay(dt);
   updateEffects(dt);

@@ -80,14 +80,38 @@ function pickEdge() {
   return list[0];
 }
 
-function makePed(e) {
-  const torso = pick(torsoTs), head = pick(headTs);
+// A one-off outfit for a story character: own shirt / skin / hair / trouser
+// colours (built once, so the character is recognisable from a distance).
+function customLook(id, o) {
+  const skin = litMat(id + "Skin", hex(o.skin), 0.15), hair = litMat(id + "Hair", hex(o.hair));
+  const shirt = litMat(id + "Shirt", hex(o.shirt), 0.05), sleeve = litMat(id + "Sleeve", hex(o.sleeve || o.shirt), 0.05);
+  const t = MB.CreateCapsule("t", { radius: 0.19, height: 0.66, tessellation: 10, subdivisions: 1 }, scene);
+  t.position.y = 1.2; t.scaling.set(o.build ?? 1.1, 1, 0.72);
+  const torso = { tpl: mergedTemplate(id + "Torso", [{ mesh: t, mat: shirt }]) };
+  const head = MB.CreateSphere("h", { diameter: 0.23, segments: 8 }, scene); head.position.y = 0.12;
+  const parts = [{ mesh: head, mat: skin }];
+  if (!o.bald) { const hr = MB.CreateSphere("hr", { diameter: 0.25, segments: 8, slice: o.longHair ? 0.75 : 0.55 }, scene); hr.position.y = o.longHair ? 0.1 : 0.14; parts.push({ mesh: hr, mat: hair }); }
+  const nose = MB.CreateBox("ns", { width: 0.04, height: 0.05, depth: 0.05 }, scene); nose.position.set(0, 0.11, 0.115); parts.push({ mesh: nose, mat: skin });
+  const neck = MB.CreateCylinder("n", { diameter: 0.1, height: 0.12, tessellation: 6 }, scene); neck.position.y = -0.01; parts.push({ mesh: neck, mat: skin });
+  if (o.beard) { const b = MB.CreateSphere("bd", { diameter: 0.2, segments: 6 }, scene); b.scaling.set(1, 0.7, 0.8); b.position.set(0, 0.04, 0.05); parts.push({ mesh: b, mat: hair }); }
+  const headT = { tpl: mergedTemplate(id + "Head", parts) };
+  const arm = MB.CreateCapsule("a", { radius: 0.058, height: 0.6, tessellation: 8, subdivisions: 1 }, scene); arm.position.y = -0.28;
+  const hand = MB.CreateSphere("hd", { diameter: 0.1, segments: 6 }, scene); hand.position.y = -0.6;
+  const armT = mergedTemplate(id + "Arm", [{ mesh: arm, mat: sleeve }, { mesh: hand, mat: skin }]);
+  const leg = MB.CreateCapsule("leg", { radius: 0.082, height: 0.88, tessellation: 8, subdivisions: 1 }, scene);
+  leg.position.y = -0.44; leg.bakeCurrentTransformIntoVertices();
+  leg.material = litMat(id + "Pants", hex(o.pants)); leg.setEnabled(false);
+  return { torso, head: headT, armT, legT: leg };
+}
+
+function makePed(e, look = null) {
+  const torso = look ? look.torso : pick(torsoTs), head = look ? look.head : pick(headTs);
   const root = new BABYLON.TransformNode("ped", scene);
   const body = torso.tpl.createInstance("pt"); body.parent = root;
   const headPivot = new BABYLON.TransformNode("pedHeadPivot", scene);
   headPivot.parent = root; headPivot.position.y = 1.55;
   const headM = head.tpl.createInstance("ph"); headM.parent = headPivot;
-  const armT = armTs[`${torso.si}_${head.si}`];
+  const armT = look ? look.armT : armTs[`${torso.si}_${head.si}`];
   const arms = [-1, 1].map((sx) => {
     const a = armT.createInstance("pa"); a.parent = root;
     a.position.set(sx * SHOULDER_X, SHOULDER_Y, 0);
@@ -96,7 +120,7 @@ function makePed(e) {
   const phone = phoneT.createInstance("pp");
   phone.parent = arms[1]; phone.position.set(0, -0.62, 0.06); phone.rotation.x = Math.PI / 2;
   phone.setEnabled(false);
-  const legT = pick(legTs);
+  const legT = look ? look.legT : pick(legTs);
   const legs = [-0.1, 0.1].map((x) => { const l = legT.createInstance("pl"); l.parent = root; l.position.set(x, 0.9, 0); return l; });
 
   const persona = {
@@ -134,6 +158,31 @@ export function spawnPeds(count = 190) {
   }
 }
 
+// ---------------------------------------------------------------- story characters
+// characters.js drives these: it gives them a look, a daily schedule (a route
+// to walk along the road graph, then a "work" pose at their spot) and handles
+// conversations. The usual street reactions (dodging cars, hands up at a gun,
+// fleeing gunfire, getting knocked down) still apply, and are reported back
+// through pedHooks so the character can remember them.
+export const pedHooks = { onHurt: null, onGun: null, onScare: null, onBarged: null, onDown: null, onNear: null };
+// onDown(p): anyone knocked down (main.js plays the death sound)
+// onNear(p, d): the player has walked right up to someone (casual remark)
+export function spawnCharacter(def, e, s) {
+  const p = makePed(e, customLook("chr_" + def.id, def.look));
+  p.char = def;
+  p.s = clamp(s, 1, e.len - 1);
+  p.walk = def.walkSpeed ?? 1.35; p.speed = 0;
+  Object.assign(p.persona, { brave: def.persona.brave, social: 0, curious: def.persona.curious ?? 0.5, nightOwl: true, jogger: false, elderly: !!def.persona.elderly });
+  p.state = "work"; p.pose = "stand";
+  place(p, 0, true);
+  return p;
+}
+export function placePed(p) { p.push = 0; place(p, 0, true); p.heading = Math.atan2(p.fx, p.fz); }
+export function fleePed(p, x, z) { p.threat = { x, z }; startFlee(p, rr(4, 7)); }
+export function sideHeading(p, towardRoad) {
+  return towardRoad ? Math.atan2(-p.fz * p.side, p.fx * p.side) : Math.atan2(p.fz * p.side, -p.fx * p.side);
+}
+
 // ---------------------------------------------------------------- path helpers
 const sideOffset = (p) => p.e.w / 2 + p.e.sw * p.lat + p.push;
 const Q = { x: 0, z: 0, tx: 0, tz: 1 };
@@ -143,8 +192,16 @@ function place(p, dt, snap = false, offScale = 1) {
   p.fx = fx; p.fz = fz;
   const off = sideOffset(p) * p.side * offScale;
   const x = q.x + fz * off, z = q.z - fx * off;
-  if (snap || Math.hypot(x - p.x, z - p.z) < 0.5) { p.x = x; p.z = z; }
-  else { const k = Math.min(1, dt * 4); p.x += (x - p.x) * k; p.z += (z - p.z) * k; }
+  const gx = x - p.x, gz = z - p.z, gap = Math.hypot(gx, gz);
+  if (snap || gap < 0.05) { p.x = x; p.z = z; }
+  else {
+    // Catch up with the path point, but never faster than a person can move:
+    // after being knocked a few metres off the pavement they run back to it
+    // instead of sliding / teleporting there.
+    const maxStep = (Math.max(p.speed, 1.2) + (p.state === "dodge" ? 6 : 1.5)) * dt;
+    const step = Math.min(gap, maxStep);
+    p.x += (gx / gap) * step; p.z += (gz / gap) * step;
+  }
   return Math.atan2(fx, fz);
 }
 function turnTo(p, h, dt, rate = 8) { p.heading += angDiff(h, p.heading) * Math.min(1, dt * rate); }
@@ -153,13 +210,23 @@ function faceXZ(p, x, z, dt, rate = 6) { turnTo(p, Math.atan2(x - p.x, z - p.z),
 const outward = (p) => Math.atan2(p.fz * p.side, -p.fx * p.side);
 function nextEdge(p, overflow) {
   const nd = p.dir > 0 ? p.e.b : p.e.a;
+  // a character on its way somewhere follows its planned route
+  if (p.route && p.route.length) {
+    const e = p.route.shift();
+    if (e.a === nd || e.b === nd) {
+      p.e = e;
+      if (e.a === nd) { p.dir = 1; p.s = overflow; } else { p.dir = -1; p.s = e.len - overflow; }
+      return;
+    }
+    p.route = null;
+  }
   const opts = nd.edges.filter((e) => e !== p.e);
   const e = opts.length && rand() < 0.92 ? pick(opts) : p.e;
   if (e === p.e) { p.dir = -p.dir; p.s = p.dir > 0 ? overflow : e.len - overflow; return; }
   p.e = e;
   if (e.a === nd) { p.dir = 1; p.s = overflow; } else { p.dir = -1; p.s = e.len - overflow; }
   // sometimes cross over right after turning the corner
-  if (!p.leader && p.state === "walk" && rand() < 0.12) p.crossAt = p.dir > 0 ? overflow + 5 : e.len - overflow - 5;
+  if (!p.leader && !p.char && p.state === "walk" && rand() < 0.12) p.crossAt = p.dir > 0 ? overflow + 5 : e.len - overflow - 5;
 }
 function advance(p, ds) {
   p.s += p.dir * ds;
@@ -171,6 +238,8 @@ const crossable = (e) => !["roundabout", "circus", "bridge", "parkway", "plaza"]
 // ---------------------------------------------------------------- reactions (public)
 export function knockDown(p, fx = 0, fz = 0) {
   if (p.state === "down" || p.state === "away") return;
+  if (p.char && pedHooks.onHurt) pedHooks.onHurt(p);
+  if (pedHooks.onDown) pedHooks.onDown(p);
   endSocial(p);
   p.state = "down";
   p.timer = rr(3.5, 5.5);
@@ -185,6 +254,7 @@ export function scare(x, z, r) {
     if (p.state === "down" || p.state === "away") continue;
     const d = Math.hypot(p.x - x, p.z - z);
     if (d > r * 1.6) continue;
+    if (p.char && pedHooks.onScare) pedHooks.onScare(p, x, z, d / r);
     endSocial(p);
     p.threat = { x, z };
     p.cross = null; p.crossAt = undefined;
@@ -215,6 +285,7 @@ function toWalk(p) {
   p.state = p.leader ? "follow" : "walk"; p.act = null; p.cross = null;
   p.phone.setEnabled(false);
   p.cool = rr(6, 22);
+  if (p.char) p.replan = true;          // characters work out where they were going again
 }
 
 // Is pedestrian p inside the footprint of vehicle v (plus a small margin)?
@@ -290,7 +361,7 @@ export function updatePeds(dt, ctx) {
 
   for (const p of peds) {
     const far = Math.abs(p.x - pos.x) > 70 || Math.abs(p.z - pos.z) > 70;
-    if (checkAway) {
+    if (checkAway && !p.char) {
       if (p.state === "away") {
         if (!world.night && rand() < 0.08) {
           const e = pickEdge(), s = rr(2, e.len - 2), q = pathAt(e, s, Q);
@@ -332,6 +403,11 @@ export function updatePeds(dt, ctx) {
     const dx = pos.x - p.x, dz = pos.z - p.z;
     const d = Math.hypot(dx, dz);
     const near = d < 25;
+    // walked right up to someone calm: they may say something (once per ~25 s each)
+    if (onFoot && d < 2.6 && pedHooks.onNear && !["down", "flee", "cower", "surrender", "dodge", "talk", "away"].includes(p.state)) {
+      const now = performance.now();
+      if (!(p.talkAt > now)) { p.talkAt = now + 25000; pedHooks.onNear(p, d); }
+    }
 
     // ---- run over by the player's vehicle
     if (ctx.vehicle && near && Math.abs(ctx.vehicleSpeed) > 3.5 && pos.y < 2 && underVehicle(ctx.vehicle, p)) {
@@ -358,6 +434,7 @@ export function updatePeds(dt, ctx) {
       if (cosA > 0.93) {
         endSocial(p);
         p.cross = null; p.phone.setEnabled(false);
+        if (p.char && pedHooks.onGun) pedHooks.onGun(p);
         if (p.persona.brave < 0.2 && d > 6) { p.threat = { x: pos.x, z: pos.z }; startFlee(p, rr(5, 8)); }
         else { p.state = "surrender"; p.timer = rr(1.5, 2.5); }
       }
@@ -414,6 +491,14 @@ export function updatePeds(dt, ctx) {
       case "act":
         if (p.timer <= 0) toWalk(p);
         break;
+      case "work":                         // a character at their spot, doing their thing
+        p.speed = 0;
+        if (p.faceYaw !== undefined) turnTo(p, p.faceYaw, dt, 3);
+        break;
+      case "talk":                         // a character in conversation with the player
+        p.speed = 0;
+        faceXZ(p, pos.x, pos.z, dt, 5);
+        break;
       case "follow": {
         const L = p.leader;
         if (!L || L.state === "away" || L.state === "down" || L.state === "flee") { p.leader = null; toWalk(p); break; }
@@ -432,7 +517,12 @@ export function updatePeds(dt, ctx) {
     }
 
     // ---- calm states: notice the player, start activities / chats / crossings
-    if (p.state === "walk" && near) {
+    if (p.char && (p.state === "walk" || p.state === "work") && onFoot && d < 0.9 && playerSpeed > 2.2 && p.cool <= 0) {
+      p.cool = 4;
+      if (pedHooks.onBarged) pedHooks.onBarged(p);
+      p.prevState = p.state; p.state = "annoyed"; p.timer = rr(1.8, 2.8);
+    }
+    if (p.state === "walk" && near && !p.char) {
       if (onFoot && d < 0.9 && playerSpeed > 2.2) {
         // barged into
         if (p.persona.brave > 0.45) { p.state = "annoyed"; p.timer = rr(1.8, 2.8); }
@@ -441,7 +531,7 @@ export function updatePeds(dt, ctx) {
         p.state = "wave"; p.timer = rr(1.6, 2.4);
       }
     }
-    if (p.state === "walk" && p.cool <= 0 && !p.persona.jogger) {
+    if (p.state === "walk" && p.cool <= 0 && !p.persona.jogger && !p.char) {
       if (p.hasFollower) p.crossAt = undefined;
       if (p.crossAt !== undefined && crossable(p.e) && Math.abs(p.s - p.crossAt) < 1.5) {
         p.crossAt = undefined;
@@ -474,7 +564,7 @@ export function updatePeds(dt, ctx) {
     if (p.state === "walk") target = p.walk;
     else if (p.state === "follow") target = p.speed;
     else if (p.state === "act") target = p.walk * ACTS[p.act].move;
-    else if (p.state === "flee") target = p.persona.elderly ? 2.6 : 4.6 + p.persona.brave * 0.8;
+    else if (p.state === "flee") target = p.persona.elderly ? 2.2 : 3.6 + p.persona.brave * 0.6;   // a real sprint, ~3.6–4.2 m/s
     else if (p.state === "dodge") target = 0.6;
 
     if (p.state === "cross") {
@@ -531,14 +621,18 @@ export function updatePeds(dt, ctx) {
     else if (p.state === "act" && p.act === "shop") turnTo(p, p.shopYaw, dt, 3);
     else if (p.state === "act" && p.act === "call") turnTo(p, pathH + Math.sin(p.timer * 0.7) * 1.2, dt, 1.5);
     else if (p.state === "cross") turnTo(p, Math.atan2(-p.fz * p.side, p.fx * p.side) + (p.cross.phase === "go" ? 0 : 0.6 * p.side), dt, 4);
-    else if (!["surrender", "annoyed", "wave", "chat", "watch"].includes(p.state) && !(p.state === "follow" && p.speed < 0.1)) turnTo(p, pathH, dt);
+    else if (!["surrender", "annoyed", "wave", "chat", "watch", "work", "talk"].includes(p.state) && !(p.state === "follow" && p.speed < 0.1)) turnTo(p, pathH, dt);
 
     // head: look at the player when they're close, otherwise glance around
     let look = 0, nod = 0;
     if (p.lookTarget !== undefined && p.state === "cross") look = p.lookTarget;
     else if (near && d < 9 && ["walk", "act", "follow", "chat"].includes(p.state)) {
       look = clamp(angDiff(Math.atan2(dx, dz), p.heading), -1.2, 1.2);
-    } else if (p.state === "act" && p.act === "look") look = Math.sin(p.timer * 1.3) * 1.1;
+    } else if (p.state === "work" && d < 6 && !["sleep", "paint", "read", "busk"].includes(p.pose)) {
+      look = clamp(angDiff(Math.atan2(dx, dz), p.heading), -1.1, 1.1);
+    } else if (p.state === "work" && p.pose === "inspect") look = Math.sin(performance.now() / 1300 + p.phase) * 0.9;
+    if (p.state === "work" && ["read", "paint", "phone", "sleep"].includes(p.pose)) nod = p.pose === "sleep" ? 0.7 : 0.35;
+    if (p.state === "talk" && p.emotion === "sad") nod = 0.4; else if (p.state === "act" && p.act === "look") look = Math.sin(p.timer * 1.3) * 1.1;
     else if (p.state === "flee") look = Math.sin(p.phase * 0.25) * 0.5;
     if (p.state === "act" && (p.act === "text" || p.act === "watch")) nod = 0.45;
     if (p.state === "act" && p.act === "shoe") nod = 0.6;
@@ -587,6 +681,42 @@ function animate(p, dt, d) {
     case "cross":
       if (p.cross && p.cross.phase === "go" && p.speed < 0.2) { legSw = Math.sin(t * p.walk * 4.2) * 0.45; L = [legSw * 0.7, -legSw * 0.7, 0.08, 0.08]; }
       break;
+    case "work": {
+      // what a story character does at their spot
+      const k = t + p.phase;
+      switch (p.pose) {
+        case "vendor": L = [0.6, 1.2 + Math.max(0, Math.sin(k * 1.3)) * 1.4, 0.1, 0.2 + Math.max(0, Math.sin(k * 1.3)) * 0.3]; break;
+        case "lean": L = [1.0, 1.0, -0.75, -0.75]; break;                                   // arms folded
+        case "phone": L = [0.15 + Math.sin(k * 1.4) * 0.25, 2.5, 0.1, -0.55]; break;
+        case "eat": case "drink": { const up = Math.max(0, Math.sin(k * 0.9)) ** 3; L = [0.3, 0.9 + up * 1.4, 0.1, -0.2 - up * 0.3]; break; }
+        case "read": L = [1.15, 1.15, -0.35, -0.35]; break;
+        case "feed": L = [0.3, 0.9 + Math.max(0, Math.sin(k * 2.2)) * 0.8, 0.1, 0.25]; lean = 0.15; break;
+        case "busk": L = [1.05, 0.65 + Math.sin(k * 11) * 0.12, -0.25, -0.35]; break;
+        case "sweep": L = [0.85 + Math.sin(k * 3) * 0.35, 0.95 + Math.sin(k * 3) * 0.35, -0.15, -0.2]; lean = 0.18; break;
+        case "serve": L = [0.2, 1.45, 0.1, -0.1]; break;
+        case "smoke": { const up = Math.max(0, Math.sin(k * 0.7)) ** 4; L = [0.9, 0.5 + up * 1.8, -0.6, -0.15 - up * 0.4]; break; }
+        case "paint": L = [0.9, 1.45 + Math.sin(k * 2.1) * 0.35, -0.2, 0.15 + Math.sin(k * 1.3) * 0.15]; break;
+        case "inspect": L = [-0.45, -0.45, -0.12, -0.12]; break;                           // hands behind the back
+        case "beg": L = [0.1, 1.2, 0.05, 0.1]; lean = 0.12; break;
+        case "sleep": L = [0.8, 0.8, -0.5, -0.5]; crouch = 0.55; lean = 0.35; legSw = 0; break;
+        case "stretch": L = [3.0, 3.0, 0.3, 0.3]; lean = -0.1; break;
+        default: L = [0.05, 0.05, 0.08, 0.08];
+      }
+      break;
+    }
+    case "talk": {
+      const g = Math.sin(t * 2.4 + p.phase), h = Math.sin(t * 1.9 + p.phase * 1.3);
+      switch (p.emotion) {
+        case "angry": L = [0.2, 2.2 + Math.sin(t * 12) * 0.3, 0.05, -0.15]; lean = 0.08; break;
+        case "scared": L = [1.9, 1.9, 0.6, 0.6]; lean = -0.12; break;
+        case "wary": L = [1.0, 1.0, -0.75, -0.75]; break;
+        case "sad": L = [0.05, 0.05, 0.02, 0.02]; lean = 0.06; break;
+        case "amused": L = [0.3 + Math.max(0, g) * 0.6, 0.3, 0.2, 0.2]; lean = Math.abs(Math.sin(t * 9)) * 0.06; break;
+        case "happy": L = [0.4 + Math.max(0, g) * 0.8, 0.4 + Math.max(0, h) * 0.8, 0.2, 0.25]; break;
+        default: L = [0.3 + Math.max(0, g) * 0.6, 0.3 + Math.max(0, h) * 0.5, 0.15, 0.2];
+      }
+      break;
+    }
     case "act":
       switch (p.act) {
         case "call": L = [0.1 + Math.sin(t * 1.5) * 0.1, 2.5, 0.05, -0.55]; break;

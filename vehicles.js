@@ -864,13 +864,14 @@ export function stealTraffic(t) {
 
 // ---------------------------------------------------------------- driving
 // How deeply a vehicle at pose (x, z, h) overlaps the world (0 = free).
-// Returns { depth, traffic } where traffic is the first traffic vehicle touched.
+// Returns { depth, traffic, vehicle }: traffic = the first traffic vehicle
+// touched, vehicle = the first parked / wrecked vehicle touched.
 // Using depth instead of a yes/no lets a vehicle that is already jammed into
 // something drive *out* of it (any move that reduces the depth is allowed).
 export function vehicleOverlap(v, x, z, h, y, enterables) {
   const c = specOf(v);
   const fx = Math.sin(h), fz = Math.cos(h);
-  let depth = 0, hitT = null;
+  let depth = 0, hitT = null, hitV = null;
   for (const off of c.circles) {
     const cx = x + fx * off, cz = z + fz * off;
     for (const e of enterables) {
@@ -882,7 +883,7 @@ export function vehicleOverlap(v, x, z, h, y, enterables) {
       toLocal(s, cx, cz);
       const dx = L.x - clamp(L.x, s.lx0, s.lx1), dz = L.z - clamp(L.z, s.lz0, s.lz1);
       const d = Math.hypot(dx, dz);
-      if (d < c.r) depth += c.r - d;
+      if (d < c.r) { depth += c.r - d; if (s.vehicle && !hitV) hitV = s.vehicle; }
     }
     for (const t of traffic) {
       const reach = t.spec.hd + 2;
@@ -895,7 +896,7 @@ export function vehicleOverlap(v, x, z, h, y, enterables) {
       }
     }
   }
-  return { depth, traffic: hitT };
+  return { depth, traffic: hitT, vehicle: hitV };
 }
 export function vehicleBlocked(v, x, z, h, y, enterables) {
   const o = vehicleOverlap(v, x, z, h, y, enterables);
@@ -951,7 +952,7 @@ export function driveVehicle(v, dt, keys, enterables, supportHeight) {
   const n = Math.max(1, Math.ceil(Math.abs(v.speed * dt) / 0.4));
   // Crash report for main.js: impact speed (m/s), what was hit, where, and
   // whether we're scraping along something.
-  const res = { impact: 0, traffic: null, x: 0, z: 0, dir: 1, scrape: false };
+  const res = { impact: 0, traffic: null, vehicle: null, x: 0, z: 0, dir: 1, scrape: false };
   for (let i = 0; i < n; i++) {
     const newH = v.heading + totalTurn / n;
     const step = (v.speed * dt) / n;
@@ -968,6 +969,7 @@ export function driveVehicle(v, dt, keys, enterables, supportHeight) {
     const sgn = Math.sign(v.speed) || 1;
     res.impact = Math.abs(v.speed);
     res.traffic = hit.traffic;
+    res.vehicle = hit.vehicle;
     res.dir = sgn;
     res.x = p.x + Math.sin(v.heading) * c.hd * sgn;
     res.z = p.z + Math.cos(v.heading) * c.hd * sgn;

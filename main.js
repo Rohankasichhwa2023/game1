@@ -13,31 +13,34 @@ import {
 import { planBuildings, buildBuildings, mapBuildings, roofs, enterables, billboards, drawAd, postFlush, homes, pulseHomeMarkers } from "./buildings.js";
 import { nearestHome, enterHome, leaveHome, atExit, WORLD_MASK, INSIDE_MASK, BOTH_MASK } from "./interiors.js";
 import { buildGround, buildNature, POND } from "./nature.js";
-import { RW, river, riverDist, LON_CORE } from "./london.js";
+import { RW, river, riverDist, LONDON } from "./london.js";
 import { buildLondonGround, buildLondonWorld, updateLondon } from "./londonWorld.js";
 import {
   initVehicleTemplates, spawnParked, spawnTraffic, updateTraffic, vehicles, traffic, VEH, specOf, vehicleSolid, stealTraffic, swapToBurnt, driveVehicle, knockTraffic,
 } from "./vehicles.js";
-import { spawnPeds, updatePeds, peds, knockDown, scare } from "./people.js";
+import { spawnPeds, updatePeds, peds, knockDown, scare, pedHooks } from "./people.js";
+import * as sfx from "./sound.js";
+import { spawnCharacters, updateCharacters, hideCharacterUI, inConversation, talkPrompt, characterMarkers } from "./characters.js";
 
 // ---------------------------------------------------------------- build the world
 const t0 = performance.now();
 createFacades();
 generateRoads();
 
-// Start in London on the pavement of a high street, a few steps before a
-// busy junction (just short of the zebra crossing), looking into it. The
-// starter bikes stand on the pavement behind you, the cars are parked at the
-// kerb.
+// Start in the middle of London, on the pavement a few steps before a busy
+// junction (just short of the zebra crossing), looking into it. High streets
+// are preferred; the river is kept at a distance. The starter bikes stand on
+// the pavement behind you, the cars are parked at the kerb.
 const START = (() => {
   const fallback = { x: PARIS.x + 14, z: PARIS.z, yaw: Math.PI / 2 };
+  const mid = { x: (LONDON.x0 + LONDON.x1) / 2, z: (LONDON.z0 + LONDON.z1) / 2 };
   let best = null, bd = Infinity;
   for (const n of nodes) {
     if (n.edges.length < 3 || n.edges.some((e) => e.district !== "london" || !["high", "lane"].includes(e.kind))) continue;
     if (riverDist(n.x, n.z) < RW + 40) continue;
-    const e = n.edges.find((x) => x.kind === "high" && x.len > 45);
+    const e = n.edges.find((x) => x.kind === "high" && x.len > 45) || n.edges.find((x) => x.len > 45);
     if (!e) continue;
-    const dd = Math.hypot(n.x - LON_CORE.x, n.z - LON_CORE.z);
+    const dd = Math.hypot(n.x - mid.x, n.z - mid.z) + (e.kind === "high" ? 0 : 60);   // a lane only if no high street is close
     if (dd < bd) { bd = dd; best = { n, e }; }
   }
   if (!best) return fallback;
@@ -74,6 +77,7 @@ initVehicleTemplates();
 spawnParked(START);
 spawnTraffic();
 spawnPeds(280);
+spawnCharacters();
 console.log(`World built in ${Math.round(performance.now() - t0)} ms — ${edges.length} roads, ${mapBuildings.length} buildings (${homes.length} homes), ${traffic.length} cars, ${peds.length} people`);
 
 // ---------------------------------------------------------------- player model
@@ -315,6 +319,8 @@ function setTime(h) { tod = ((h % 24) + 24) % 24; applyTimeOfDay(); }
 const keys = {};
 let lastSpaceAt = 0, superJumpQueued = false, interactQueued = false, swingQueued = false;
 window.addEventListener("keydown", (e) => {
+  sfx.unlock();                                  // browsers only allow audio after a key / click
+  if (e.code === "KeyK" && !e.repeat) { toast(sfx.toggleMute() ? "SOUND OFF<small>K to turn it back on</small>" : "SOUND ON<small>K to mute</small>"); return; }
   if (e.code === "Tab") { e.preventDefault(); document.getElementById("controls").classList.toggle("show"); }
   if (e.code === "Space") e.preventDefault();
   // Full map (M) — while it is open the game ignores movement keys.
@@ -346,8 +352,15 @@ let weapon = "gun", webHeld = false;
 const locked = () => document.pointerLockElement === canvas;
 // Pointer events (Babylon's preventDefault on pointerdown suppresses mouse
 // events). Buttons come from the bitmask so left+right together works.
+// The click that captures the mouse must not also shoot / fire a web: its
+// buttons are ignored until they've been released.
+let swallowClick = false;
 const syncButtons = (e) => {
   if (!locked()) return;
+  if (swallowClick) {
+    if (e.buttons === 0) swallowClick = false;
+    return;
+  }
   const left = (e.buttons & 1) !== 0;
   if (weapon === "gun") {
     firing = left;
@@ -367,6 +380,8 @@ const weaponLabel = () => (weapon === "gun" ? "Gun" : "Web shooter") + " <small>
 gun.setEnabled(weapon === "gun");
 canvas.addEventListener("pointerdown", (e) => {
   if (!locked()) {
+    swallowClick = true;
+    firing = false; aiming = false; webHeld = false;
     const p = canvas.requestPointerLock && canvas.requestPointerLock();
     if (p && p.catch) p.catch(() => {});
     return;
@@ -526,6 +541,7 @@ function startSwing() {
   if (!a) {
     // nothing to stick to: the web shoots out and falls short
     webMiss = { t: 0, dir: new V3(fx * 0.8, 0.6, fz * 0.8).normalize() };
+    sfx.webShot(0.6);
     return false;
   }
   webMiss = null;
@@ -553,6 +569,7 @@ function startSwing() {
   }
   onGround = false; superJump = null;
   web.setEnabled(true);
+  sfx.webShot(1);
   return true;
 }
 function endSwing(fling) {
@@ -629,6 +646,8 @@ function updateSwing(dt) {
       pos.y = gh;
       if (s.yank > 0 || s.age < 0.35) { if (s.vy < 2) s.vy = 2; }
       else if (s.vy <= 0) {
+        if (inWater(pos.x, pos.z)) sfx.splash(Math.hypot(s.vx, s.vy, s.vz));
+        else if (s.vy < -7) sfx.land(-s.vy);
         swing = null; web.setEnabled(false);
         vy = 0; onGround = true; airVel.x = airVel.z = 0;
       }
@@ -694,9 +713,20 @@ function updateWebMiss(dt) {
   web.lookAt(new V3(ex, ey, ez));
 }
 
+// Swimming: on foot, at the surface of open water (river away from bridges,
+// pond, sea). Slower, the gun goes away, the body sits half under the water
+// tilted forward doing a front crawl; Space kicks up onto a bank / wall.
+let swimming = false, swimMove = 0, swimPhase = 0, lastSplashAt = 0;
 function updatePlayer(dt) {
-  if (swing) { updateSwing(dt); poseSwing(dt); return; }
+  if (swing) { updateSwing(dt); poseSwing(dt); swimming = false; return; }
   updateWebMiss(dt);
+  const wasSwimming = swimming;
+  swimming = !home && onGround && pos.y < 0.3 && inWater(pos.x, pos.z);
+  if (swimming) {
+    aiming = false; firing = false; aimTimer = 0;
+    if (!wasSwimming && performance.now() - lastSplashAt > 600) { sfx.splash(4); lastSplashAt = performance.now(); }
+  }
+  gun.setEnabled(weapon === "gun" && !swimming);
   const fwdX = Math.sin(yaw), fwdZ = Math.cos(yaw), rightX = Math.cos(yaw), rightZ = -Math.sin(yaw);
   let mx = 0, mz = 0;
   const downed = downTimer > 0;               // thrown from a crash: lie there for a moment
@@ -709,7 +739,7 @@ function updatePlayer(dt) {
   }
   const len = Math.hypot(mx, mz);
   const running = (keys.ShiftLeft || keys.ShiftRight) && !aiming;
-  const speed = aiming ? 2.6 : running ? 9 : 4.2;
+  const speed = swimming ? (running ? 3.6 : 2.3) : aiming ? 2.6 : running ? 9 : 4.2;
   const gunUp = aiming || aimTimer > 0;
 
   let dx = 0, dz = 0;
@@ -752,11 +782,15 @@ function updatePlayer(dt) {
   } else if (len > 0) facing += angDiff(Math.atan2(mx, mz), facing) * Math.min(1, dt * 12);
   moveAmt += ((len > 0 ? (running ? 1 : 0.6) : 0) - moveAmt) * Math.min(1, dt * 10);
 
-  if (onGround && keys.Space && !superJump && !downed) { vy = 7.2; onGround = false; }
+  if (onGround && keys.Space && !superJump && !downed) { vy = swimming ? 6.8 : 7.2; onGround = false; }
   vy = Math.max(-45, vy - GRAV * dt);
   const gh = supportHeight(pos.x, pos.z, pos.y);
   let ny = pos.y + vy * dt;
   if (vy > 0) { const c = ceilingAt(pos.x, pos.z, pos.y); if (ny + HEIGHT > c) { ny = c - HEIGHT; vy = 0; } }
+  if (!onGround && ny <= gh) {
+    if (vy < -3 && inWater(pos.x, pos.z)) { sfx.splash(-vy); lastSplashAt = performance.now(); }
+    else if (vy < -7) sfx.land(-vy);
+  }
   if (vy <= 0 && ny <= gh) { pos.y = gh; vy = 0; onGround = true; superJump = null; airVel.x = airVel.z = 0; }
   else if (onGround && vy <= 0 && pos.y - gh < 0.45) { pos.y = gh; vy = 0; }
   else { pos.y = ny; onGround = false; }
@@ -778,7 +812,11 @@ function updatePlayer(dt) {
   const s = Math.max(0.3, 1 - (pos.y - shadowY) * 0.25);
   blob.scaling.set(s, 1, s);
 
+  if (swimming) { poseSwim(dt, len > 0, running); return; }
+  blob.setEnabled(true);
+  const stepBefore = Math.floor(walkPhase / Math.PI);
   walkPhase += dt * (running ? 11 : 7.5) * (len > 0 ? 1 : 0);
+  if (onGround && len > 0 && !downed && Math.floor(walkPhase / Math.PI) !== stepBefore) sfx.footstep(running);
   const a = moveAmt * 0.75, sw = Math.sin(walkPhase);
   if (onGround) {
     legL.hip.rotation.x = -sw * a; legR.hip.rotation.x = sw * a;
@@ -788,7 +826,7 @@ function updatePlayer(dt) {
     legL.hip.rotation.x = -0.5; legR.hip.rotation.x = -0.2;
     legL.knee.rotation.x = 0.9; legR.knee.rotation.x = 0.5;
   }
-  armL.sh.rotation.x = sw * a * 0.9;
+  armL.sh.rotation.x = sw * a * 0.9; armL.sh.rotation.z = -0.16;
   armL.el.rotation.x = -0.3 - moveAmt * 0.5;
   if (gunUp) { armR.sh.rotation.x = -Math.PI / 2 - aimElev; armR.sh.rotation.z = 0.05; armR.el.rotation.x = 0; }
   else { armR.sh.rotation.x = -sw * a * 0.9; armR.sh.rotation.z = 0.16; armR.el.rotation.x = -0.3 - moveAmt * 0.5; }
@@ -805,6 +843,35 @@ function updatePlayer(dt) {
   }
 }
 
+// Front crawl: body sunk to the waist and tilted forward (more upright when
+// treading water), arms windmilling in turn, a flutter kick, a gentle bob.
+function poseSwim(dt, moving, sprint) {
+  const k = Math.min(1, dt * 5);
+  swimMove += ((moving ? 1 : 0) - swimMove) * k;
+  swimPhase += dt * (moving ? (sprint ? 7 : 5) : 1.6);
+  const lean = 0.15 + 0.45 * swimMove;                          // forward tilt
+  const sink = 1.1 - 0.15 * swimMove;                           // waist under, shoulders / head above
+  const bob = Math.sin(performance.now() / 420) * 0.04;
+  player.position.set(pos.x, pos.y - sink + bob, pos.z);
+  player.rotation.y = facing;
+  blob.setEnabled(false);
+  body.position.y = 0;
+  body.rotation.x += (lean - body.rotation.x) * k;
+  if (moving) {
+    // each arm goes all the way round, half a turn apart
+    armR.sh.rotation.x = -(swimPhase % (Math.PI * 2)); armR.sh.rotation.z = 0.25; armR.el.rotation.x = -0.25;
+    armL.sh.rotation.x = -((swimPhase + Math.PI) % (Math.PI * 2)); armL.sh.rotation.z = -0.25; armL.el.rotation.x = -0.25;
+  } else {
+    // treading water: arms sculling out to the sides
+    const s = Math.sin(swimPhase * 2.4) * 0.35;
+    armR.sh.rotation.x = -1.2 + s; armR.sh.rotation.z = 0.6; armR.el.rotation.x = -0.5;
+    armL.sh.rotation.x = -1.2 - s; armL.sh.rotation.z = -0.6; armL.el.rotation.x = -0.5;
+  }
+  const kick = Math.sin(swimPhase * (moving ? 2.2 : 3)) * (moving ? 0.35 : 0.25);
+  legL.hip.rotation.x = kick; legR.hip.rotation.x = -kick;
+  legL.knee.rotation.x = 0.25 + Math.max(0, kick); legR.knee.rotation.x = 0.25 + Math.max(0, -kick);
+}
+
 // ---------------------------------------------------------------- vehicles
 function playerFits(x, y, z) {
   for (const s of query(x - 0.6, x + 0.6, z - 0.6, z + 0.6)) {
@@ -817,6 +884,7 @@ function enterVehicle(v) {
   if (swing || webMiss) { swing = null; webMiss = null; web.setEnabled(false); }
   airVel.x = airVel.z = 0;
   vehicle = v;
+  sfx.door(); sfx.engineStart(specOf(v).name);
   v.solid.off = true;
   v.speed = 0;
   v.mesh.unfreezeWorldMatrix();
@@ -839,6 +907,7 @@ function enterVehicle(v) {
 function exitVehicle() {
   const v = vehicle, c = specOf(v);
   v.speed = 0;
+  sfx.door();
   const p = v.mesh.position, h = v.heading, side = c.hw + 0.9;
   const opts = [
     [-Math.cos(h) * side, Math.sin(h) * side], [Math.cos(h) * side, -Math.sin(h) * side],
@@ -878,7 +947,10 @@ function updateVehicle(dt) {
   const v = vehicle;
   const res = driveVehicle(v, dt, keys, enterables, supportHeight);
   if (res.impact > 5) { onCrash(v, res); if (vehicle !== v) return; }   // may have thrown us out
-  else if (res.impact > 1.5) shake = Math.max(shake, 0.08);
+  else if (res.impact > 1.5) {
+    shake = Math.max(shake, 0.08);
+    if (res.impact > 2.5) sfx.bump(res.impact, res.traffic || res.vehicle ? "vehicle" : "wall");
+  }
   if (res.scrape && Math.random() < 0.6) {             // grinding along a wall
     const side = Math.random() < 0.5 ? -1 : 1, sp = specOf(v);
     crashSparks.emitter = new V3(v.mesh.position.x + Math.cos(v.heading) * sp.hw * side, 0.5, v.mesh.position.z - Math.sin(v.heading) * sp.hw * side);
@@ -931,6 +1003,7 @@ function raycast(o, d, tmin, tmax) {
   return { t: best, hit };
 }
 function explode(at, scale = 1) {
+  sfx.explosion(Math.hypot(at.x - pos.x, at.z - pos.z), scale, panOf(at.x, at.z));
   const f = flashT.createInstance("boom");
   f.position.copyFrom(at);
   addEffect(f, 0.45, (k, m) => m.scaling.setAll((1.5 + k * 7) * scale * (1 - k * 0.4)));
@@ -1011,43 +1084,46 @@ function debris(at, n, power) {
   }
 }
 
-// Procedural crash sound (Web Audio): a noise burst + a metallic clang.
-let actx = null;
-function audio() {
-  if (!actx) { try { actx = new (window.AudioContext || window.webkitAudioContext)(); } catch { actx = null; } }
-  return actx;
+// Sound lives in sound.js; the browser only lets it start after a click / key.
+canvas.addEventListener("pointerdown", () => sfx.unlock());
+// Is (x, z) open water — the London river (not on a bridge), the park pond or the sea?
+function inWater(x, z) {
+  if (x < SHORE_X) return true;
+  if (Math.hypot(x - POND.x, z - POND.z) < POND.r) return true;
+  return riverDist(x, z) < RW - 0.3 && roadDist(x, z) > 0;
 }
-function playCrash(impact) {
-  const a = audio();
-  if (!a || a.state !== "running") return;
-  const vol = clamp(impact / 30, 0.12, 1), t0 = a.currentTime;
-  const N = Math.floor(a.sampleRate * 0.6);
-  const buf = a.createBuffer(1, N, a.sampleRate), d = buf.getChannelData(0);
-  for (let i = 0; i < N; i++) d[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / N, 2.5);
-  const src = a.createBufferSource(); src.buffer = buf;
-  const lp = a.createBiquadFilter(); lp.type = "lowpass"; lp.frequency.value = 900 + impact * 60;
-  const g = a.createGain(); g.gain.value = vol * 0.9;
-  src.connect(lp); lp.connect(g); g.connect(a.destination); src.start(t0);
-  for (const [f, type] of [[140 + Math.random() * 60, "square"], [430 + Math.random() * 200, "triangle"]]) {
-    const o = a.createOscillator(); o.type = type;
-    o.frequency.setValueAtTime(f, t0); o.frequency.exponentialRampToValueAtTime(f * 0.45, t0 + 0.45);
-    const og = a.createGain();
-    og.gain.setValueAtTime(vol * 0.18, t0); og.gain.exponentialRampToValueAtTime(0.001, t0 + 0.5);
-    o.connect(og); og.connect(a.destination); o.start(t0); o.stop(t0 + 0.55);
-  }
+// Left/right placement (-1..1) of a world point relative to the camera.
+function panOf(x, z) {
+  const dx = x - pos.x, dz = z - pos.z, d = Math.hypot(dx, dz) || 1;
+  return (dx * Math.cos(yaw) - dz * Math.sin(yaw)) / d;
 }
-canvas.addEventListener("pointerdown", () => { const a = audio(); if (a && a.state === "suspended") a.resume(); });
+// People: a cry when someone is knocked down; a casual remark when you walk
+// up to someone (at most one every few seconds, so a crowd isn't a chorus).
+let nextTalkAt = 0;
+pedHooks.onDown = (p) => sfx.npcDeath(Math.hypot(p.x - pos.x, p.z - pos.z), panOf(p.x, p.z));
+pedHooks.onNear = (p, d) => {
+  const now = performance.now();
+  if (now < nextTalkAt || inConversation()) return;
+  nextTalkAt = now + 3500;
+  sfx.npcTalk(d, panOf(p.x, p.z));
+};
 
 let shake = 0;          // camera shake amount (0..1)
+// A story character shoves the player away (dx, dz = unit push direction).
+function shovePlayer(dx, dz) {
+  if (vehicle) return;
+  pushX = dx * 8; pushZ = dz * 8;
+  shake = Math.max(shake, 0.35);
+}
 let downTimer = 0;      // player lying on the ground after being thrown
-function crashFX(at, impact) {
+function crashFX(at, impact, what = "wall") {
   crashSparks.emitter = at.clone();
   crashSparks.manualEmitCount = Math.round(20 + impact * 4);
   crashDust.emitter = at.clone();
   crashDust.manualEmitCount = Math.round(4 + impact * 0.6);
   debris(at, Math.round(clamp(impact / 2.5, 3, 22)), clamp(impact * 0.35, 3, 14));
   shake = Math.max(shake, clamp(impact / 28, 0.15, 1));
-  playCrash(impact);
+  sfx.crash(impact, what);
 }
 // Engine smoke once a vehicle is badly damaged (grey → black as it gets worse).
 function updateDamageSmoke(v) {
@@ -1094,7 +1170,7 @@ function onCrash(v, res) {
   const sp = specOf(v), I = res.impact;
   if (v.health === undefined) v.health = sp.hits * 10;
   const at = new V3(res.x, v.mesh.position.y + Math.min(sp.ht * 0.5, 1.0), res.z);
-  crashFX(at, I);
+  crashFX(at, I, res.traffic || res.vehicle ? "vehicle" : "wall");
   scare(at.x, at.z, 35);
   v.wobble = Math.min(0.14, I * 0.006);
   v.health -= Math.max(0, I - 4) * (res.traffic ? 0.9 : 1.1);
@@ -1158,6 +1234,7 @@ function poseToward(x, y, z, dt = 1) {
 let shotCooldown = 0;
 function fire() {
   shotCooldown = 0.16;
+  sfx.gunshot();
   aimTimer = 0.7;
   // 1) what is under the crosshair?
   const { o, d, tmin } = aimRay();
@@ -1253,6 +1330,40 @@ const DISTRICTS = {
   london: ["LONDON", "Mind the maze of streets"], river: ["THE THAMES", "Crossing the river"],
 };
 let curDistrict = null, districtTimer = null, hudTimer = 0;
+// Brief message in the district banner (e.g. "SOUND OFF").
+function toast(html) {
+  distEl.innerHTML = html;
+  distEl.classList.add("show");
+  clearTimeout(districtTimer);
+  districtTimer = setTimeout(() => distEl.classList.remove("show"), 1600);
+}
+
+// ---------------------------------------------------------------- sound state
+// Everything sound.js needs to know this frame: the engine (speed, throttle,
+// boost), how fast the air is rushing past, the horn, the nearest traffic car
+// (for its pass-by engine), day/night and whether we're indoors.
+function updateSound(dt) {
+  const boost = !!(keys.ShiftLeft || keys.ShiftRight);
+  let veh = null, windSpeed = 0;
+  if (vehicle) {
+    const vs = specOf(vehicle);
+    const fwd = keys.KeyW || keys.ArrowUp, back = keys.KeyS || keys.ArrowDown;
+    veh = { name: vs.name, speed: vehicle.speed, max: vs.max * (boost ? vs.boost : 1), throttle: fwd ? 1 : back ? 0.6 : 0, boost: boost && fwd };
+    windSpeed = Math.abs(vehicle.speed);
+  } else if (swing) windSpeed = Math.hypot(swing.vx, swing.vy, swing.vz);
+  else if (!onGround) windSpeed = Math.hypot(airVel.x, vy, airVel.z);
+  let traf = null;
+  if (!home) {
+    let bd = 45;
+    for (const t of traffic) {
+      if (Math.abs(t.vx - pos.x) > bd || Math.abs(t.vz - pos.z) > bd) continue;
+      const d = Math.hypot(t.vx - pos.x, t.vz - pos.z);
+      if (d < bd) { bd = d; traf = { dist: d, speed: Math.abs(t.speed), pan: panOf(t.vx, t.vz) }; }
+    }
+  }
+  const swim = swimming && !vehicle && !swing ? swimMove : -1;   // -1 = not in the water
+  sfx.update(dt, { vehicle: veh, windSpeed, horn: !!(vehicle && keys.KeyH), night: state.night, inside: !!home, traffic: traf, swim });
+}
 function updateHud(dt) {
   let loc = home ? `${home.typeLabel || home.label} · No. ${home.no}` : "";
   for (const e of enterables) {
@@ -1263,6 +1374,7 @@ function updateHud(dt) {
     }
   }
   if (!loc && !vehicle && pos.y > 8 && onGround) loc = "Rooftop";
+  if (!loc && !vehicle && swimming) loc = "Swimming · <kbd>Space</kbd> climb out";
   setHud("loc", locEl, loc);
   setHud("speed", speedEl, vehicle ? `${Math.round(Math.abs(vehicle.speed) * 3.6)} <small>km/h</small>` : "");
   setHud("weapon", weaponEl, vehicle ? "" : weaponLabel());
@@ -1290,6 +1402,7 @@ function updateHud(dt) {
   else {
     const u = nearestUsable(), hm = onGround ? nearestHome(pos.x, pos.z, pos.y) : null;
     if (u) pr = `<kbd>E</kbd> ${u.e ? "Take the " + u.spec.name : u.spec.label}`;
+    else if (talkPrompt()) pr = talkPrompt();
     else if (hm) pr = `<kbd>E</kbd> Enter ${hm.label.toLowerCase()}`;
     else if (onGround && roofCandidate()) pr = "<kbd>Space</kbd><kbd>Space</kbd> Jump onto roof";
     else if (weapon === "web" && !home) pr = "<kbd>Left click</kbd> Web launch";
@@ -1372,7 +1485,8 @@ function drawMinimap() {
     if (Math.abs(dx) > 160 || Math.abs(dz) > 160) return;
     mctx.fillStyle = col; mctx.beginPath(); mctx.arc(dx, dz, r, 0, Math.PI * 2); mctx.fill();
   };
-  for (const p of peds) dot(p.x, p.z, 1.6, p.state === "flee" ? "#ff8a5c" : "#d9d9d9");
+  // story characters: pink dots with a white ring
+  for (const m of characterMarkers()) { dot(m.x, m.z, 5.2, "#ffffff"); dot(m.x, m.z, 3.8, "#ff4fb8"); }
   mctx.restore();
   mctx.save();
   mctx.translate(R, R); mctx.rotate((vehicle ? vehicle.heading : facing) - yaw);
@@ -1432,7 +1546,16 @@ function drawBigMap() {
     bctx.fillStyle = col; bctx.beginPath(); bctx.arc(sx, sy, r, 0, Math.PI * 2); bctx.fill();
   };
   const r = clamp(z * 1.6, 1.5, 5);
-  if (z > bigFit * 1.8) for (const p of peds) dot(p.x, p.z, r * 0.6, p.state === "flee" ? "#ff8a5c" : "#d9d9d9");
+  // story characters: pink dots, named once zoomed in a little
+  for (const m of characterMarkers()) {
+    dot(m.x, m.z, r * 1.5 + 1.5, "#ffffff"); dot(m.x, m.z, r * 1.5, "#ff4fb8");
+    if (z > bigFit * 1.4) {
+      const [sx, sy] = bigToScreen(m.x, m.z);
+      bctx.font = "700 12px Segoe UI, sans-serif"; bctx.textAlign = "center";
+      bctx.fillStyle = "rgba(0,0,0,.65)"; bctx.fillText(m.label, sx + 1, sy - 11);
+      bctx.fillStyle = "#ff8fd0"; bctx.fillText(m.label, sx, sy - 12);
+    }
+  }
 
   bctx.textAlign = "center"; bctx.textBaseline = "middle";
   // enterable buildings — names once zoomed in a little
@@ -1535,6 +1658,7 @@ for (const m of player.getChildMeshes(false)) m.layerMask = BOTH_MASK;
 blob.layerMask = BOTH_MASK;
 function homeTransition(entering, h) {
   homeBusy = true;
+  sfx.door();
   for (const k in keys) keys[k] = false;
   firing = false; aiming = false;
   fadeEl.classList.add("on");
@@ -1570,6 +1694,8 @@ engine.runRenderLoop(() => {
   if (superJumpQueued) { superJumpQueued = false; if (!vehicle) startSuperJump(); }
   if (swingQueued) { swingQueued = false; if (!vehicle) startSwing(); }
 
+  // in a conversation: stand still and listen (number keys pick replies)
+  if (inConversation()) { for (const k in keys) keys[k] = false; firing = false; aiming = false; }
   if (!home) updateTraffic(dt, now, { pos, vehicle, peds });
   if (homeBusy) { /* frozen while the screen is black */ }
   else if (vehicle) updateVehicle(dt);
@@ -1582,14 +1708,17 @@ engine.runRenderLoop(() => {
     pos, vehicle, vehicleSpeed: vehicle ? vehicle.speed : 0, traffic,
     armed: !vehicle && weapon === "gun" && (aiming || firing), aimYaw: yaw,
   });
+  if (!home) updateCharacters(dt, tod, { pos, vehicle, armed: !vehicle && weapon === "gun" && (aiming || firing), shove: shovePlayer });
+  else hideCharacterUI();
   updateCamera(dt);
   updateTimeOfDay(dt);
   updateEffects(dt);
   updateHud(dt);
   if (!home) { animateBillboards(dt); updateLondon(dt, tod); pulseHomeMarkers(now / 1000); }
+  updateSound(dt);
   mapTimer += dt;
   if (mapTimer > 1 / 30) { mapTimer = 0; drawMinimap(); }
-  if (bigMapOpen && (bigTimer += dt) > 0.2) { bigTimer = 0; drawBigMap(); }   // live player + people
+  if (bigMapOpen && (bigTimer += dt) > 0.2) { bigTimer = 0; drawBigMap(); }   // live player position
   scene.render();
 });
 window.addEventListener("resize", () => engine.resize());

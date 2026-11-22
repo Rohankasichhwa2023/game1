@@ -191,6 +191,26 @@
             margin-left: 6px;
         }
 
+        #fade {
+            position: fixed;
+            inset: 0;
+            background: #000;
+            opacity: 0;
+            pointer-events: none;
+            transition: opacity .35s ease;
+            z-index: 50;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: #ddd;
+            font-size: 18px;
+            letter-spacing: 2px;
+        }
+
+        #fade.on {
+            opacity: 1;
+        }
+
         #prompt {
             left: 50%;
             bottom: 70px;
@@ -388,9 +408,7 @@
             <div><i style="background:#fff;border:2px solid #e0322b"></i>You</div>
             <div><i style="background:#ffe08a"></i>Enterable building</div>
             <div><i style="background:#c4902f;border-radius:2px"></i>Enterable (footprint)</div>
-            <div><i style="background:#ff4fd8"></i>Supercar / superbike</div>
-            <div><i style="background:#7ee3a1"></i>Bike</div>
-            <div><i style="background:#4a8cff"></i>Traffic</div>
+            <div><i style="background:#8fd3ff"></i>Enterable home (door)</div>
             <div class="bm-help">Scroll to zoom · drag to pan · <b>C</b> centre on you · <b>M</b>/<b>Esc</b> close</div>
         </div>
     </div>
@@ -399,6 +417,7 @@
     <div id="clock" class="hud"></div>
     <div id="crosshair" class="hud"></div>
     <div id="prompt" class="hud"></div>
+    <div id="fade"><span>Loading…</span></div>
     <div id="speed" class="hud"></div>
     <div id="weapon" class="hud"></div>
 

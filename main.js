@@ -8,36 +8,73 @@ import {
 } from "./engine.js";
 import { createFacades, facadeList } from "./textures.js";
 import {
-  generateRoads, buildRoadMeshes, buildLamps, lampPools, bulbMats, edges, districtAt, PARIS, CITY, SHORE_X, WORLD, landmarks, roadDist,
+  generateRoads, buildRoadMeshes, buildLamps, lampPools, bulbMats, edges, districtAt, PARIS, CITY, SHORE_X, WORLD, landmarks, roadDist, reserved, nodes, pathAt,
 } from "./roads.js";
-import { planBuildings, buildBuildings, mapBuildings, roofs, enterables, billboards, drawAd, postFlush } from "./buildings.js";
+import { planBuildings, buildBuildings, mapBuildings, roofs, enterables, billboards, drawAd, postFlush, homes, pulseHomeMarkers } from "./buildings.js";
+import { nearestHome, enterHome, leaveHome, atExit, WORLD_MASK, INSIDE_MASK, BOTH_MASK } from "./interiors.js";
 import { buildGround, buildNature, POND } from "./nature.js";
+import { RW, river, riverDist, LON_CORE } from "./london.js";
+import { buildLondonGround, buildLondonWorld, updateLondon } from "./londonWorld.js";
 import {
   initVehicleTemplates, spawnParked, spawnTraffic, updateTraffic, vehicles, traffic, VEH, specOf, vehicleSolid, stealTraffic, swapToBurnt, driveVehicle, knockTraffic,
 } from "./vehicles.js";
 import { spawnPeds, updatePeds, peds, knockDown, scare } from "./people.js";
 
-// Start on the Saint-Clair fountain plaza, looking east down the boulevard
-// toward the city skyline in the distance.
-const START = { x: PARIS.x + 14, z: PARIS.z };
-
 // ---------------------------------------------------------------- build the world
 const t0 = performance.now();
 createFacades();
 generateRoads();
+
+// Start in London on the pavement of a high street, a few steps before a
+// busy junction (just short of the zebra crossing), looking into it. The
+// starter bikes stand on the pavement behind you, the cars are parked at the
+// kerb.
+const START = (() => {
+  const fallback = { x: PARIS.x + 14, z: PARIS.z, yaw: Math.PI / 2 };
+  let best = null, bd = Infinity;
+  for (const n of nodes) {
+    if (n.edges.length < 3 || n.edges.some((e) => e.district !== "london" || !["high", "lane"].includes(e.kind))) continue;
+    if (riverDist(n.x, n.z) < RW + 40) continue;
+    const e = n.edges.find((x) => x.kind === "high" && x.len > 45);
+    if (!e) continue;
+    const dd = Math.hypot(n.x - LON_CORE.x, n.z - LON_CORE.z);
+    if (dd < bd) { bd = dd; best = { n, e }; }
+  }
+  if (!best) return fallback;
+  const { n, e } = best;
+  const atA = e.a === n, s0 = atA ? 15 : e.len - 15, dir = atA ? -1 : 1;   // dir: +1 = walking toward the node along +s
+  const at = (s, off) => {
+    const q = pathAt(e, s, {});
+    const fx = q.tx * dir, fz = q.tz * dir;
+    return { x: q.x + fz * off, z: q.z - fx * off, h: Math.atan2(fx, fz) };
+  };
+  const walk = e.w / 2 + e.sw * 0.55, kerb = e.w / 2 - 1.15;
+  const p = at(s0, walk);
+  return {
+    x: p.x, z: p.z, yaw: p.h,
+    parked: [
+      { key: "superbike", ...at(s0 - dir * 3.2, walk) },
+      { key: "bike", ...at(s0 - dir * 5.0, walk) },
+      { key: "supercar", ...at(s0 - dir * 9, kerb) },
+      { key: "suv", ...at(s0 - dir * 15.5, kerb) },
+    ],
+  };
+})();
 buildRoadMeshes();
 buildGround();
+buildLondonGround();
 planBuildings(START);
 buildBuildings();
 buildLamps();
 buildNature(START);
+buildLondonWorld();
 flushAccs();
 for (const f of postFlush) f();
 initVehicleTemplates();
 spawnParked(START);
 spawnTraffic();
-spawnPeds(190);
-console.log(`World built in ${Math.round(performance.now() - t0)} ms — ${edges.length} roads, ${mapBuildings.length} buildings, ${traffic.length} cars, ${peds.length} people`);
+spawnPeds(280);
+console.log(`World built in ${Math.round(performance.now() - t0)} ms — ${edges.length} roads, ${mapBuildings.length} buildings (${homes.length} homes), ${traffic.length} cars, ${peds.length} people`);
 
 // ---------------------------------------------------------------- player model
 const MB = BABYLON.MeshBuilder;
@@ -355,6 +392,8 @@ canvas.addEventListener("wheel", (e) => { camDist = clamp(camDist + Math.sign(e.
 // ---------------------------------------------------------------- on-foot physics
 const RADIUS = 0.4, STEP = 0.42, HEIGHT = 1.8, GRAV = 22;
 const pos = new V3(START.x, 0, START.z);
+let home = null;          // the home we're inside (its interior is the only thing drawn)
+let homeBusy = false;     // fading in / out
 let vy = 0, onGround = true, facing = 0, walkPhase = 0, moveAmt = 0;
 let pushX = 0, pushZ = 0, superJump = null, aimTimer = 0, vehicle = null;
 
@@ -391,7 +430,7 @@ function indoorsNow() {
 }
 
 function roofCandidate() {
-  if (vehicle || indoorsNow()) return null;
+  if (vehicle || home || indoorsNow()) return null;
   let best = null, bestD = 3.2;
   for (const r of roofs) {
     if (Math.abs(r.xf.cx - pos.x) > 60 || Math.abs(r.xf.cz - pos.z) > 60) continue;
@@ -429,10 +468,13 @@ function startSuperJump() {
 }
 
 // ---------------------------------------------------------------- web swinging
-// Press F to shoot a web at a building above and ahead (the way the camera
-// faces), hold F to swing on it as a pendulum, release to let go and fly on
-// with the momentum. Press F again mid-air to chain the next swing.
-// W/A/S/D pump the swing; swinging up past the anchor lets go automatically.
+// With the web shooter selected, click to shoot a web at a building above and
+// ahead (the way the camera faces); hold to swing on it as a pendulum, release
+// to let go and fly on with the momentum; click again mid-air to chain.
+// From the ground the web first yanks you up off the street (a launch boost),
+// then the rope goes taut and you swing on normally.
+// W pumps, A/D steer, S brakes; swinging up level with the anchor lets go
+// automatically with a fling.
 const WEB_RANGE = 75, SWING_MAX = 46, HAND = 1.6;
 let swing = null;                      // { a: anchor V3, len, minLen, vx, vy, vz }
 const airVel = { x: 0, z: 0 };         // horizontal momentum carried after a swing
@@ -457,8 +499,9 @@ function rayToSolid(o, d, max) {
   }
   return hit ? best : null;
 }
-// Fan rays upward around the camera heading; prefer high anchors well ahead.
-function findAnchor() {
+// Fan rays upward around the camera heading; prefer high anchors well ahead
+// (from the ground: something tall enough to launch you up on).
+function findAnchor(fromGround = false) {
   const o = new V3(pos.x, pos.y + HAND, pos.z);
   let best = null, bestScore = -Infinity;
   for (const yo of [0, -0.3, 0.3, -0.6, 0.6, -0.9, 0.9]) {
@@ -468,63 +511,106 @@ function findAnchor() {
       const t = rayToSolid(o, d, WEB_RANGE);
       if (t === null || t < 7) continue;
       const rise = d.y * t;
-      if (rise < 5) continue;
-      const score = c * t * 0.7 + Math.min(rise, 35) * 0.5 - Math.abs(yo) * 10 - Math.abs(t - 32) * 0.2;
+      if (rise < (fromGround ? 9 : 5)) continue;
+      const score = c * t * 0.7 + Math.min(rise, 35) * (fromGround ? 0.9 : 0.5) - Math.abs(yo) * 10 - Math.abs(t - (fromGround ? 26 : 32)) * 0.2;
       if (score > bestScore) { bestScore = score; best = o.add(d.scale(t)); }
     }
   }
   return best;
 }
 function startSwing() {
-  if (vehicle || downTimer > 0 || indoorsNow()) return false;
-  const a = findAnchor();
-  if (!a) return false;
+  if (vehicle || home || downTimer > 0 || indoorsNow()) return false;
+  const fromGround = onGround || pos.y - supportHeight(pos.x, pos.z, pos.y + 0.01) < 1.2;
+  const a = findAnchor(fromGround);
   const fx = Math.sin(yaw), fz = Math.cos(yaw);
+  if (!a) {
+    // nothing to stick to: the web shoots out and falls short
+    webMiss = { t: 0, dir: new V3(fx * 0.8, 0.6, fz * 0.8).normalize() };
+    return false;
+  }
+  webMiss = null;
   const prev = swing;
-  const len = V3.Distance(a, new V3(pos.x, pos.y + HAND, pos.z));
-  swing = {
-    a, len, minLen: Math.max(6, len * 0.85),
-    // keep the current momentum and add a forward kick
-    vx: (prev ? prev.vx : airVel.x) + fx * 7,
-    vy: onGround ? 7 : Math.max(prev ? prev.vy : vy, -6),
-    vz: (prev ? prev.vz : airVel.z) + fz * 7,
-  };
+  const hand = new V3(pos.x, pos.y + HAND, pos.z);
+  const len = V3.Distance(a, hand);
+  if (fromGround) {
+    // Ground launch: the web yanks you up and toward the anchor, then the
+    // rope goes taut and you swing on through like a normal swing.
+    const dx = a.x - hand.x, dy = a.y - hand.y, dz = a.z - hand.z;
+    const kick = 13 / len;
+    swing = {
+      a, len, minLen: Math.max(7, len * 0.45), yank: 0.5, target: Math.max(8, len * 0.55), age: 0, shot: 0,
+      vx: dx * kick + fx * 6, vy: Math.max(9, dy * kick + 4), vz: dz * kick + fz * 6,
+    };
+    pos.y += 0.05;
+  } else {
+    swing = {
+      a, len, minLen: Math.max(6, len * 0.8), yank: 0, target: len, age: 0, shot: 0,
+      // keep the current momentum and add a forward kick
+      vx: (prev ? prev.vx : airVel.x) + fx * 6,
+      vy: Math.max(prev ? prev.vy : vy, -8),
+      vz: (prev ? prev.vz : airVel.z) + fz * 6,
+    };
+  }
   onGround = false; superJump = null;
   web.setEnabled(true);
   return true;
 }
 function endSwing(fling) {
   if (!swing) return;
-  airVel.x = swing.vx; airVel.z = swing.vz;
-  vy = swing.vy + (fling ? 3 : 0);
+  const s = swing;
+  airVel.x = s.vx; airVel.z = s.vz;
+  vy = s.vy;
+  if (fling) {
+    // let go with a flick: a little extra lift and carry
+    const hs = Math.hypot(s.vx, s.vz);
+    vy = Math.max(vy, 0) + 4 + Math.min(hs, 30) * 0.12;
+    airVel.x *= 1.08; airVel.z *= 1.08;
+  }
   swing = null;
   web.setEnabled(false);
 }
 function updateSwing(dt) {
   const s = swing;
+  s.age += dt; s.shot = Math.min(1, s.shot + dt / 0.09);
   const fx = Math.sin(yaw), fz = Math.cos(yaw), rx = Math.cos(yaw), rz = -Math.sin(yaw);
   let ix = 0, iz = 0;
   if (keys.KeyW || keys.ArrowUp) { ix += fx; iz += fz; }
-  if (keys.KeyS || keys.ArrowDown) { ix -= fx; iz -= fz; }
   if (keys.KeyD || keys.ArrowRight) { ix += rx; iz += rz; }
   if (keys.KeyA || keys.ArrowLeft) { ix -= rx; iz -= rz; }
+  const brake = keys.KeyS || keys.ArrowDown;
   const il = Math.hypot(ix, iz);
-  s.len = Math.max(s.minLen, s.len - 6 * dt);            // reel in a little: gives the tug
+  if (s.yank <= 0) s.len = Math.max(s.minLen, s.len - 3.5 * dt);   // slow reel-in gives the swing its tug
   const sp0 = Math.hypot(s.vx, s.vy, s.vz);
-  const n = Math.max(1, Math.ceil((sp0 * dt) / 0.3));     // sub-step so we can't tunnel through walls
+  const n = Math.max(1, Math.ceil((sp0 * dt) / 0.3));            // sub-step so we can't tunnel through walls
   const h = dt / n;
   for (let i = 0; i < n && swing; i++) {
-    if (il) { s.vx += (ix / il) * 10 * h; s.vz += (iz / il) * 10 * h; }
+    let ox = pos.x - s.a.x, oy = pos.y + HAND - s.a.y, oz = pos.z - s.a.z;
+    let d = Math.hypot(ox, oy, oz) || 1;
+    if (s.yank > 0) {
+      // reel hard toward the anchor, rope follows you in
+      s.yank -= h;
+      const pull = d > s.target ? 34 : 0;
+      s.vx -= (ox / d) * pull * h; s.vy -= (oy / d) * pull * h; s.vz -= (oz / d) * pull * h;
+      if (s.yank <= 0) s.len = Math.max(s.minLen, Math.min(s.len, d));
+    }
+    // pump along the swing (W / A / D steer, S brakes)
+    if (il) { s.vx += (ix / il) * 13 * h; s.vz += (iz / il) * 13 * h; }
+    if (brake) { const k = Math.exp(-1.8 * h); s.vx *= k; s.vz *= k; }
     s.vy -= GRAV * h;
     let hx = pos.x + s.vx * h, hy = pos.y + HAND + s.vy * h, hz = pos.z + s.vz * h;
     // rope: can't get further than len from the anchor
-    let ox = hx - s.a.x, oy = hy - s.a.y, oz = hz - s.a.z;
-    const d = Math.hypot(ox, oy, oz);
+    ox = hx - s.a.x; oy = hy - s.a.y; oz = hz - s.a.z;
+    d = Math.hypot(ox, oy, oz);
+    if (s.yank > 0) s.len = Math.min(s.len, Math.max(d, s.target));
     if (d > s.len) {
       ox /= d; oy /= d; oz /= d;
       hx = s.a.x + ox * s.len; hy = s.a.y + oy * s.len; hz = s.a.z + oz * s.len;
       const vr = s.vx * ox + s.vy * oy + s.vz * oz;
-      if (vr > 0) { s.vx -= vr * ox; s.vy -= vr * oy; s.vz -= vr * oz; }
+      if (vr > 0) {
+        s.vx -= vr * ox; s.vy -= vr * oy; s.vz -= vr * oz;
+        // swinging through the bottom of the arc picks up a little speed
+        if (oy < -0.85) { const k = 1 + 0.25 * h; s.vx *= k; s.vz *= k; }
+      }
     }
     const sp = Math.hypot(s.vx, s.vy, s.vz);
     if (sp > SWING_MAX) { const k = SWING_MAX / sp; s.vx *= k; s.vy *= k; s.vz *= k; }
@@ -537,24 +623,30 @@ function updateSwing(dt) {
       const vn = (s.vx * nx + s.vz * nz) / nl;
       if (vn < 0) { s.vx -= (vn * nx) / nl; s.vz -= (vn * nz) / nl; }
     }
-    // landed on the street or a roof
+    // the street / a roof: skim it during the launch, land on it afterwards
     const gh = supportHeight(pos.x, pos.z, pos.y);
-    if (pos.y <= gh && s.vy <= 0) {
-      pos.y = gh; swing = null; web.setEnabled(false);
-      vy = 0; onGround = true; airVel.x = airVel.z = 0;
+    if (pos.y <= gh) {
+      pos.y = gh;
+      if (s.yank > 0 || s.age < 0.35) { if (s.vy < 2) s.vy = 2; }
+      else if (s.vy <= 0) {
+        swing = null; web.setEnabled(false);
+        vy = 0; onGround = true; airVel.x = airVel.z = 0;
+      }
     }
   }
   if (!swing) return;
-  pos.x = clamp(pos.x, WORLD.x0 + 2, WORLD.x1 - 2);
-  pos.z = clamp(pos.z, WORLD.z0 + 2, WORLD.z1 - 2);
-  // swung up level with the anchor, or let go of F → release with a fling
-  if (pos.y + HAND > s.a.y - 1) endSwing(true);
-  else if (!webHeld) endSwing(true);
+  if (!home) {
+    pos.x = clamp(pos.x, WORLD.x0 + 2, WORLD.x1 - 2);
+    pos.z = clamp(pos.z, WORLD.z0 + 2, WORLD.z1 - 2);
+  }
+  // swung up level with the anchor, or let go → release with a fling
+  if (s.yank <= 0 && pos.y + HAND > s.a.y - 1.5 && s.vy > 0) endSwing(true);
+  else if (!webHeld && s.age > 0.12) endSwing(true);
 }
 // Swing pose + web line (also runs on the frame the swing ends).
 function poseSwing(dt) {
   const s = swing;
-  const vx = s ? s.vx : airVel.x, vz = s ? s.vz : airVel.z;
+  const vx = s ? s.vx : airVel.x, vz = s ? s.vz : airVel.z, vyy = s ? s.vy : vy;
   if (Math.hypot(vx, vz) > 1) facing += angDiff(Math.atan2(vx, vz), facing) * Math.min(1, dt * 8);
   player.position.copyFrom(pos);
   player.rotation.y = facing;
@@ -563,22 +655,48 @@ function poseSwing(dt) {
   const bs = Math.max(0.3, 1 - (pos.y - shadowY) * 0.25);
   blob.scaling.set(bs, 1, bs);
   body.position.y = 0;
-  body.rotation.x += (0.35 - body.rotation.x) * Math.min(1, dt * 6);
-  armR.sh.rotation.x = -2.9; armR.sh.rotation.z = 0.25; armR.el.rotation.x = -0.1;
-  armL.sh.rotation.x = -0.7; armL.el.rotation.x = -0.9;
-  legL.hip.rotation.x = -1.0; legL.knee.rotation.x = 1.4;
-  legR.hip.rotation.x = -0.35; legR.knee.rotation.x = 0.6;
+  // lean with the arc: forward and tucked on the way down, stretched out on the way up
+  const k = Math.min(1, dt * 7);
+  const rising = clamp(vyy / 12, -1, 1);
+  const tgtLean = s ? 0.25 + Math.min(Math.hypot(vx, vz), 30) / 30 * 0.35 - rising * 0.2 : 0.2;
+  body.rotation.x += (tgtLean - body.rotation.x) * k;
+  armR.sh.rotation.x = -2.95; armR.sh.rotation.z = 0.2; armR.el.rotation.x = -0.05;
+  armL.sh.rotation.x += ((s ? -0.4 - rising * 0.4 : -1.6) - armL.sh.rotation.x) * k;
+  armL.el.rotation.x += (-0.9 - armL.el.rotation.x) * k;
+  const tuck = clamp(-rising, 0, 1);
+  legL.hip.rotation.x += ((-0.4 - tuck * 0.9) - legL.hip.rotation.x) * k;
+  legL.knee.rotation.x += ((0.4 + tuck * 1.2) - legL.knee.rotation.x) * k;
+  legR.hip.rotation.x += ((0.15 - tuck * 0.5) - legR.hip.rotation.x) * k;
+  legR.knee.rotation.x += ((0.25 + tuck * 0.8) - legR.knee.rotation.x) * k;
   if (!s) return;
-  // web from the raised right hand to the anchor
+  // web from the raised right hand to the anchor (it shoots out first)
   const hx = pos.x + Math.cos(facing) * 0.25, hy = pos.y + 2.25, hz = pos.z - Math.sin(facing) * 0.25;
-  const len = Math.hypot(s.a.x - hx, s.a.y - hy, s.a.z - hz);
-  web.position.set((hx + s.a.x) / 2, (hy + s.a.y) / 2, (hz + s.a.z) / 2);
+  const ex = hx + (s.a.x - hx) * s.shot, ey = hy + (s.a.y - hy) * s.shot, ez = hz + (s.a.z - hz) * s.shot;
+  const len = Math.max(0.05, Math.hypot(ex - hx, ey - hy, ez - hz));
+  web.position.set((hx + ex) / 2, (hy + ey) / 2, (hz + ez) / 2);
   web.scaling.z = len;
-  web.lookAt(s.a);
+  web.lookAt(new V3(ex, ey, ez));
+}
+// A web that found nothing to stick to: shoots out ~22 m and drops away.
+let webMiss = null;
+function updateWebMiss(dt) {
+  if (!webMiss || swing) return;
+  webMiss.t += dt;
+  const T = 0.35;
+  if (webMiss.t > T) { webMiss = null; web.setEnabled(false); return; }
+  const out = Math.min(1, webMiss.t / 0.12) * 22, droop = Math.max(0, webMiss.t - 0.12) * 18;
+  const hx = pos.x + Math.cos(facing) * 0.25, hy = pos.y + 2.25, hz = pos.z - Math.sin(facing) * 0.25;
+  const d = webMiss.dir;
+  const ex = hx + d.x * out, ey = hy + d.y * out - droop, ez = hz + d.z * out;
+  web.setEnabled(true);
+  web.position.set((hx + ex) / 2, (hy + ey) / 2, (hz + ez) / 2);
+  web.scaling.z = Math.max(0.05, Math.hypot(ex - hx, ey - hy, ez - hz));
+  web.lookAt(new V3(ex, ey, ez));
 }
 
 function updatePlayer(dt) {
   if (swing) { updateSwing(dt); poseSwing(dt); return; }
+  updateWebMiss(dt);
   const fwdX = Math.sin(yaw), fwdZ = Math.cos(yaw), rightX = Math.cos(yaw), rightZ = -Math.sin(yaw);
   let mx = 0, mz = 0;
   const downed = downTimer > 0;               // thrown from a crash: lie there for a moment
@@ -642,8 +760,10 @@ function updatePlayer(dt) {
   if (vy <= 0 && ny <= gh) { pos.y = gh; vy = 0; onGround = true; superJump = null; airVel.x = airVel.z = 0; }
   else if (onGround && vy <= 0 && pos.y - gh < 0.45) { pos.y = gh; vy = 0; }
   else { pos.y = ny; onGround = false; }
-  pos.x = clamp(pos.x, WORLD.x0 + 2, WORLD.x1 - 2);
-  pos.z = clamp(pos.z, WORLD.z0 + 2, WORLD.z1 - 2);
+  if (!home) {
+    pos.x = clamp(pos.x, WORLD.x0 + 2, WORLD.x1 - 2);
+    pos.z = clamp(pos.z, WORLD.z0 + 2, WORLD.z1 - 2);
+  }
 
   for (const t of traffic) {
     const ddx = pos.x - t.vx, ddz = pos.z - t.vz, d = Math.hypot(ddx, ddz);
@@ -694,7 +814,7 @@ function playerFits(x, y, z) {
   return true;
 }
 function enterVehicle(v) {
-  if (swing) { swing = null; web.setEnabled(false); }
+  if (swing || webMiss) { swing = null; webMiss = null; web.setEnabled(false); }
   airVel.x = airVel.z = 0;
   vehicle = v;
   v.solid.off = true;
@@ -1084,6 +1204,7 @@ function updateCamera(dt) {
   // centre) is never hidden behind the player; aiming pulls it in tighter.
   let dist = camDist, h = 1.7, side = 1.0;
   if (vehicle) { const c = specOf(vehicle); dist = Math.max(camDist, c.camDist); h = c.camH; side = 0; }
+  else if (home) { dist = Math.min(dist, 3.4); side = Math.min(side, 0.6); }
   else if (aiming) { dist = 2.8; side = 0.85; h = 1.72; }
   // don't push the pivot into a wall the player is hugging on the right
   const rx = Math.cos(yaw), rz = -Math.sin(yaw);
@@ -1129,10 +1250,11 @@ function setHud(key, node, html) {
 const DISTRICTS = {
   city: ["MIDTOWN", "Babylon City"], paris: ["SAINT-CLAIR", "Residential quarter"],
   park: ["RIVERSIDE PARK", "Between the city and Saint-Clair"], beach: ["THE COAST", "Saint-Clair beach"],
+  london: ["LONDON", "Mind the maze of streets"], river: ["THE THAMES", "Crossing the river"],
 };
 let curDistrict = null, districtTimer = null, hudTimer = 0;
 function updateHud(dt) {
-  let loc = "";
+  let loc = home ? `${home.typeLabel || home.label} · No. ${home.no}` : "";
   for (const e of enterables) {
     if (inEnterable(e, pos.x, pos.z)) {
       const fl = Math.floor((pos.y + 0.4) / e.fh);
@@ -1150,7 +1272,7 @@ function updateHud(dt) {
   hudTimer -= dt;
   if (hudTimer > 0) return;
   hudTimer = 0.12;
-  const dname = districtAt(pos.x, pos.z);
+  const dname = home ? curDistrict : districtAt(pos.x, pos.z);
   if (dname !== curDistrict) {
     curDistrict = dname;
     const [t, s] = DISTRICTS[dname];
@@ -1160,13 +1282,17 @@ function updateHud(dt) {
     districtTimer = setTimeout(() => distEl.classList.remove("show"), 2800);
   }
   let pr = "";
-  if (vehicle) pr = "<kbd>E</kbd> Get out";
+  if (homeBusy) pr = "";
+  else if (home) pr = atExit(pos.x, pos.z) ? "<kbd>E</kbd> Leave" : "";
+  else if (vehicle) pr = "<kbd>E</kbd> Get out";
   else if (swing) pr = "Hold <kbd>Left click</kbd> to swing · release to let go";
-  else if (!onGround && weapon === "web") pr = "<kbd>Left click</kbd> Web swing";
+  else if (weapon === "web" && !home && !onGround) pr = "<kbd>Left click</kbd> Web swing";
   else {
-    const u = nearestUsable();
+    const u = nearestUsable(), hm = onGround ? nearestHome(pos.x, pos.z, pos.y) : null;
     if (u) pr = `<kbd>E</kbd> ${u.e ? "Take the " + u.spec.name : u.spec.label}`;
+    else if (hm) pr = `<kbd>E</kbd> Enter ${hm.label.toLowerCase()}`;
     else if (onGround && roofCandidate()) pr = "<kbd>Space</kbd><kbd>Space</kbd> Jump onto roof";
+    else if (weapon === "web" && !home) pr = "<kbd>Left click</kbd> Web launch";
   }
   setHud("prompt", promptEl, pr);
 }
@@ -1197,6 +1323,17 @@ const toMap = (x, z) => [x - WORLD.x0, WORLD.z1 - z];
   c.fillStyle = "#211f1c"; c.beginPath(); c.arc(px, pz, 216, 0, Math.PI * 2); c.fill();
   c.fillStyle = "#1f5f80"; c.fillRect(0, 0, toMap(SHORE_X, 0)[0], baked.height);
   c.fillStyle = "#8a7c5c"; c.fillRect(toMap(SHORE_X, 0)[0], 0, 55, baked.height);
+  const [lx0, lz0] = toMap(752, WORLD.z1);
+  c.fillStyle = "#1d1b1e"; c.fillRect(lx0, lz0, WORLD.x1 - 752, baked.height);
+  c.strokeStyle = "#2a6d8f"; c.lineWidth = RW * 2; c.lineCap = "round"; c.lineJoin = "round";
+  c.beginPath();
+  river.forEach(([x, z], i) => { const [mx, mz] = toMap(x, z); i ? c.lineTo(mx, mz) : c.moveTo(mx, mz); });
+  c.stroke();
+  c.fillStyle = "#2f5a2a";
+  for (const s of landmarks.londonSquares || []) {
+    const [sx, sz] = toMap(s.x, s.z);
+    c.beginPath(); c.arc(sx, sz, s.r - 1, 0, Math.PI * 2); c.fill();
+  }
   const [qx, qz] = toMap(POND.x, POND.z);
   c.fillStyle = "#2a6d8f"; c.beginPath(); c.arc(qx, qz, POND.r, 0, Math.PI * 2); c.fill();
   c.lineCap = "round"; c.lineJoin = "round";
@@ -1215,9 +1352,12 @@ const toMap = (x, z) => [x - WORLD.x0, WORLD.z1 - z];
     b.pts.forEach(([x, z], i) => { const [mx, mz] = toMap(x, z); i ? c.lineTo(mx, mz) : c.moveTo(mx, mz); });
     c.closePath(); c.fill();
     if (b.door) { const [dx, dz] = toMap(b.door[0], b.door[1]); c.fillStyle = "#ffe08a"; c.beginPath(); c.arc(dx, dz, 3, 0, Math.PI * 2); c.fill(); }
+    if (b.homeDoor) { const [dx, dz] = toMap(b.homeDoor[0], b.homeDoor[1]); c.fillStyle = "#8fd3ff"; c.beginPath(); c.arc(dx, dz, 1.8, 0, Math.PI * 2); c.fill(); }
   }
 }
 function drawMinimap() {
+  mm.style.display = home ? "none" : "";
+  if (home) return;
   const W = mm.width, R = W / 2;
   mctx.save();
   mctx.clearRect(0, 0, W, W);
@@ -1232,9 +1372,7 @@ function drawMinimap() {
     if (Math.abs(dx) > 160 || Math.abs(dz) > 160) return;
     mctx.fillStyle = col; mctx.beginPath(); mctx.arc(dx, dz, r, 0, Math.PI * 2); mctx.fill();
   };
-  for (const t of traffic) dot(t.vx, t.vz, 3.2, "#4a8cff");
   for (const p of peds) dot(p.x, p.z, 1.6, p.state === "flee" ? "#ff8a5c" : "#d9d9d9");
-  for (const v of vehicles) if (v !== vehicle && !v.wrecked && v.kind === "bike") dot(v.mesh.position.x, v.mesh.position.z, 2.2, "#7ee3a1");
   mctx.restore();
   mctx.save();
   mctx.translate(R, R); mctx.rotate((vehicle ? vehicle.heading : facing) - yaw);
@@ -1258,6 +1396,8 @@ const MAP_LABELS = [
   { x: PARIS.x, z: PARIS.z + 120, t: "SAINT-CLAIR", s: "Residential quarter" },
   { x: -175, z: -330, t: "RIVERSIDE PARK", s: "" },
   { x: SHORE_X + 10, z: -420, t: "THE COAST", s: "" },
+  { x: 1000, z: 120, t: "LONDON", s: "Old town" },
+  { x: 1470, z: -260, t: "THE THAMES", s: "" },
 ];
 function bigToScreen(x, z) {
   const [mx, mz] = toMap(x, z);
@@ -1292,14 +1432,7 @@ function drawBigMap() {
     bctx.fillStyle = col; bctx.beginPath(); bctx.arc(sx, sy, r, 0, Math.PI * 2); bctx.fill();
   };
   const r = clamp(z * 1.6, 1.5, 5);
-  for (const t of traffic) dot(t.vx, t.vz, r, "#4a8cff");
   if (z > bigFit * 1.8) for (const p of peds) dot(p.x, p.z, r * 0.6, p.state === "flee" ? "#ff8a5c" : "#d9d9d9");
-  for (const v of vehicles) {
-    if (v === vehicle || v.wrecked) continue;
-    const sp = specOf(v);
-    if (sp.name === "supercar" || sp.name === "superbike") dot(v.mesh.position.x, v.mesh.position.z, r * 1.2, "#ff4fd8");
-    else if (v.kind === "bike") dot(v.mesh.position.x, v.mesh.position.z, r * 0.9, "#7ee3a1");
-  }
 
   bctx.textAlign = "center"; bctx.textBaseline = "middle";
   // enterable buildings — names once zoomed in a little
@@ -1359,7 +1492,7 @@ window.addEventListener("resize", () => { if (bigMapOpen) { big.width = window.i
 // ---------------------------------------------------------------- start + debug params
 // ?night=1  ?time=<hours>  ?ride=car|bike  ?b=<enterable>&f=<floor>  ?jump=1  ?at=x,z,yaw  ?pitch= ?dist=
 window.__city = { pos, enterables, roofs, vehicles, traffic, peds, setTime, fire, startSuperJump, edges };
-yaw = Math.PI / 2; // look east at the skyline
+yaw = START.yaw; // look into the junction
 {
   const q = new URLSearchParams(location.search);
   const bi = q.get("b");
@@ -1394,6 +1527,30 @@ yaw = Math.PI / 2; // look east at the skyline
 }
 camera.position.set(pos.x - Math.sin(yaw) * 6, pos.y + 2.5, pos.z - Math.cos(yaw) * 6);
 
+// ---------------------------------------------------------------- homes
+// Fade to black, build (or tear down) the interior, swap which layer the
+// camera draws, move the player, fade back in.
+const fadeEl = document.getElementById("fade");
+for (const m of player.getChildMeshes(false)) m.layerMask = BOTH_MASK;
+blob.layerMask = BOTH_MASK;
+function homeTransition(entering, h) {
+  homeBusy = true;
+  for (const k in keys) keys[k] = false;
+  firing = false; aiming = false;
+  fadeEl.classList.add("on");
+  setTimeout(() => {
+    const at = entering ? enterHome(h) : leaveHome();
+    home = entering ? h : null;
+    camera.layerMask = entering ? INSIDE_MASK : WORLD_MASK;
+    pos.set(at.x, at.y, at.z);
+    vy = 0; onGround = true; airVel.x = airVel.z = 0;
+    yaw = facing = at.yaw;
+    camera.position.set(pos.x, pos.y + 1.8, pos.z);
+    updateCamera(1);                                     // snap the camera behind the player, inside the walls
+    requestAnimationFrame(() => requestAnimationFrame(() => { fadeEl.classList.remove("on"); homeBusy = false; }));
+  }, 380);
+}
+
 // ---------------------------------------------------------------- loop
 let mapTimer = 0;
 engine.runRenderLoop(() => {
@@ -1401,28 +1558,38 @@ engine.runRenderLoop(() => {
   const now = performance.now();
   if (interactQueued) {
     interactQueued = false;
-    if (vehicle) exitVehicle();
-    else if (downTimer <= 0) { const u = nearestUsable(); if (u) enterVehicle(u.e ? stealTraffic(u) : u); }
+    if (homeBusy) { /* mid-fade */ }
+    else if (home) { if (atExit(pos.x, pos.z)) homeTransition(false); }
+    else if (vehicle) exitVehicle();
+    else if (downTimer <= 0) {
+      const u = nearestUsable();
+      if (u) enterVehicle(u.e ? stealTraffic(u) : u);
+      else if (onGround && !swing) { const h = nearestHome(pos.x, pos.z, pos.y); if (h) homeTransition(true, h); }
+    }
   }
   if (superJumpQueued) { superJumpQueued = false; if (!vehicle) startSuperJump(); }
   if (swingQueued) { swingQueued = false; if (!vehicle) startSwing(); }
 
-  updateTraffic(dt, now, { pos, vehicle, peds });
-  if (vehicle) updateVehicle(dt);
+  if (!home) updateTraffic(dt, now, { pos, vehicle, peds });
+  if (homeBusy) { /* frozen while the screen is black */ }
+  else if (vehicle) updateVehicle(dt);
   else {
     updatePlayer(dt);
     shotCooldown -= dt;
     if (firing && locked() && shotCooldown <= 0 && downTimer <= 0) fire();
   }
-  updatePeds(dt, { pos, vehicle, vehicleSpeed: vehicle ? vehicle.speed : 0 });
+  if (!home) updatePeds(dt, {
+    pos, vehicle, vehicleSpeed: vehicle ? vehicle.speed : 0, traffic,
+    armed: !vehicle && weapon === "gun" && (aiming || firing), aimYaw: yaw,
+  });
   updateCamera(dt);
   updateTimeOfDay(dt);
   updateEffects(dt);
   updateHud(dt);
-  animateBillboards(dt);
+  if (!home) { animateBillboards(dt); updateLondon(dt, tod); pulseHomeMarkers(now / 1000); }
   mapTimer += dt;
   if (mapTimer > 1 / 30) { mapTimer = 0; drawMinimap(); }
-  if (bigMapOpen && (bigTimer += dt) > 0.2) { bigTimer = 0; drawBigMap(); }   // live traffic + player
+  if (bigMapOpen && (bigTimer += dt) > 0.2) { bigTimer = 0; drawBigMap(); }   // live player + people
   scene.render();
 });
 window.addEventListener("resize", () => engine.resize());

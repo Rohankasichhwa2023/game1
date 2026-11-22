@@ -7,19 +7,22 @@
 //   New York city  : a warped (bending) avenue/street grid, a roundabout and
 //                    a curving diagonal "Broadway".
 //   Park           : three winding parkways linking the two.
+//   London         : east of Midtown — organic streets, river, bridges (london.js).
 import {
   scene, rand, rr, pick, clamp, hex, flatMat, flatTexMat, texMat, litMat, makeAcc, addFlatQuad,
   addBox, solidBox, setXF, clearXF, makeXF, radialTex, glow,
 } from "./engine.js";
 import { noiseTex, slabTex } from "./textures.js";
+import { LONDON, RW, riverDist, inLondon, generateLondonRoads, placeLondonLandmarks } from "./london.js";
 
 export const PARIS = { x: -560, z: 0, R: 340 };
 export const CITY = { x0: -114, x1: 720, z0: -560, z1: 560 };
 export const SHORE_X = -960;
-export const WORLD = { x0: -1000, x1: 730, z0: -600, z1: 600 };
+export const WORLD = { x0: -1000, x1: 1600, z0: -600, z1: 600 };
 
 export function districtAt(x, z) {
   if (Math.hypot(x - PARIS.x, z - PARIS.z) <= PARIS.R + 6) return "paris";
+  if (x >= LONDON.x0 - 10 && inLondon(x, z)) return riverDist(x, z) < RW + 3 ? "river" : "london";
   if (x >= CITY.x0 && z > CITY.z0 && z < CITY.z1) return "city";
   if (x < SHORE_X + 55) return "beach";
   return "park";
@@ -30,12 +33,12 @@ export const edges = [];
 export const reserved = []; // {x, z, r} circles nothing may be built on
 export const landmarks = {};
 
-function node(x, z) {
+export function node(x, z) {
   const n = { x, z, edges: [], id: nodes.length };
   nodes.push(n);
   return n;
 }
-function edge(a, b, pts, w, sw, kind, district) {
+export function edge(a, b, pts, w, sw, kind, district) {
   pts[0] = [a.x, a.z];
   pts[pts.length - 1] = [b.x, b.z];
   const xs = [], zs = [], cum = [0];
@@ -52,13 +55,13 @@ function edge(a, b, pts, w, sw, kind, district) {
 
 // ---- curve samplers (≈3 m spacing) ----
 const STEP = 3;
-function linePts(ax, az, bx, bz) {
+export function linePts(ax, az, bx, bz) {
   const n = Math.max(1, Math.ceil(Math.hypot(bx - ax, bz - az) / STEP));
   const out = [];
   for (let k = 0; k <= n; k++) out.push([ax + ((bx - ax) * k) / n, az + ((bz - az) * k) / n]);
   return out;
 }
-function arcPts(cx, cz, R, a0, a1, bulge = 0) {
+export function arcPts(cx, cz, R, a0, a1, bulge = 0) {
   const n = Math.max(2, Math.ceil((Math.abs(a1 - a0) * R) / STEP));
   const out = [];
   for (let k = 0; k <= n; k++) {
@@ -185,7 +188,14 @@ export function generateRoads() {
   pw(N[7][6], G[0][3], [[-282, -262], [-215, -214], [-156, -250]]);
   pw(N[1][6], G[0][9], [[-282, 262], [-215, 214], [-156, 250]]);
 
+  // ---------- London: east of Midtown, reached along five cross streets ----------
+  generateLondonRoads({
+    node, edge, arcPts, linePts, reserved, landmarks,
+    eastNodes: [1, 4, 6, 8, 11].map((j) => G[AX.length - 1][j]),
+  });
+
   indexRoads();
+  placeLondonLandmarks(roadDist, reserved, landmarks);
 }
 
 // ---------------------------------------------------------------- road distance index
@@ -255,6 +265,7 @@ export function buildRoadMeshes() {
     city: makeAcc("walkCity", walkMat("walkCityM", slabTex("walkCityT", "#a9a8a3", "rgba(70,70,70,0.45)")), 3, 3),
     paris: makeAcc("walkParis", walkMat("walkParisM", slabTex("walkParisT", "#c9bea6", "rgba(110,95,70,0.45)", 6)), 3, 3),
     park: makeAcc("walkPark", walkMat("walkParkM", slabTex("walkParkT", "#b8b2a2", "rgba(90,85,70,0.4)")), 3, 3),
+    london: makeAcc("walkLondon", walkMat("walkLondonM", slabTex("walkLondonT", "#a3a09a", "rgba(60,58,55,0.5)", 3)), 3, 3),
   };
   const lineM = (n, c) => { const m = flatMat(n, hex(c), 0.3); m.zOffset = -5; return m; };
   const white = makeAcc("lineWhite", lineM("lineWhiteM", "#e2dfd2"));
@@ -300,6 +311,13 @@ export function buildRoadMeshes() {
     } else if (e.w >= 11) {
       for (let s = s0; s < s1 - 3; s += 7) strip(white, 0, 0.14, s, s + 3);
     }
+    // London kerbs: double yellow lines
+    if (e.district === "london" && e.kind !== "circus" && e.kind !== "bridge") {
+      for (let s = s0; s < s1; s += 6) {
+        const sb = Math.min(s + 6, s1);
+        for (const sd of [-1, 1]) for (const o of [0.32, 0.58]) strip(yellow, sd * (hw - o), 0.1, s, sb);
+      }
+    }
     // zebra crossings at busy junctions
     for (const [nd, atStart] of [[e.a, true], [e.b, false]]) {
       if (nd.edges.length < 3 || e.len < 30) continue;
@@ -341,7 +359,7 @@ export function buildLamps() {
 
   const pools = [];
   for (const e of edges) {
-    const paris = e.district === "paris";
+    const paris = e.district === "paris" || e.district === "london";
     const spacing = paris ? 26 : 34;
     let side = rand() < 0.5 ? 1 : -1;
     for (let s = 10; s < e.len - 8; s += spacing) {

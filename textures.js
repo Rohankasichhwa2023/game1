@@ -247,6 +247,130 @@ export function createFacades() {
       }
     },
   }));
+
+  createLondonFacades();
+}
+
+// ---------------- London ----------------
+// Georgian / Victorian sash window: white frame, 6-over-6 glazing bars.
+function sash(ctx, m, x, y, w, h, glassList, litP = 0.38) {
+  const t = trim(m, "#f4f1ea");
+  fill(ctx, t, x - 3, y - 3, w + 6, h + 6);
+  fill(ctx, glass(m, glassList, litP), x, y, w, h);
+  if (m === "night") return;
+  ctx.fillStyle = t;
+  ctx.fillRect(x, y + h / 2 - 2, w, 4);                      // meeting rail
+  for (const f of [1 / 3, 2 / 3]) ctx.fillRect(x + w * f - 1, y, 2, h);
+  for (const f of [0.25, 0.75]) ctx.fillRect(x, y + h * f - 1, w, 2);
+}
+const LON_GLASS = ["#2d343c", "#38414a", "#323a42", "#424c56"];
+function createLondonFacades() {
+  FAC.lon = {};
+  // Brick terraces: London stock (yellow-grey), red, and soot-dark brick.
+  const bricks = { stock: ["#a8966f", "#8d7c5a"], red: ["#94503a", "#7a3e2c"], dark: ["#6b5848", "#56463a"] };
+  for (const [key, [wall, mortar]] of Object.entries(bricks)) {
+    FAC.lon[key] = makeFacade("lon_" + key, {
+      cols: 2, rows: 4, cellW: 2.6, cellH: 3.2, spec: 0.03, wall,
+      bg(ctx, S, m) {
+        fill(ctx, bg(m, wall), 0, 0, S, S);
+        if (m !== "day") return;
+        speckle(ctx, S, 4200, "200,180,150", "40,30,20", 0.05, 0.16, 3, 8);
+        ctx.fillStyle = `rgba(60,50,40,0.18)`;
+        for (let yy = 0; yy < S; yy += 6) ctx.fillRect(0, yy, S, 1);
+        ctx.fillStyle = mortar;
+        ctx.globalAlpha = 0.25;
+        for (let i = 0; i < 260; i++) ctx.fillRect(rand() * S, Math.floor(rand() * S / 6) * 6, rr(8, 14), 5);
+        ctx.globalAlpha = 1;
+      },
+      cell(ctx, x, y, cw, ch, m) {
+        const wx = x + cw * 0.27, wy = y + ch * 0.18, ww = cw * 0.46, wh = ch * 0.62;
+        if (m === "day") {
+          fill(ctx, "#ddd3bd", wx - 6, wy - 12, ww + 12, 9);        // stone lintel
+          fill(ctx, "#d4c9b0", wx - 7, wy + wh + 4, ww + 14, 6);    // sill
+          fill(ctx, "rgba(0,0,0,0.12)", wx - 7, wy + wh + 10, ww + 14, 3);
+        }
+        sash(ctx, m, wx, wy, ww, wh, LON_GLASS);
+      },
+    }, false);
+  }
+  // Painted stucco (Belgravia white, Notting Hill pastels): rusticated
+  // ground band, window cornices, iron balconettes.
+  const stuccos = { white: "#efebe1", cream: "#ece0c4", pink: "#e8c4c0", blue: "#c4d6df", mint: "#cfe0c8", lemon: "#efe0a6" };
+  for (const [key, wall] of Object.entries(stuccos)) {
+    FAC.lon[key] = makeFacade("lon_" + key, {
+      cols: 2, rows: 4, cellW: 2.6, cellH: 3.2, spec: 0.04, wall, stucco: true,
+      bg(ctx, S, m, cw, ch) {
+        fill(ctx, bg(m, wall), 0, 0, S, S);
+        if (m !== "day") return;
+        speckle(ctx, S, 900, "255,255,255", "120,110,90", 0.03, 0.07, 2, 5);
+        ctx.fillStyle = "rgba(110,100,80,0.28)";
+        for (let yy = S - ch; yy < S; yy += ch / 5) ctx.fillRect(0, yy, S, 2);   // rustication (bottom row)
+        fill(ctx, "rgba(255,255,255,0.5)", 0, S - ch - 6, S, 5);
+      },
+      cell(ctx, x, y, cw, ch, m, c, r) {
+        const wx = x + cw * 0.28, wy = y + ch * 0.2, ww = cw * 0.44, wh = ch * 0.6;
+        if (m === "day") {
+          fill(ctx, "rgba(0,0,0,0.13)", wx - 9, wy - 10, ww + 18, 4);
+          fill(ctx, "#faf8f2", wx - 9, wy - 15, ww + 18, 6);           // window cornice
+          fill(ctx, "#faf8f2", wx - 6, wy - 3, ww + 12, wh + 7);       // architrave
+        }
+        sash(ctx, m, wx, wy, ww, wh, LON_GLASS, 0.42);
+        if (m !== "night" && r === 2) {                                // first-floor balconette
+          ctx.fillStyle = "#16181a";
+          ctx.fillRect(wx - 8, wy + wh * 0.62, ww + 16, 3);
+          for (let bx = wx - 7; bx < wx + ww + 8; bx += 5) ctx.fillRect(bx, wy + wh * 0.62, 1.5, wh * 0.38);
+        }
+      },
+    }, false);
+  }
+  // Red-brick Edwardian mansion block with white stone banding.
+  FAC.lonMansion = makeFacade("lonMansion", {
+    cols: 4, rows: 4, cellW: 3.0, cellH: 3.2, spec: 0.03, wall: "#8f4532",
+    bg(ctx, S, m, cw, ch) {
+      fill(ctx, bg(m, "#8f4532"), 0, 0, S, S);
+      if (m !== "day") return;
+      speckle(ctx, S, 4000, "190,120,95", "40,15,10", 0.05, 0.15, 3, 7);
+      for (let r = 0; r < 4; r++) fill(ctx, "#e6dccb", 0, r * ch + ch * 0.83, S, ch * 0.07);
+    },
+    cell(ctx, x, y, cw, ch, m) {
+      const wx = x + cw * 0.22, wy = y + ch * 0.16, ww = cw * 0.56, wh = ch * 0.62;
+      if (m === "day") fill(ctx, "#e6dccb", wx - 5, wy - 7, ww + 10, 6);
+      sash(ctx, m, wx, wy, ww, wh, LON_GLASS);
+    },
+  }, false);
+
+  // Shop fronts / pubs: painted timber surround, fascia board with gilt
+  // lettering, big glazed window with a door to one side.
+  const lonShop = (name, paint, fasciaText) => makeFacade(name, {
+    cols: 2, rows: 1, cellW: 2.6, cellH: 4.2, spec: 0.08,
+    bg: (ctx, S, m) => fill(ctx, bg(m, paint), 0, 0, S, S),
+    cell(ctx, x, y, cw, ch, m, c) {
+      if (m === "day") {
+        fill(ctx, "#111", x, y + ch * 0.06, cw, ch * 0.16);
+        fill(ctx, paint, x + 3, y + ch * 0.07, cw - 6, ch * 0.14);
+        ctx.fillStyle = fasciaText;
+        for (let k = 0; k < 5; k++) ctx.fillRect(x + cw * (0.14 + k * 0.15), y + ch * 0.11, cw * 0.1, ch * 0.06);
+      }
+      const gx = x + cw * 0.1, gy = y + ch * 0.27, gw = cw * 0.8, gh = ch * 0.66;
+      if (m === "night") fill(ctx, rand() < 0.8 ? pick(LIT) : "#1a1206", gx, gy, gw, gh);
+      else if (m === "day") {
+        const g = ctx.createLinearGradient(0, gy, 0, gy + gh);
+        g.addColorStop(0, "#28313a"); g.addColorStop(1, "#4d3f30");
+        fill(ctx, g, gx, gy, gw, gh);
+        ctx.fillStyle = paint;
+        for (const f of [1 / 3, 2 / 3]) ctx.fillRect(gx + gw * f - 2, gy, 4, gh * 0.72);
+        ctx.fillRect(gx, gy + gh * 0.24, gw, 3);
+        fill(ctx, paint, gx, gy + gh * 0.72, gw, gh * 0.28);              // stall riser
+        if (c === 1) fill(ctx, "#2a1e16", x + cw * 0.58, gy + gh * 0.05, cw * 0.28, gh * 0.95);
+      } else fill(ctx, glass(m, []), gx, gy, gw, gh);
+    },
+  });
+  FAC.lonShops = [
+    lonShop("lonShopGreen", "#1f4a36", "#d8b45a"), lonShop("lonShopNavy", "#1d2c4d", "#e8e2cf"),
+    lonShop("lonShopBlack", "#1a1a1c", "#d8b45a"), lonShop("lonShopRed", "#7d1f25", "#f0e6cf"),
+    lonShop("lonShopTeal", "#2e6670", "#f4efe2"), lonShop("lonShopCream", "#d9cfb6", "#2b2b2b"),
+  ];
+  FAC.lonPubs = [lonShop("lonPubOx", "#4a1418", "#e0b84e"), lonShop("lonPubGreen", "#16352a", "#e0b84e")];
 }
 
 // ---------------------------------------------------------------- roofs & small textures

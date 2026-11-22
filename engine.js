@@ -216,6 +216,23 @@ function insertSolid(s) {
     }
   }
 }
+// While a capture list is set, every new solid is also pushed onto it (used
+// by interiors, which are built on demand and removed again on exit).
+let capture = null;
+export function captureSolids(list) {
+  capture = list;
+}
+export function removeSolid(s) {
+  for (let ix = Math.floor(s.minX / GRID); ix <= Math.floor(s.maxX / GRID); ix++) {
+    for (let iz = Math.floor(s.minZ / GRID); iz <= Math.floor(s.maxZ / GRID); iz++) {
+      const k = gkey(ix, iz), cell = grid.get(k);
+      if (!cell) continue;
+      const i = cell.indexOf(s);
+      if (i >= 0) cell.splice(i, 1);
+      if (!cell.length) grid.delete(k);
+    }
+  }
+}
 export function makeSolid(xf, x0, y0, z0, x1, y1, z1) {
   let minX, maxX, minZ, maxZ;
   if (!xf) {
@@ -256,6 +273,7 @@ export function makeSolid(xf, x0, y0, z0, x1, y1, z1) {
     vehicle: null,
   };
   insertSolid(s);
+  if (capture) capture.push(s);
   return s;
 }
 export function addSolid(x0, y0, z0, x1, y1, z1) {

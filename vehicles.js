@@ -38,6 +38,11 @@ export const SPECS = {
     accel: 4.5, max: 75 * KMH, boost: 1.15, rev: 4, brake: 16, turn: 0.95, camDist: 17, camH: 4.5, hits: 14, label: "Drive bus",
     traffic: 0.75,
   },
+  decker: {
+    name: "double-decker", kind: "car", hw: 1.3, hd: 5.45, ht: 4.45, circles: [-4.2, -2.1, 0, 2.1, 4.2], r: 1.33,
+    accel: 4.2, max: 70 * KMH, boost: 1.15, rev: 4, brake: 16, turn: 0.95, camDist: 18, camH: 5.6, hits: 14, label: "Drive double-decker",
+    traffic: 0.7,
+  },
   supercar: {
     name: "supercar", kind: "car", hw: 1.02, hd: 2.35, ht: 1.2, circles: [-1.5, 0, 1.5], r: 1.02,
     accel: 24, max: 200 * KMH, boost: 1.5, rev: 10, brake: 42, turn: 2.0, camDist: 8, camH: 1.8, hits: 6, label: "Drive supercar",
@@ -322,6 +327,16 @@ const taxiParts = () => sedanParts({
     }
   },
 });
+// London cab: tall, upright, rounded; amber "TAXI" sign on the roof.
+const cabParts = () => carParts({
+  len: 4.55, hw: 0.92, y0: 0.3, wheel: 0.68, zf: 1.45, zr: -1.35,
+  noseY: 0.84, hoodY: 0.98, wsBase: 1.05, roofF: 0.4, roofR: -1.5, roofY: 1.8, rearBase: -1.85, deckY: 1.02, tailY: 1.0,
+  bPillar: -0.3, handles: [-0.05, -1.0], cW: 0.24,
+  extra(P, k) {
+    P.box(0.42, 0.14, 0.16, 0, k.rY + 0.08, 0.25, "light");
+    P.box(1.1, 0.05, 0.36, 0, 0.62, k.h2 - 0.02, "chrome");
+  },
+});
 const suvParts = () => carParts({
   len: 4.85, hw: 0.95, y0: 0.45, wheel: 0.84, ww: 0.3, zf: 1.5, zr: -1.5, archPad: 0.1,
   noseY: 1.12, hoodY: 1.22, wsBase: 1.2, roofF: 0.5, roofR: -2.05, roofY: 1.95, roofW: 0.8, rearBase: -2.2, deckY: 1.24, tailY: 1.24,
@@ -471,6 +486,50 @@ function busParts(P) {
   P.loft("body", [[-2.2, 3.1, 3.4, 0.85, 0.75, 0.12], [0.6, 3.1, 3.4, 0.85, 0.75, 0.12]]);
 }
 
+// Double-decker: two glazed decks, cream band between them, front entrance.
+function deckerParts(P) {
+  const W = 1.27, h2 = 5.4;
+  P.loft("body", [
+    [-h2, 0.38, 4.32, W - 0.05, W - 0.1, 0.32],
+    [-h2 + 0.15, 0.32, 4.4, W, W - 0.05, 0.36],
+    [h2 - 0.2, 0.32, 4.4, W, W - 0.05, 0.36],
+    [h2, 0.36, 4.3, W - 0.04, W - 0.1, 0.3],
+  ]);
+  const bays = [[-4.95, -3.75], [-3.65, -2.45], [-2.35, -1.15], [-1.05, 0.15], [0.25, 1.45], [1.55, 2.75], [2.85, 4.05], [4.15, 5.05]];
+  const door = [3.95, 5.05];
+  for (const s of [-1, 1]) {
+    const x = s * (W - 0.025);
+    for (const [z0, z1] of bays) {
+      P.box(0.03, 0.9, z1 - z0, x, 3.55, (z0 + z1) / 2, "glass");                  // upper deck
+      if (s > 0 && z1 > door[0]) continue;
+      P.box(0.03, 0.92, z1 - z0, x, 2.05, (z0 + z1) / 2, "glass");                 // lower deck
+    }
+    P.box(0.02, 0.22, h2 * 2 - 0.3, s * (W - 0.012), 2.86, 0, "accent");            // cream band
+    P.box(0.1, 0.4, 0.06, s * (W + 0.17), 2.4, h2 + 0.08, "dark");                 // mirror
+    P.strut("dark", [s * (W - 0.05), 2.7, h2 - 0.1], [s * (W + 0.15), 2.6, h2 + 0.08], 0.04);
+    P.box(0.3, 0.16, 0.04, s * 0.95, 0.85, h2 + 0.01, "light");
+    P.box(0.2, 0.45, 0.05, s * 1.0, 1.1, -h2 - 0.01, "tail");
+    for (const z of [3.7, -2.9]) {
+      P.arch(0.6, s * W, 0.5, z, "dark");
+      P.wheel(1.0, 0.32, s * (W + 0.04 - 0.16), 0.5, z, { spokes: 8 });
+    }
+  }
+  P.box(0.025, 2.2, door[1] - door[0], W - 0.03, 1.55, (door[0] + door[1]) / 2, "dark");
+  P.box(0.03, 2.1, door[1] - door[0] - 0.1, W - 0.022, 1.55, (door[0] + door[1]) / 2, "glass");
+  // front: lower windscreen, destination blind, upper front windows
+  P.box(2.3, 1.15, 0.04, 0, 2.0, h2, "glass");
+  P.box(1.7, 0.26, 0.04, 0, 2.95, h2, "light");
+  for (const s of [-1, 1]) P.box(1.08, 0.88, 0.04, s * 0.58, 3.6, h2 - 0.02, "glass");
+  P.box(2.5, 0.3, 0.15, 0, 0.48, h2, "dark");
+  P.box(0.5, 0.13, 0.03, 0, 0.7, h2 + 0.07, "plate");
+  P.box(1.0, 0.18, 0.04, 0, 0.95, h2 + 0.01, "chrome");
+  // rear
+  P.box(2.0, 0.8, 0.04, 0, 3.55, -h2, "glass");
+  P.box(1.6, 0.6, 0.04, 0, 2.0, -h2, "glass");
+  P.box(2.5, 0.3, 0.15, 0, 0.5, -h2, "dark");
+  P.box(0.5, 0.13, 0.03, 0, 0.75, -h2 - 0.04, "plate");
+}
+
 // ---- motorbikes ----
 function bikeParts(P) {
   const fz = 0.68, rz = -0.66, wy = 0.32;
@@ -551,7 +610,7 @@ function superbikeParts(P) {
 }
 
 // Pools (weighted by repetition).
-const T = { cityTraffic: [], parisTraffic: [], cityParked: [], parisParked: [], bikes: [], start: {} };
+const T = { cityTraffic: [], parisTraffic: [], londonTraffic: [], cityParked: [], parisParked: [], londonParked: [], bikes: [], start: {} };
 
 export function initVehicleTemplates() {
   headM = flatMat("headLightM", hex("#f2efe2"), 1);
@@ -576,6 +635,8 @@ export function initVehicleTemplates() {
     .map(([b, a], i) => model("truck", "truck" + i, { body: b, accent: a }, truckParts));
   const cityBus = model("bus", "busCity", { body: "#e9ecef", accent: "#1d5fa8" }, busParts);
   const parisBus = model("bus", "busParis", { body: "#2f7d55", accent: "#e9ecef" }, busParts);
+  const cab = model("suv", "blackCab", { body: "#141517" }, cabParts());
+  const decker = model("decker", "deckerRed", { body: "#c8102e", accent: "#ece4cc" }, deckerParts);
   const supers = [["#e8b100", "#111"], ["#d81b1b", "#fff"], ["#ff6a00", "#111"], ["#1565c0", "#fff"], ["#7ed321", "#111"]]
     .map(([b, a], i) => model("supercar", "supercar" + i, { body: b, accent: a }, sup));
   const bikes = ["#a3262a", "#1f4f9a", "#222326", "#c8681a"].map((c, i) => model("bike", "bike" + i, { body: c }, bikeParts));
@@ -586,6 +647,8 @@ export function initVehicleTemplates() {
   T.parisTraffic = [...hatches, ...hatches, sedans[0], sedans[2], suvs[2], suvs[1], vans[2], vans[0], trucks[2], parisBus];
   T.cityParked = [taxi, ...sedans, ...sedans, suvs[0], suvs[1], suvs[3], suvs[4], vans[0], vans[1], trucks[1], supers[1], supers[3]];
   T.parisParked = [...hatches, ...hatches, sedans[2], suvs[2], suvs[1], vans[2], supers[4]];
+  T.londonTraffic = [cab, cab, cab, cab, cab, decker, decker, decker, ...hatches, sedans[0], sedans[1], sedans[3], vans[0], vans[3], suvs[1], trucks[1]];
+  T.londonParked = [cab, cab, ...hatches, sedans[0], sedans[1], sedans[2], sedans[4], suvs[0], suvs[2], vans[0], vans[1], supers[1], decker];
   T.bikes = [...bikes, ...bikes, ...superbikes];
   T.start = { supercar: supers[0], superbike: superbikes[1], bike: bikes[0], suv: suvs[2] };
 }
@@ -620,15 +683,19 @@ function pickEdge(filter) {
   return list[list.length - 1];
 }
 export function spawnParked(START) {
-  // fast toys parked on the plaza lawn beside the start (clear of the view east)
-  makeVehicle(T.start.supercar, START.x, START.z + 6, Math.PI / 2);
-  makeVehicle(T.start.suv, START.x - 4, START.z + 10, Math.PI / 2);
-  makeVehicle(T.start.superbike, START.x - 1, START.z - 5, Math.PI / 2 + 0.3);
-  makeVehicle(T.start.bike, START.x - 2.6, START.z - 5.8, Math.PI / 2 + 0.3);
+  // fast toys parked beside the start, lined up along the promenade
+  if (START.parked) {
+    for (const v of START.parked) makeVehicle(T.start[v.key], v.x, v.z, v.h + (v.key.includes("bike") ? 0.35 : 0));
+  } else {
+    makeVehicle(T.start.supercar, START.x, START.z + 6, Math.PI / 2);
+    makeVehicle(T.start.suv, START.x - 4, START.z + 10, Math.PI / 2);
+    makeVehicle(T.start.superbike, START.x - 1, START.z - 5, Math.PI / 2 + 0.3);
+    makeVehicle(T.start.bike, START.x - 2.6, START.z - 5.8, Math.PI / 2 + 0.3);
+  }
 
-  const parkable = (e) => e.w >= 10 && e.district !== "park" && e.kind !== "roundabout" && e.len > 40;
-  for (const [district, n] of [["city", 95], ["paris", 60]]) {
-    const pool = district === "city" ? T.cityParked : T.parisParked;
+  const parkable = (e) => e.w >= 10 && e.district !== "park" && !["roundabout", "circus", "bridge"].includes(e.kind) && e.len > 40;
+  for (const [district, n] of [["city", 95], ["paris", 60], ["london", 70]]) {
+    const pool = district === "city" ? T.cityParked : district === "london" ? T.londonParked : T.parisParked;
     let placed = 0;
     for (let tries = 0; tries < n * 6 && placed < n; tries++) {
       const e = pickEdge((x) => parkable(x) && x.district === district);
@@ -671,7 +738,10 @@ export function swapToBurnt(v) {
 }
 
 // ---------------------------------------------------------------- traffic
-const SPEED = { avenue: 13, street: 10, broadway: 12, roundabout: 8, radial: 13, plaza: 9, major: 11, minor: 8, outer: 13, parkway: 15 };
+const SPEED = {
+  avenue: 13, street: 10, broadway: 12, roundabout: 8, radial: 13, plaza: 9, major: 11, minor: 8, outer: 13, parkway: 15,
+  high: 10, lane: 8, mews: 5, bridge: 12, circus: 7,
+};
 const TP = { x: 0, z: 0, tx: 0, tz: 1 };
 function laneTarget(t) {
   const p = pathAt(t.e, t.s, TP);
@@ -679,8 +749,8 @@ function laneTarget(t) {
   return [p.x + fz * t.e.lane, p.z - fx * t.e.lane, Math.atan2(fx, fz)];
 }
 export function spawnTraffic() {
-  for (const [district, n] of [["city", 90], ["paris", 45], ["park", 10]]) {
-    const pool = district === "paris" ? T.parisTraffic : T.cityTraffic;
+  for (const [district, n] of [["city", 90], ["paris", 45], ["park", 10], ["london", 75]]) {
+    const pool = district === "paris" ? T.parisTraffic : district === "london" ? T.londonTraffic : T.cityTraffic;
     for (let i = 0; i < n; i++) {
       const tpl = pick(pool), spec = SPECS[tpl.specKey];
       const e = pickEdge((x) => x.district === district && x.len > 20 + spec.hd * 2);

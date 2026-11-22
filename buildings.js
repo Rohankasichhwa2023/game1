@@ -11,6 +11,7 @@ import {
 } from "./engine.js";
 import { FAC, tileRoofTex, slateRoofTex, zincRoofTex, dormerTex, railingTex } from "./textures.js";
 import { edges, pathAt, roadDist, districtAt, PARIS, reserved, landmarks, WORLD } from "./roads.js";
+import { LON_CORE, lrand, lrr, lpick } from "./london.js";
 
 export const mapBuildings = [];  // minimap: {pts, color}
 export const roofs = [];         // double-jump targets
@@ -18,6 +19,7 @@ export const enterables = [];
 export const billboards = [];
 export const gardenTrees = [];   // spots for nature.js
 export const postFlush = [];
+export const homes = [];          // houses you can walk into (interiors are built on entry)
 
 const DT = { x: 300, z: -40 };   // downtown peak
 let A = null;
@@ -98,6 +100,14 @@ function initMats() {
     light: makeAcc("ceilLight", (() => { const m = new BABYLON.StandardMaterial("ceilLightM", scene); m.disableLighting = true; m.emissiveColor = hex("#fffbe8"); return m; })()),
   };
   A.fabrics = [A.blue, A.red, A.gray, A.green, A.mustard];
+  // London: front doors in the classic colours, plain wall colour per facade
+  A.lonDoors = ["#151515", "#7e1820", "#1d3461", "#24513a", "#d6a72c", "#5b2d4f", "#e9e5da"]
+    .map((c, i) => makeAcc("lonDoor" + i, litMat("lonDoorM" + i, hex(c), 0.35)));
+  A.fan = makeAcc("lonFan", litMat("lonFanM", hex("#2a3038"), 0.6));
+  A.iron = makeAcc("lonIron", litMat("lonIronM", hex("#17191b"), 0.3));
+  A.lonPlain = {};
+  for (const [k, F] of Object.entries(FAC.lon)) A.lonPlain[k] = makeAcc("lonPlain_" + k, litMat("lonPlainM_" + k, hex(F.style.wall)));
+  A.mansionPlain = makeAcc("lonPlainMansion", litMat("lonPlainMansionM", hex(FAC.lonMansion.style.wall)));
   postFlush.push(() => glow.addIncludedOnlyMesh(A.light.mesh));
 }
 
@@ -246,6 +256,46 @@ function planFor(e, district, px, pz) {
   return null;
 }
 
+// London: terraces come in runs of identical houses (same style, height,
+// door side); high streets get shops and the odd pub; mansion blocks dot the
+// residential streets; the old core mixes in glass towers.
+const LON_BRICK = ["stock", "stock", "stock", "red", "dark"];
+const LON_STUCCO = ["white", "white", "cream", "cream", "pink", "blue", "mint", "lemon"];
+function newRun(e, dCore) {
+  const stucco = e.kind === "mews" ? lrand() < 0.8 : lrand() < (dCore < 320 ? 0.45 : 0.25);
+  return {
+    left: Math.floor(lrr(4, 10)),
+    style: stucco ? lpick(LON_STUCCO) : lpick(LON_BRICK),
+    floors: e.kind === "mews" ? 2 : lpick([3, 3, 4, 4, 5]),
+    doorLeft: lrand() < 0.5,
+    bay: lrand() < 0.45,
+    w: lpick([5.2, 5.2, 7.8]),
+  };
+}
+function planLondon(e, run, px, pz) {
+  const dCore = Math.hypot(px - LON_CORE.x, pz - LON_CORE.z);
+  if (dCore < 170 && e.kind !== "mews" && lrand() < 0.4 * (1 - dCore / 170) + 0.12) {
+    const h = 30 + 120 * Math.exp(-dCore / 90) * lrr(0.5, 1.1);
+    const type = h > 80 ? lpick(["glass", "glass", "office"]) : lpick(["glass", "office", "beige"]);
+    return { cat: "tower", type, h, w: lrr(18, 30), d: lrr(18, 26), cellW: FAC[type].style.cellW, setback: 0.4, gap: 0 };
+  }
+  if (e.kind !== "mews" && e.kind !== "high" && lrand() < 0.09) {
+    return { cat: "mansion", w: lrr(18, 30), d: lrr(13, 16), cellW: 3.0, setback: 1.2, gap: lrr(0, 3), floors: lpick([5, 5, 6]) };
+  }
+  if (!run.cur || run.cur.left <= 0) run.cur = newRun(e, dCore);
+  const r = run.cur;
+  r.left--;
+  const shop = e.kind === "high" || e.kind === "circus";
+  return {
+    cat: "lterr", style: r.style, floors: Math.max(r.floors, shop ? 3 : 2), doorLeft: r.doorLeft,
+    bay: r.bay && !shop && !FAC.lon[r.style].style.stucco,
+    shop: shop ? (lrand() < 0.1 ? lpick(FAC.lonPubs) : lpick(FAC.lonShops)) : null,
+    w: shop ? lpick([5.2, 7.8, 7.8]) : r.w, d: lrr(10.5, 13.5), cellW: 2.6,
+    setback: shop || e.kind === "mews" ? 0.3 : 2.1, gap: 0,
+    door: lrand() < 0.85 ? lpick(A.lonDoors.slice(0, 6)) : A.lonDoors[6],
+  };
+}
+
 export const specs = [];
 export function planBuildings(START) {
   initMats();
@@ -254,12 +304,15 @@ export function planBuildings(START) {
     if (e.district === "park") continue;
     for (const side of [-1, 1]) {
       let s = 4;
+      const run = {};
       while (s < e.len - 4) {
         const p = pathAt(e, s, {});
         const rx = p.tz * side, rz = -p.tx * side;
         const probeOff = e.w / 2 + e.sw + 6;
         const district = districtAt(p.x + rx * probeOff, p.z + rz * probeOff);
-        const plan = planFor(e, district, p.x + rx * probeOff, p.z + rz * probeOff);
+        const plan = district === "london"
+          ? planLondon(e, run, p.x + rx * probeOff, p.z + rz * probeOff)
+          : planFor(e, district, p.x + rx * probeOff, p.z + rz * probeOff);
         if (!plan) { s += 6; continue; }
         let ok = false;
         for (let attempt = 0; attempt < 4 && !ok; attempt++) {
@@ -278,12 +331,97 @@ export function planBuildings(START) {
           s += w + plan.gap;
           ok = true;
         }
-        if (!ok) s += 3;
+        if (!ok) { s += 3; if (run.cur) run.cur.left = 0; }
       }
     }
   }
   chooseEnterables(START);
+  chooseHomes();
 }
+
+// About a third of the houses / brownstones / terraces / apartment blocks get
+// a working front door. A hash of the index (not the RNG) picks them, so the
+// rest of the world is unaffected.
+const HOME_KINDS = { brown: "Brownstone", house: "Town house", haus: "Apartment", lterr: "Terrace house", mansion: "Mansion flat" };
+function chooseHomes() {
+  specs.forEach((sp, i) => {
+    if (!HOME_KINDS[sp.cat] || sp.enter || sp.shop) return;
+    if (((Math.imul(i + 1, 2654435761) >>> 0) % 100) >= 35) return;
+    sp.home = true;
+  });
+}
+// Enterable homes are marked so you can spot them from down the street: a
+// glowing, pulsing cyan diamond over the door, two lit lanterns beside it and
+// a welcome mat.
+let markT = null, lampT = null, homeMarkMat = null;
+function initHomeMarkers() {
+  homeMarkMat = new BABYLON.StandardMaterial("homeMarkM", scene);
+  homeMarkMat.disableLighting = true;
+  homeMarkMat.emissiveColor = hex("#3fd0ff");
+  markT = BABYLON.MeshBuilder.CreatePolyhedron("homeMark", { type: 1, size: 0.24 }, scene);
+  markT.scaling.set(1, 1.6, 1); markT.bakeCurrentTransformIntoVertices();
+  markT.material = homeMarkMat; markT.isPickable = false; markT.setEnabled(false);
+  glow.addIncludedOnlyMesh(markT);
+  const lm = new BABYLON.StandardMaterial("homeLampM", scene);
+  lm.disableLighting = true; lm.emissiveColor = hex("#ffd58a");
+  lampT = BABYLON.MeshBuilder.CreateBox("homeLamp", { width: 0.17, height: 0.28, depth: 0.17 }, scene);
+  lampT.material = lm; lampT.isPickable = false; lampT.setEnabled(false);
+  glow.addIncludedOnlyMesh(lampT);
+}
+export function pulseHomeMarkers(t) {
+  if (!homeMarkMat) return;
+  const k = 0.6 + 0.4 * Math.sin(t * 3);
+  homeMarkMat.emissiveColor.set(0.25 * k, 0.82 * k, 1.0 * k);
+}
+function markDoor(sp, dx) {
+  if (!markT) initHomeMarkers();
+  const { hd } = sp;
+  const H = { brown: [4.4, 2.8, 1.0], house: [3.4, 2.15, 0.95], lterr: [4.1, 2.3, 0.95], haus: [4.1, 2.5, 1.15], mansion: [4.5, 2.4, 1.5] }[sp.cat];
+  const inst = (t, lx, y, lz) => {
+    const [x, z] = xfp(sp.xf, lx, lz);
+    const m = t.createInstance("hm");
+    m.position.set(x, y, z); m.rotation.y = sp.xf.yaw; m.isPickable = false; m.freezeWorldMatrix();
+  };
+  inst(markT, dx, H[0], -hd - 0.5);
+  setXF(sp.xf);
+  for (const sx of [-1, 1]) {
+    inst(lampT, dx + sx * H[2], H[1], -hd - 0.2);
+    addBox(dx + sx * H[2] - 0.03, H[1] + 0.12, -hd - 0.22, dx + sx * H[2] + 0.03, H[1] + 0.18, -hd, A.iron);
+  }
+  if (sp.cat === "house") addBox(-0.55, 0.165, -hd - 0.6, 0.55, 0.185, -hd - 0.05, A.red);
+  else if (sp.cat === "haus" || sp.cat === "mansion") addBox(-0.6, 0.01, -hd - 0.85, 0.6, 0.035, -hd - 0.1, A.red);
+  clearXF();
+}
+function registerHome(sp) {
+  const { hw, hd } = sp;
+  let dx = 0, stoop = 0.9;
+  if (sp.cat === "brown") { dx = hw > 4.5 ? -hw + 1.3 : 0; stoop = 1.9; }
+  else if (sp.cat === "lterr") dx = sp.doorLeft ? -hw + 1.3 : hw - 1.3;
+  const [tx, tz] = xfp(sp.xf, dx, -hd - stoop * 0.6);
+  const [ox, oz] = xfp(sp.xf, dx, -hd - stoop - 0.7);
+  markDoor(sp, dx);
+  homes.push({
+    kind: sp.cat, label: HOME_KINDS[sp.cat], no: homes.length + 1, district: sp.district,
+    hw, hd, floors: sp.floors ?? 3, doorLX: dx, style: sp.style,
+    tx, tz, ox, oz, outYaw: sp.xf.yaw + Math.PI,
+  });
+}
+
+// Interiors reuse the furniture builders below, pointed at a fresh set of
+// accumulators (same materials) so nothing merges into the city meshes.
+export function furnishWith(makeAcc2, fn) {
+  const prev = A, memo = new Map();
+  const map = (v) => {
+    if (!v || typeof v !== "object") return v;
+    if (v.mat) { if (!memo.has(v)) memo.set(v, makeAcc2(v)); return memo.get(v); }
+    if (Array.isArray(v)) return v.map(map);
+    return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, map(x)]));
+  };
+  A = map(prev);
+  try { fn(A, FURN); } finally { A = prev; }
+  return [...memo.values()];
+}
+const FURN = { bed, sofa, table, chair, desk, bookshelf, plant, item, bedroom, living, kitchen, partition };
 
 // ---------------------------------------------------------------- enterables selection
 const FLOOR_TIERS = [3, 3, 4, 5, 6, 7, 9, 11, 14, 18];
@@ -402,6 +540,10 @@ function buildHaus(sp) {
   const H = GF + floors * FH;
   if (sp.shop) fbox(pick(FAC.shopParis), -hw, 0, -hd, hw, GF, hd, null);
   else fbox(F, -hw, 0, -hd, hw, GF, hd, null);
+  if (sp.home) {                                                       // street door
+    addBox(-1.0, 0, -hd - 0.08, 1.0, 3.3, -hd, A.stone);
+    addBox(-0.75, 0.02, -hd - 0.13, 0.75, 3.0, -hd, A.door);
+  }
   fbox(F, -hw, GF, -hd, hw, H, hd, null);
   addBox(-hw - 0.12, GF - 0.12, -hd - 0.12, hw + 0.12, GF + 0.12, hd + 0.12, A.stone);       // string course
   addBox(-hw - 0.3, H - 0.1, -hd - 0.3, hw + 0.3, H + 0.45, hd + 0.3, A.stone);             // cornice
@@ -489,6 +631,114 @@ function buildHouse(sp) {
   }
   const [gx, gz] = xfp(sp.xf, rr(-hw + 1, hw - 1), hd + rr(2.5, 4.5));
   gardenTrees.push([gx, gz]);
+}
+
+// ---------------------------------------------------------------- London
+// Terrace house: brick or stucco front, stone cornice, parapet hiding a flat
+// roof, chimney stack on the party wall, panelled door with fanlight and
+// steps, black railings round the front area; optional bay window or shop.
+function buildLTerrace(sp) {
+  const F = FAC.lon[sp.style], FH = F.style.cellH, P = A.lonPlain[sp.style];
+  const { hw, hd } = sp;
+  const GF = sp.shop ? 4.2 : FH;
+  const H = GF + (sp.floors - 1) * FH;
+  const wallFace = (dir) => (dir === "+y" || dir === "-y" ? null : F.out);
+  if (sp.shop) {
+    fbox(sp.shop, -hw, 0, -hd, hw, GF, hd, null);
+    // upper floors keep the facade's own floor rows (UV origin one storey down)
+    addBox(-hw, GF, -hd, hw, H, hd, wallFace, { x: -hw, y: GF - FH, z: -hd });
+    addBox(-hw - 0.05, GF - 0.05, -hd - 0.35, hw + 0.05, GF + 0.12, -hd, A.stoneDark);   // shop cornice
+  } else {
+    fbox(F, -hw, 0, -hd, hw, H, hd, null);
+    addBox(-hw - 0.03, 0, -hd - 0.04, hw + 0.03, 0.45, -hd, A.stoneDark);                // plinth
+  }
+  addSolid(-hw, 0, -hd, hw, H + 0.9, hd);
+  // cornice + parapet + flat roof
+  addBox(-hw - 0.02, H - 0.12, -hd - 0.22, hw + 0.02, H + 0.12, -hd, A.stone);
+  addBox(-hw, H, -hd, hw, H + 0.9, hd, (dir) => (dir === "+y" ? A.roof : dir === "-y" ? null : P));
+  addBox(-hw - 0.02, H + 0.9, -hd - 0.06, hw + 0.02, H + 1.0, hd + 0.02, A.stone);
+  // chimney stack straddling the +x party wall, with a row of pots
+  const top = H + 1.0;
+  solidBox(hw - 0.42, top, -1.5, hw + 0.42, top + 1.7, 1.5, P);
+  addBox(hw - 0.5, top + 1.6, -1.58, hw + 0.5, top + 1.8, 1.58, A.stone);
+  for (const pz of [-1.05, -0.35, 0.35, 1.05]) addBox(hw - 0.13, top + 1.8, pz - 0.13, hw + 0.13, top + 2.25, pz + 0.13, A.pots);
+  roofs.push({ xf: sp.xf, hw, hd, lhw: hw - 0.8, lhd: hd - 0.8, top, mechs: [{ x: hw, z: 0, r: 1.9 }] });
+  sp.h = top;
+  if (sp.shop) return;
+
+  // front door bay
+  const dx = sp.doorLeft ? -hw + 1.3 : hw - 1.3;
+  addBox(dx - 0.78, 0.3, -hd - 0.07, dx + 0.78, 3.1, -hd, A.doorTrim);
+  addBox(dx - 0.55, 0.32, -hd - 0.11, dx + 0.55, 2.5, -hd, sp.door);
+  addBox(dx - 0.5, 2.58, -hd - 0.11, dx + 0.5, 2.98, -hd, A.fan);
+  addBox(dx - 0.04, 1.35, -hd - 0.16, dx + 0.04, 1.47, -hd - 0.1, A.pots);              // knocker
+  solidBox(dx - 0.85, 0, -hd - 0.95, dx + 0.85, 0.16, -hd, A.stoneDark);
+  solidBox(dx - 0.85, 0.16, -hd - 0.55, dx + 0.85, 0.3, -hd, A.stoneDark);
+  if (F.style.stucco) {
+    // portico: two columns carrying a little entablature
+    for (const sx of [-0.78, 0.78]) solidBox(dx + sx - 0.14, 0.3, -hd - 1.0, dx + sx + 0.14, 3.15, -hd - 0.72, A.doorTrim);
+    addBox(dx - 1.05, 3.15, -hd - 1.12, dx + 1.05, 3.45, -hd, A.doorTrim);
+  }
+  // bay window on the other bay (two storeys)
+  if (sp.bay && hw * 2 >= 5.1) {
+    const bx = sp.doorLeft ? hw - 1.3 : -hw + 1.3;
+    addBox(bx - 1.3, 0.3, -hd - 0.75, bx + 1.3, 2 * FH - 0.25, -hd,
+      (dir) => (dir === "+y" ? A.slate : dir === "-y" ? null : F.out), { x: bx - 1.3, y: 0, z: -hd - 0.75 });
+    addBox(bx - 1.36, 2 * FH - 0.3, -hd - 0.82, bx + 1.36, 2 * FH - 0.15, -hd, A.stone);
+    addSolid(bx - 1.3, 0, -hd - 0.75, bx + 1.3, 2 * FH, -hd);
+  }
+  // area railings along the front, with a gap at the steps
+  if (sp.setback > 1.5) {
+    const zr = -hd - sp.setback + 0.3;
+    for (const [x0, x1] of [[-hw, dx - 0.95], [dx + 0.95, hw]]) {
+      if (x1 - x0 < 0.2) continue;
+      addBox(x0, 0, zr - 0.03, x1, 1.05, zr + 0.03, A.railing, { x: 0, y: 0, z: 0 });
+      addBox(x0, 1.0, zr - 0.05, x1, 1.08, zr + 0.05, A.iron);
+      addSolid(x0, 0, zr - 0.05, x1, 1.08, zr + 0.05);
+    }
+    for (const sx of [dx - 0.95, dx + 0.95]) solidBox(sx - 0.07, 0, zr - 0.07, sx + 0.07, 1.25, zr + 0.07, A.iron);
+  }
+}
+
+// Edwardian mansion block: red brick + stone bands, slate roof with gables.
+function buildMansion(sp) {
+  const F = FAC.lonMansion, FH = F.style.cellH, P = A.mansionPlain;
+  const { hw, hd } = sp;
+  const H = sp.floors * FH;
+  fbox(F, -hw, 0, -hd, hw, H, hd, null);
+  addSolid(-hw, 0, -hd, hw, H, hd);
+  addBox(-hw - 0.05, 0, -hd - 0.05, hw + 0.05, 0.6, hd + 0.05, A.stoneDark);
+  addBox(-hw - 0.25, H - 0.15, -hd - 0.25, hw + 0.25, H + 0.2, hd + 0.25, A.stone);
+  // entrance
+  addBox(-1.3, 0.05, -hd - 0.4, 1.3, 3.6, -hd, A.stone);
+  addBox(-0.9, 0.05, -hd - 0.45, 0.9, 2.9, -hd, A.door);
+  addBox(-1.6, 3.6, -hd - 0.9, 1.6, 3.85, -hd, A.stone);
+  // slate roof, ridge parallel to the street
+  const ov = 0.35, pitch = 0.75, R = H + (hd + ov) * pitch;
+  const g = [0.004, 0.004];
+  for (const sd of [-1, 1]) {
+    addPoly(A.slate, [[-hw - ov, H, sd * (hd + ov)], [hw + ov, H, sd * (hd + ov)], [hw + ov, R, 0], [-hw - ov, R, 0]],
+      [0, H, 0], (p) => [p[0] / 2.4, (p[1] - H) * 1.25 / 2.4]);
+    addPoly(P, [[sd * hw, H, -hd], [sd * hw, H, hd], [sd * hw, R - ov * pitch, 0]], [0, H, 0], () => g);
+  }
+  addBox(-hw - ov, R - 0.08, -0.16, hw + ov, R + 0.1, 0.16, A.ridge);
+  addSolid(-hw, H, -hd / 2, hw, H + (hd / 2) * pitch, hd / 2);
+  // street-facing gables
+  const n = Math.max(1, Math.floor((hw * 2) / 9));
+  for (let k = 0; k < n; k++) {
+    const gx = -hw + (hw * 2 * (k + 0.5)) / n, gw = 2.6, gh = 3.4, z0 = -hd - 0.02, z1 = -hd + 4.2;
+    addPoly(P, [[gx - gw, H, z0], [gx + gw, H, z0], [gx, H + gh, z0]], [gx, H, z1], () => g);
+    for (const sd of [-1, 1]) {
+      addPoly(A.slate, [[gx + sd * (gw + 0.25), H - 0.15, z0 - 0.25], [gx, H + gh + 0.2, z0 - 0.25], [gx, H + gh + 0.2, z1], [gx + sd * (gw + 0.25), H - 0.15, z1]],
+        [gx, H, z1 + 2], (p) => [p[2] / 2.4, p[1] / 2.4]);
+    }
+    addBox(gx - 0.5, H + 0.6, z0 - 0.08, gx + 0.5, H + 2.0, z0, A.fan);              // gable window
+  }
+  for (const cx of [-hw + 1.5, hw - 1.5]) {
+    addBox(cx - 0.5, H, -0.6, cx + 0.5, R + 1.4, 0.6, P);
+    for (const pz of [-0.3, 0.3]) addBox(cx - 0.14, R + 1.4, pz - 0.14, cx + 0.14, R + 1.85, pz + 0.14, A.pots);
+  }
+  sp.h = R;
 }
 
 // ---------------------------------------------------------------- enterable buildings
@@ -796,7 +1046,7 @@ function buildBillboards() {
 }
 
 // ---------------------------------------------------------------- build everything
-const MAPC = { tower: "#2c2e36", deco: "#34363f", brown: "#3e2f28", haus: "#4a4236", house: "#5b4a3c" };
+const MAPC = { tower: "#2c2e36", deco: "#34363f", brown: "#3e2f28", haus: "#4a4236", house: "#5b4a3c", lterr: "#4b3d35", mansion: "#5a3328" };
 export function buildBuildings() {
   for (const sp of specs) {
     setXF(sp.xf);
@@ -805,12 +1055,16 @@ export function buildBuildings() {
     else if (sp.cat === "deco") buildDeco(sp);
     else if (sp.cat === "brown") buildBrown(sp);
     else if (sp.cat === "haus") buildHaus(sp);
+    else if (sp.cat === "lterr") buildLTerrace(sp);
+    else if (sp.cat === "mansion") buildMansion(sp);
     else buildHouse(sp);
     clearXF();
+    if (sp.home) registerHome(sp);
     mapBuildings.push({
       pts: fpCorners(sp),
       color: sp.enter ? "#c4902f" : MAPC[sp.cat],
       door: sp.enter ? xfp(sp.xf, 0, -sp.hd) : null,
+      homeDoor: sp.home ? [homes[homes.length - 1].tx, homes[homes.length - 1].tz] : null,
     });
   }
   buildBillboards();

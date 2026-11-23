@@ -40,7 +40,6 @@ export function initMission() {
   injectUI();
   storyHooks.choices = storyChoices;
   if (M.stage >= 4) { setGone(TARGET); }
-  else setTimeout(() => showBanner(M.stage === 0 ? "MISSION 1 — THE HOLLOWAY JOB" : "MISSION 1 — RESUMED", STAGES[M.stage].title), 1200);
   applyStage();
 }
 function setStage(s, bannerText) {
@@ -234,7 +233,7 @@ function renderHud(ctx) {
   const html = M.stage >= 4
     ? `<div class="mt">MISSION 1 — COMPLETE</div><div class="mo">The Holloway Job</div><div class="md">${st.hint}</div>`
     : `<div class="mt">MISSION 1 — THE HOLLOWAY JOB</div><div class="mo">${st.title}</div><div class="md">${st.hint}</div>` +
-      (dist !== null ? `<div class="ms">${obj.label} · ${dist} m${extra ? " · " + extra : ""}</div>` : "");
+      (obj ? `<div class="ms">${obj.label}${extra ? " · " + extra : ""}</div>` : "");
   if (html !== lastHtml) { hud.innerHTML = html; lastHtml = html; }
   if (M.stage >= 4 && !doneHideAt) doneHideAt = performance.now() + 15000;      // the "complete" card fades after a while
   hud.style.display = M.stage >= 4 && performance.now() > doneHideAt ? "none" : "block";

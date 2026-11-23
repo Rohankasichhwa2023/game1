@@ -118,7 +118,8 @@ function makeArm(side) {
   el.rotation.x = -0.3;
   cap(0.06, 0.3, skinMat, el, 0, -0.14, 0);
   sph(0.1, skinMat, el, 0, -0.31, 0.01);
-  return { sh, el };
+  const hand = pivot(el, 0, -0.33, 0.02);          // where a web leaves the wrist
+  return { sh, el, hand };
 }
 function makeLeg(side) {
   const hip = pivot(body, side * 0.11, 0.93, 0);
@@ -319,7 +320,7 @@ function setTime(h) { tod = ((h % 24) + 24) % 24; applyTimeOfDay(); }
 
 // ---------------------------------------------------------------- input
 const keys = {};
-let lastSpaceAt = 0, superJumpQueued = false, interactQueued = false, swingQueued = false;
+let lastSpaceAt = 0, superJumpQueued = false, interactQueued = false, swingQueued = false, zipQueued = false;
 window.addEventListener("keydown", (e) => {
   sfx.unlock();                                  // browsers only allow audio after a key / click
   if (e.code === "KeyK" && !e.repeat) { toast(sfx.toggleMute() ? "SOUND OFF<small>K to turn it back on</small>" : "SOUND ON<small>K to mute</small>"); return; }
@@ -344,13 +345,14 @@ window.addEventListener("keydown", (e) => {
   if (e.code === "KeyN") skipTime();
 });
 window.addEventListener("keyup", (e) => { keys[e.code] = false; });
-window.addEventListener("blur", () => { for (const k in keys) keys[k] = false; firing = false; aiming = false; webHeld = false; });
+window.addEventListener("blur", () => { for (const k in keys) keys[k] = false; firing = false; aiming = false; webHeld = false; zipHeld = false; });
 
 let yaw = 0, pitch = 0.12, camDist = 6;
 let firing = false, aiming = false, lastMouseAt = 0;
 // Left click uses the selected tool: "gun" (shoot, right click aims) or
-// "web" (press = shoot a web line, hold = swing, release = let go). F toggles.
-let weapon = "gun", webHeld = false;
+// "web" (press = shoot a web line, hold = swing, release = let go; right
+// click = web zip). F toggles.
+let weapon = "gun", webHeld = false, zipHeld = false;
 const locked = () => document.pointerLockElement === canvas;
 // Pointer events (Babylon's preventDefault on pointerdown suppresses mouse
 // events). Buttons come from the bitmask so left+right together works.
@@ -370,20 +372,24 @@ const syncButtons = (e) => {
   } else {
     if (left && !webHeld) swingQueued = true;      // fresh press → fire a web
     webHeld = left;
+    const right = (e.buttons & 2) !== 0;
+    if (right && !zipHeld) zipQueued = true;       // fresh right press → web zip
+    zipHeld = right;
     firing = false; aiming = false;
   }
 };
 function toggleWeapon() {
   weapon = weapon === "gun" ? "web" : "gun";
-  firing = false; aiming = false; webHeld = false;  // a swing in progress lets go
+  firing = false; aiming = false; webHeld = false; zipHeld = false;  // a swing in progress lets go
   if (!vehicle) gun.setEnabled(weapon === "gun");
 }
-const weaponLabel = () => (weapon === "gun" ? "Gun" : "Web shooter") + " <small><kbd>F</kbd> switch</small>";
+const weaponLabel = () => weapon === "gun" ? "Gun <small><kbd>F</kbd> switch</small>"
+  : "Web shooter <small><kbd>F</kbd> switch</small>";
 gun.setEnabled(weapon === "gun");
 canvas.addEventListener("pointerdown", (e) => {
   if (!locked()) {
     swallowClick = true;
-    firing = false; aiming = false; webHeld = false;
+    firing = false; aiming = false; webHeld = false; zipHeld = false;
     const p = canvas.requestPointerLock && canvas.requestPointerLock();
     if (p && p.catch) p.catch(() => {});
     return;
@@ -394,14 +400,14 @@ window.addEventListener("pointerup", syncButtons);
 canvas.addEventListener("contextmenu", (e) => e.preventDefault());
 document.addEventListener("pointerlockchange", () => {
   document.getElementById("clickToPlay").style.display = locked() ? "none" : "block";
-  if (!locked()) { firing = false; aiming = false; webHeld = false; }
+  if (!locked()) { firing = false; aiming = false; webHeld = false; zipHeld = false; }
 });
 document.addEventListener("pointermove", (e) => {
   if (!locked()) return;
   syncButtons(e);
   const sens = aiming ? 0.0013 : 0.0025;
   yaw += e.movementX * sens;
-  pitch = clamp(pitch + e.movementY * sens * 0.8, -0.6, 1.25);
+  pitch = clamp(pitch + e.movementY * sens * 0.8, -1.45, 1.25);   // -1.45 ≈ looking almost straight up
   if (Math.abs(e.movementX) > 1) lastMouseAt = performance.now();
 });
 canvas.addEventListener("wheel", (e) => { camDist = clamp(camDist + Math.sign(e.deltaY) * 0.8, 2, 18); e.preventDefault(); }, { passive: false });
@@ -485,23 +491,50 @@ function startSuperJump() {
 }
 
 // ---------------------------------------------------------------- web swinging
-// With the web shooter selected, click to shoot a web at a building above and
-// ahead (the way the camera faces); hold to swing on it as a pendulum, release
-// to let go and fly on with the momentum; click again mid-air to chain.
-// From the ground the web first yanks you up off the street (a launch boost),
-// then the rope goes taut and you swing on normally.
-// W pumps, A/D steer, S brakes; swinging up level with the anchor lets go
-// automatically with a fling.
-const WEB_RANGE = 75, SWING_MAX = 46, HAND = 1.6;
-let swing = null;                      // { a: anchor V3, len, minLen, vx, vy, vz }
-const airVel = { x: 0, z: 0 };         // horizontal momentum carried after a swing
-const webMat = new BABYLON.StandardMaterial("webM", scene);
-webMat.disableLighting = true;
-webMat.emissiveColor = new C3(0.9, 0.92, 0.95);
-const web = MB.CreateCylinder("web", { diameter: 0.035, height: 1, tessellation: 5 }, scene);
-web.rotation.x = Math.PI / 2; web.bakeCurrentTransformIntoVertices();   // length along +z
-web.material = webMat; web.isPickable = false; web.setEnabled(false);
+// With the web shooter selected the game keeps a web target picked for you: a
+// spot on a building above and ahead (the way you're travelling / looking),
+// marked by a white reticle. Left click shoots a web at it: hold to swing on it
+// as a pendulum, release to let go and fly on with your momentum, click again
+// mid-air to chain. Right click is a web zip to the roof edge under the amber
+// reticle (near the crosshair): it yanks you there and you vault up onto it.
+// Swinging: W pumps and steers toward the camera, A / D carve, S brakes, Shift
+// pumps harder. From the street the first web launches you up off your feet.
+// Swinging up level with the anchor lets go automatically with a fling.
+const WEB_RANGE = 70, SWING_MAX = 46, HAND = 1.6, ZIP_RANGE = 55, ZIP_MAX = 34;
+let swing = null;   // { ax, ay, az, len, reelTo, reelRate, launch, vx, vy, vz, age, shot, shotDur, arm }
+let zip = null;     // { ax, ay, az, nx, nz, top, vx, vy, vz, t, age, shot, shotDur, arm, best, bestT }
+const airVel = { x: 0, z: 0 };         // horizontal momentum carried through the air after a swing / zip
+const pvel = { x: 0, y: 0, z: 0 };     // measured player velocity (smoothed), see trackVelocity
+const lastPos = pos.clone();
+const vel = { x: 0, y: 0, z: 0 }, mom = { x: 0, y: 0, z: 0 };
 
+function trackVelocity(dt) {
+  if (dt <= 0) return;
+  const vx = (pos.x - lastPos.x) / dt, vy2 = (pos.y - lastPos.y) / dt, vz = (pos.z - lastPos.z) / dt;
+  lastPos.copyFrom(pos);
+  if (Math.abs(vx) + Math.abs(vy2) + Math.abs(vz) > 150) return;     // teleported (doors, cars, start)
+  const k = Math.min(1, dt * 15);
+  pvel.x += (vx - pvel.x) * k; pvel.y += (vy2 - pvel.y) * k; pvel.z += (vz - pvel.z) * k;
+}
+// The player's current velocity (exact while on a web, measured otherwise).
+function playerVel() {
+  const w = swing || zip;
+  if (w) { vel.x = w.vx; vel.y = w.vy; vel.z = w.vz; }
+  else if (vehicle) { vel.x = Math.sin(vehicle.heading) * vehicle.speed; vel.y = 0; vel.z = Math.cos(vehicle.heading) * vehicle.speed; }
+  else { vel.x = pvel.x; vel.y = pvel.y; vel.z = pvel.z; }
+  return vel;
+}
+// The momentum a new web starts from, so attaching never stops you dead.
+function takeMomentum() {
+  const w = swing || zip;
+  if (w) { mom.x = w.vx; mom.y = w.vy; mom.z = w.vz; }
+  else if (onGround) { mom.x = pvel.x; mom.y = 0; mom.z = pvel.z; }
+  else if (airVel.x || airVel.z) { mom.x = airVel.x; mom.y = vy; mom.z = airVel.z; }
+  else { mom.x = pvel.x; mom.y = vy; mom.z = pvel.z; }
+  return mom;
+}
+
+// ---- targeting
 // Distance along a ray to the first building/wall (not vehicles), or null.
 function rayToSolid(o, d, max) {
   let best = max, hit = false;
@@ -516,212 +549,603 @@ function rayToSolid(o, d, max) {
   }
   return hit ? best : null;
 }
-// Fan rays upward around the camera heading; prefer high anchors well ahead
-// (from the ground: something tall enough to launch you up on).
-function findAnchor(fromGround = false) {
-  const o = new V3(pos.x, pos.y + HAND, pos.z);
-  let best = null, bestScore = -Infinity;
-  for (const yo of [0, -0.3, 0.3, -0.6, 0.6, -0.9, 0.9]) {
-    for (const el of [0.55, 0.8, 1.05, 1.3]) {
-      const h = yaw + yo, c = Math.cos(el);
-      const d = new V3(Math.sin(h) * c, Math.sin(el), Math.cos(h) * c);
-      const t = rayToSolid(o, d, WEB_RANGE);
-      if (t === null || t < 7) continue;
-      const rise = d.y * t;
-      if (rise < (fromGround ? 9 : 5)) continue;
-      const score = c * t * 0.7 + Math.min(rise, 35) * (fromGround ? 0.9 : 0.5) - Math.abs(yo) * 10 - Math.abs(t - (fromGround ? 26 : 32)) * 0.2;
-      if (score > bestScore) { bestScore = score; best = o.add(d.scale(t)); }
+const _ro = new V3(), _rd = new V3();
+// Can a web from the hand reach (x, y, z)? `slack`: how far short of it a hit may be (the wall it sticks to).
+function losClear(x, y, z, slack) {
+  const hx = pos.x, hy = pos.y + HAND, hz = pos.z;
+  const dx = x - hx, dy = y - hy, dz = z - hz, dist = Math.hypot(dx, dy, dz);
+  if (dist < 0.5) return true;
+  _ro.set(hx, hy, hz); _rd.set(dx / dist, dy / dist, dz / dist);
+  const t = rayToSolid(_ro, _rd, dist + 0.5);
+  return t === null || t >= dist - slack;
+}
+// Point on the footprint of a (rotated) box nearest the ideal point (ix, iz), on
+// a face the player at (hx, hz) can see, pushed `out` m off the wall; plus its
+// outward normal. Results in SP (world). False when the player is over / inside it.
+const SP = { x: 0, z: 0, nx: 0, nz: 0 };
+function surfacePoint(r, x0, x1, z0, z1, ix, iz, hx, hz, out) {
+  let lx = ix, lz = iz, px = hx, pz = hz;
+  if (r) {
+    let dx = ix - r.cx, dz = iz - r.cz;
+    lx = dx * r.c - dz * r.s; lz = dx * r.s + dz * r.c;
+    dx = hx - r.cx; dz = hz - r.cz;
+    px = dx * r.c - dz * r.s; pz = dx * r.s + dz * r.c;
+  }
+  const ex0 = x0 - px, ex1 = px - x1, ez0 = z0 - pz, ez1 = pz - z1;
+  if (ex0 <= 0 && ex1 <= 0 && ez0 <= 0 && ez1 <= 0) return false;
+  let cx = clamp(lx, x0, x1), cz = clamp(lz, z0, z1), nx = lx - cx, nz = lz - cz;
+  if ((nx === 0 && nz === 0) || (px - cx) * nx + (pz - cz) * nz <= 0) {
+    // ideal point inside the footprint (or round the back): use the face toward the player
+    if (ex0 >= ex1 && ex0 >= ez0 && ex0 >= ez1) { cx = x0; cz = clamp(lz, z0, z1); nx = -1; nz = 0; }
+    else if (ex1 >= ez0 && ex1 >= ez1) { cx = x1; cz = clamp(lz, z0, z1); nx = 1; nz = 0; }
+    else if (ez0 >= ez1) { cz = z0; cx = clamp(lx, x0, x1); nx = 0; nz = -1; }
+    else { cz = z1; cx = clamp(lx, x0, x1); nx = 0; nz = 1; }
+  } else { const nl = Math.hypot(nx, nz); nx /= nl; nz /= nl; }
+  cx += nx * out; cz += nz * out;
+  if (r) {
+    SP.x = r.cx + cx * r.c + cz * r.s; SP.z = r.cz - cx * r.s + cz * r.c;
+    SP.nx = nx * r.c + nz * r.s; SP.nz = -nx * r.s + nz * r.c;
+  } else { SP.x = cx; SP.z = cz; SP.nx = nx; SP.nz = nz; }
+  return true;
+}
+// A few best-scoring candidates (reused objects), checked for line of sight best-first.
+const POOL = 4, pool = [];
+for (let i = 0; i < POOL; i++) pool.push({ x: 0, y: 0, z: 0, nx: 0, nz: 0, top: 0, score: 0 });
+let poolN = 0;
+function poolAdd(x, y, z, score, nx = 0, nz = 0, top = 0) {
+  if (poolN === POOL && score <= pool[POOL - 1].score) return;
+  let i = poolN < POOL ? poolN++ : POOL - 1;
+  const slot = pool[i];
+  while (i > 0 && pool[i - 1].score < score) { pool[i] = pool[i - 1]; i--; }
+  pool[i] = slot;
+  slot.x = x; slot.y = y; slot.z = z; slot.nx = nx; slot.nz = nz; slot.top = top; slot.score = score;
+}
+const anchorT = { ok: false, ground: false, aimed: false, x: 0, y: 0, z: 0 };
+const zipT = { ok: false, x: 0, y: 0, z: 0, nx: 0, nz: 0, top: 0 };
+
+// Swing anchor: on a building wall above and ahead. Ideal: ~reach m ahead (further
+// the faster you go), ~idealRise m up; side walls along the street are preferred
+// over a wall straight across the path (you'd swing into it) unless you can clear it.
+// Smart aim: the web goes exactly where the crosshair is when it's on a building
+// the web can reach (crosshair glows blue), otherwise to the auto pick below.
+// Crosshair aim: where the screen centre meets a building, if a web from the hand
+// can reach it and it's high enough to hang from.
+const _ao = new V3(), _ad = new V3();
+function aimAnchor(ground) {
+  camera.getDirectionToRef(BABYLON.Axis.Z, _ad);
+  _ao.copyFrom(camera.position);
+  const hx = pos.x, hy = pos.y + HAND, hz = pos.z;
+  const along = (hx - _ao.x) * _ad.x + (hy - _ao.y) * _ad.y + (hz - _ao.z) * _ad.z;   // the player's depth on the ray
+  const t = rayToSolid(_ao, _ad, Math.max(0, along) + WEB_RANGE + 2);
+  if (t === null || t < along - 0.5) return false;           // sky, or something behind the player
+  const b = t - 0.25;                                        // just off the surface
+  const x = _ao.x + _ad.x * b, y = _ao.y + _ad.y * b, z = _ao.z + _ad.z * b;
+  const dy = y - hy, dist = Math.hypot(x - hx, dy, z - hz);
+  if (dist > WEB_RANGE || dist < 4 || dy < (ground ? 6 : 2)) return false;
+  if (!losClear(x, y, z, 1.5)) return false;
+  anchorT.ok = true; anchorT.aimed = true; anchorT.x = x; anchorT.y = y; anchorT.z = z;
+  return true;
+}
+function scanAnchor() {
+  anchorT.ok = false; anchorT.aimed = false;
+  const hx = pos.x, hy = pos.y + HAND, hz = pos.z;
+  const ground = onGround || pos.y - supportHeight(pos.x, pos.z, pos.y + 0.01) < 1.2;
+  anchorT.ground = ground;
+  if (aimAnchor(ground)) return;
+  const v = playerVel(), hs = Math.hypot(v.x, v.z), w = Math.min(1, hs / 16) * 0.8;
+  let fx = Math.sin(yaw), fz = Math.cos(yaw);
+  if (hs > 1) { fx += (v.x / hs) * w; fz += (v.z / hs) * w; }
+  const fl = Math.hypot(fx, fz);
+  if (fl < 0.1) { fx = Math.sin(yaw); fz = Math.cos(yaw); } else { fx /= fl; fz /= fl; }
+  const rx = fz, rz = -fx;
+  const reach = clamp(15 + hs * 0.4, 15, 32);
+  const minRise = ground ? 8 : 4, idealRise = ground ? 17 : clamp(11 + hs * 0.15, 11, 17);
+  const qx = hx + fx * 26, qz = hz + fz * 26, R = 46;
+  const sw = swing;
+  poolN = 0;
+  for (const s of query(qx - R, qx + R, qz - R, qz + R)) {
+    if (s.vehicle || s.maxY < 8 || s.maxY - 0.3 < hy + minRise) continue;
+    if (s.lx1 - s.lx0 < 2.5 || s.lz1 - s.lz0 < 2.5) continue;        // lamp posts, trees, signs
+    const lo = Math.max(s.minY + 2, hy + minRise), hi = s.maxY - 0.3;
+    if (lo > hi) continue;
+    const ay = clamp(hy + idealRise, lo, hi), dy = ay - hy;
+    for (let k = -1; k <= 1; k++) {
+      const ix = hx + fx * reach + rx * k * 7, iz = hz + fz * reach + rz * k * 7;
+      if (!surfacePoint(s.rot, s.lx0, s.lx1, s.lz0, s.lz1, ix, iz, hx, hz, 0.25)) break;
+      const dx = SP.x - hx, dz = SP.z - hz, dist = Math.hypot(dx, dy, dz);
+      if (dist > WEB_RANGE || dist < 7) continue;
+      const fwd = dx * fx + dz * fz, lat = dx * rx + dz * rz;
+      if (fwd < 2.5 || Math.abs(lat) > fwd * 1.3 + 4) continue;
+      if (sw && Math.abs(SP.x - sw.ax) + Math.abs(ay - sw.ay) + Math.abs(SP.z - sw.az) < 5) continue;
+      const headOn = -(SP.nx * fx + SP.nz * fz);
+      let score = -Math.abs(fwd - reach) * 0.5 - Math.max(0, Math.abs(lat) - 6) * 0.35 - Math.abs(dy - idealRise) * 0.45;
+      if (headOn > 0.6) score -= Math.max(0, s.maxY - hy - 12) * 0.6 * headOn;
+      else if (Math.abs(lat) > 3) score += 2.5;
+      poolAdd(SP.x, ay, SP.z, score);
     }
   }
-  return best;
+  for (let i = 0; i < poolN; i++) {
+    const c = pool[i];
+    if (losClear(c.x, c.y, c.z, 1.5)) { anchorT.ok = true; anchorT.x = c.x; anchorT.y = c.y; anchorT.z = c.z; return; }
+  }
+}
+// Zip point: just outside the rim of a roof near the crosshair.
+const _cd = new V3();
+function scanZip() {
+  zipT.ok = false;
+  camera.getDirectionToRef(BABYLON.Axis.Z, _cd);
+  const hx = pos.x, hy = pos.y + HAND, hz = pos.z;
+  const chl = Math.hypot(_cd.x, _cd.z) || 1, cfx = _cd.x / chl, cfz = _cd.z / chl;
+  poolN = 0;
+  for (const r of roofs) {
+    const ddx = r.xf.cx - hx, ddz = r.xf.cz - hz;
+    if (Math.abs(ddx) > ZIP_RANGE + 30 || Math.abs(ddz) > ZIP_RANGE + 30) continue;
+    if (r.top < pos.y + 1 || r.top > hy + 45) continue;
+    const dc = Math.hypot(ddx, ddz);
+    if (!surfacePoint(r.xf, -r.hw, r.hw, -r.hd, r.hd, hx + cfx * dc, hz + cfz * dc, hx, hz, 0.75)) continue;
+    const ty = r.top + 1.6;              // body arrives with its feet just above the rim
+    const dx = SP.x - hx, dy = ty - hy, dz = SP.z - hz, dist = Math.hypot(dx, dy, dz);
+    if (dist > ZIP_RANGE || dist < 4) continue;
+    const cosA = (dx * _cd.x + dy * _cd.y + dz * _cd.z) / dist;
+    if (cosA < 0.85) continue;
+    poolAdd(SP.x, ty, SP.z, cosA - dist * 0.002, SP.nx, SP.nz, r.top);
+  }
+  for (let i = 0; i < poolN; i++) {
+    const c = pool[i];
+    if (losClear(c.x, c.y, c.z, 0.4)) {
+      zipT.ok = true; zipT.x = c.x; zipT.y = c.y; zipT.z = c.z; zipT.nx = c.nx; zipT.nz = c.nz; zipT.top = c.top;
+      return;
+    }
+  }
+}
+
+// ---- web line, reticles, puffs
+const webMat = new BABYLON.StandardMaterial("webM", scene);
+webMat.disableLighting = true;
+webMat.emissiveColor = new C3(0.9, 0.92, 0.95);
+const ropeT = MB.CreateCylinder("webSeg", { diameter: 0.045, height: 1, tessellation: 5 }, scene);
+ropeT.rotation.x = Math.PI / 2; ropeT.bakeCurrentTransformIntoVertices();   // length along +z
+ropeT.material = webMat; ropeT.isPickable = false; ropeT.setEnabled(false);
+const ROPE_N = 10, ropeSegs = [], ropePts = [];
+for (let i = 0; i < ROPE_N; i++) { const m = ropeT.createInstance("webSeg"); m.isPickable = false; m.setEnabled(false); ropeSegs.push(m); }
+for (let i = 0; i <= ROPE_N; i++) ropePts.push(new V3());
+let ropeOn = false, ropeFx = null;     // ropeFx: { kind: "miss" | "release", t, ... }
+function hideRope() {
+  if (!ropeOn) return;
+  ropeOn = false;
+  for (const m of ropeSegs) m.setEnabled(false);
+}
+// The web as a chain of short segments: straight when taut, sagging in the middle
+// when slack and rippling sideways (`wave`) just after it's shot.
+function drawRope(hx, hy, hz, ex, ey, ez, sag, wave, phase) {
+  const lx = ex - hx, ly = ey - hy, lz = ez - hz;
+  const hl = Math.hypot(lx, lz) || 1, px = -lz / hl, pz = lx / hl;
+  for (let i = 0; i <= ROPE_N; i++) {
+    const t = i / ROPE_N, b = 4 * t * (1 - t), rip = wave * Math.sin(t * 9.4 - phase) * b;
+    ropePts[i].set(hx + lx * t + px * rip, hy + ly * t - sag * b + rip * 0.4, hz + lz * t + pz * rip);
+  }
+  for (let i = 0; i < ROPE_N; i++) {
+    const a = ropePts[i], b = ropePts[i + 1], m = ropeSegs[i];
+    const dx = b.x - a.x, dy = b.y - a.y, dz = b.z - a.z;
+    m.position.set((a.x + b.x) / 2, (a.y + b.y) / 2, (a.z + b.z) / 2);
+    m.scaling.z = Math.hypot(dx, dy, dz) + 0.02;
+    m.rotation.x = Math.atan2(-dy, Math.hypot(dx, dz));
+    m.rotation.y = Math.atan2(dx, dz);
+    if (!ropeOn) m.setEnabled(true);
+  }
+  ropeOn = true;
+}
+// World position of a hand (forces the arm's matrices so the web starts there this frame).
+function handPos(arm) {
+  player.computeWorldMatrix(true); body.computeWorldMatrix(true);
+  arm.sh.computeWorldMatrix(true); arm.el.computeWorldMatrix(true); arm.hand.computeWorldMatrix(true);
+  return arm.hand.getAbsolutePosition();
+}
+const puffT = emissiveTemplate("webPuff", MB.CreateSphere("webPuff", { diameter: 1, segments: 6 }, scene), new C3(0.85, 0.88, 0.95));
+function webPuff(x, y, z, n, size) {
+  for (let i = 0; i < n; i++) {
+    const m = puffT.createInstance("wp");
+    const a = Math.random() * Math.PI * 2, sp = 1.5 + Math.random() * 2.5, up = (Math.random() - 0.3) * 1.6;
+    const vx = Math.cos(a) * sp, vyy = up * sp * 0.6, vz = Math.sin(a) * sp, s0 = size * (0.6 + Math.random() * 0.6);
+    const life = 0.25 + Math.random() * 0.12;
+    m.position.set(x, y, z); m.scaling.setAll(s0);
+    addEffect(m, life, (k, mesh) => {
+      const t = k * life;
+      mesh.position.set(x + vx * t, y + vyy * t - 3 * t * t, z + vz * t);
+      mesh.scaling.setAll(s0 * (1 - k));
+    });
+  }
+}
+function reticleTex(name, col) {
+  const t = canvasTex(name, 128, (ctx, S) => {
+    ctx.clearRect(0, 0, S, S);
+    ctx.strokeStyle = "rgba(0,0,0,0.45)"; ctx.lineWidth = 16;
+    ctx.beginPath(); ctx.arc(S / 2, S / 2, S * 0.33, 0, Math.PI * 2); ctx.stroke();
+    ctx.strokeStyle = col; ctx.lineWidth = 9;
+    ctx.beginPath(); ctx.arc(S / 2, S / 2, S * 0.33, 0, Math.PI * 2); ctx.stroke();
+    ctx.fillStyle = col; ctx.beginPath(); ctx.arc(S / 2, S / 2, S * 0.09, 0, Math.PI * 2); ctx.fill();
+  }, false);
+  t.hasAlpha = true; t.wrapU = t.wrapV = BABYLON.Texture.CLAMP_ADDRESSMODE;
+  return t;
+}
+function reticleMesh(name, col) {
+  const tex = reticleTex(name + "T", col);
+  const mat = new BABYLON.StandardMaterial(name + "M", scene);
+  mat.disableLighting = true; mat.diffuseColor = new C3(0, 0, 0); mat.emissiveTexture = tex; mat.opacityTexture = tex;
+  mat.fogEnabled = false; mat.backFaceCulling = false; mat.disableDepthWrite = true;
+  const m = MB.CreatePlane(name, { size: 1 }, scene);
+  m.material = mat; m.billboardMode = BABYLON.Mesh.BILLBOARDMODE_ALL;
+  m.renderingGroupId = 1; m.isPickable = false; m.setEnabled(false);
+  return m;
+}
+const anchorRet = reticleMesh("anchorRet", "#ffffff"), zipRet = reticleMesh("zipRet", "#ffc23d");
+let scanTimer = 0, retPulse = 0;
+function placeReticle(m, t, size, dt) {
+  if (!t.ok) { if (m.isEnabled()) m.setEnabled(false); return; }
+  const p = m.position;
+  if (!m.isEnabled() || Math.abs(p.x - t.x) + Math.abs(p.y - t.y) + Math.abs(p.z - t.z) > 6) p.set(t.x, t.y, t.z);
+  else { const k = Math.min(1, dt * 18); p.x += (t.x - p.x) * k; p.y += (t.y - p.y) * k; p.z += (t.z - p.z) * k; }
+  const c = camera.position, d = Math.hypot(p.x - c.x, p.y - c.y, p.z - c.z);
+  m.scaling.setAll(d * size * (1 + 0.08 * Math.sin(retPulse * 7)));
+  if (!m.isEnabled()) m.setEnabled(true);
+}
+// Re-pick the targets ~10 times a second (not every frame) and keep the reticles on them.
+function updateWebTargets(dt) {
+  const active = weapon === "web" && !vehicle && !home && !homeBusy && downTimer <= 0;
+  scanTimer -= dt;
+  if (active && scanTimer <= 0) {
+    scanTimer = 0.1;
+    if (indoorsNow()) anchorT.ok = zipT.ok = false;
+    else { scanAnchor(); if (!zip) scanZip(); else zipT.ok = false; }
+  }
+  if (!active) anchorT.ok = zipT.ok = false;
+  retPulse += dt;
+  placeReticle(anchorRet, anchorT, 0.032, dt);
+  placeReticle(zipRet, zipT, 0.026, dt);
+}
+
+// Draws the web each frame: attached (swing / zip), missed, or just released.
+function updateRope(dt) {
+  if (vehicle || home) { ropeFx = null; hideRope(); return; }
+  const w = swing || zip;
+  if (w) {
+    const hp = handPos(w.arm);
+    const e = 1 - (1 - w.shot) * (1 - w.shot);                     // ease-out as it shoots
+    const ex = hp.x + (w.ax - hp.x) * e, ey = hp.y + (w.ay - hp.y) * e, ez = hp.z + (w.az - hp.z) * e;
+    let slack = 0;
+    if (swing) slack = clamp(swing.len - Math.hypot(pos.x - w.ax, pos.y + HAND - w.ay, pos.z - w.az), 0, 4);
+    const sag = (1 - w.shot) * 0.6 + slack * 0.35;
+    const wave = 0.45 * Math.exp(-Math.max(0, w.age - w.shotDur) * 6) * w.shot;
+    if (w.shot >= 1 && !w.puffed) { w.puffed = true; webPuff(w.ax, w.ay, w.az, 6, 0.22); }
+    drawRope(hp.x, hp.y, hp.z, ex, ey, ez, sag, wave, w.age * 30);
+    return;
+  }
+  const f = ropeFx;
+  if (!f) { hideRope(); return; }
+  f.t += dt;
+  if (f.kind === "release") {
+    // let go: the web leaves the hand and whips back toward where it was stuck, going slack
+    const T = 0.22;
+    if (f.t >= T) { ropeFx = null; hideRope(); return; }
+    const k = f.t / T, kk = k * k;
+    const sx = f.hx + (f.ax - f.hx) * kk, sy = f.hy + (f.ay - f.hy) * kk, sz = f.hz + (f.az - f.hz) * kk;
+    const L = Math.hypot(f.ax - sx, f.ay - sy, f.az - sz);
+    drawRope(sx, sy, sz, f.ax, f.ay, f.az, L * 0.12 * k + 0.2, 0.3 * (1 - k), f.t * 40);
+  } else {
+    // nothing to stick to: the web shoots out ~22 m and drops away
+    const T = 0.38;
+    if (f.t >= T) { ropeFx = null; hideRope(); return; }
+    const hp = handPos(armR);
+    const out = Math.min(1, f.t / 0.12) * 22, droop = Math.max(0, f.t - 0.12) * 18;
+    drawRope(hp.x, hp.y, hp.z, hp.x + f.dx * out, hp.y + f.dy * out - droop, hp.z + f.dz * out, 0.4 + droop * 0.3, 0.2, f.t * 40);
+  }
+}
+function releaseRope(w) {
+  if (w.shot < 1) { ropeFx = null; return; }
+  const hp = handPos(w.arm);
+  ropeFx = { kind: "release", t: 0, ax: w.ax, ay: w.ay, az: w.az, hx: hp.x, hy: hp.y, hz: hp.z };
+  webPuff(hp.x, hp.y, hp.z, 3, 0.12);
+}
+function webMissShot() {
+  const fx = Math.sin(yaw), fz = Math.cos(yaw);
+  ropeFx = { kind: "miss", t: 0, dx: fx * 0.78, dy: 0.62, dz: fz * 0.78 };
+  sfx.webShot(0.6);
+}
+
+// ---- swing
+function canWeb() { return !vehicle && !home && downTimer <= 0 && !indoorsNow(); }
+// Which hand shoots: the one on the anchor's side.
+function armToward(x, z) {
+  return (x - pos.x) * Math.cos(facing) - (z - pos.z) * Math.sin(facing) >= 0 ? armR : armL;
 }
 function startSwing() {
-  if (vehicle || home || downTimer > 0 || indoorsNow()) return false;
-  const fromGround = onGround || pos.y - supportHeight(pos.x, pos.z, pos.y + 0.01) < 1.2;
-  const a = findAnchor(fromGround);
-  const fx = Math.sin(yaw), fz = Math.cos(yaw);
-  if (!a) {
-    // nothing to stick to: the web shoots out and falls short
-    webMiss = { t: 0, dir: new V3(fx * 0.8, 0.6, fz * 0.8).normalize() };
-    sfx.webShot(0.6);
-    return false;
-  }
-  webMiss = null;
-  const prev = swing;
-  const hand = new V3(pos.x, pos.y + HAND, pos.z);
-  const len = V3.Distance(a, hand);
-  if (fromGround) {
-    // Ground launch: the web yanks you up and toward the anchor, then the
-    // rope goes taut and you swing on through like a normal swing.
-    const dx = a.x - hand.x, dy = a.y - hand.y, dz = a.z - hand.z;
-    const kick = 13 / len;
-    swing = {
-      a, len, minLen: Math.max(7, len * 0.45), yank: 0.5, target: Math.max(8, len * 0.55), age: 0, shot: 0,
-      vx: dx * kick + fx * 6, vy: Math.max(9, dy * kick + 4), vz: dz * kick + fz * 6,
-    };
+  if (!canWeb()) return false;
+  scanAnchor();                                      // fresh pick for the click
+  if (!anchorT.ok) { webMissShot(); return false; }
+  const m = takeMomentum(), ground = anchorT.ground;
+  const ax = anchorT.x, ay = anchorT.y, az = anchorT.z;
+  const dx = ax - pos.x, dy = ay - pos.y - HAND, dz = az - pos.z, dist = Math.hypot(dx, dy, dz);
+  let vx = m.x, vy0 = m.y, vz = m.z, reelTo, reelRate;
+  if (ground) {
+    // From the street: the web yanks you up off your feet toward the anchor,
+    // reels you in, then the rope goes taut and you swing on through.
+    vx += (dx / dist) * 7; vz += (dz / dist) * 7;
+    vy0 = Math.max(vy0, 9 + (dy / dist) * 4);
+    reelTo = Math.max(8, dist * 0.6); reelRate = 16;
     pos.y += 0.05;
-  } else {
-    swing = {
-      a, len, minLen: Math.max(6, len * 0.8), yank: 0, target: len, age: 0, shot: 0,
-      // keep the current momentum and add a forward kick
-      vx: (prev ? prev.vx : airVel.x) + fx * 6,
-      vy: Math.max(prev ? prev.vy : vy, -8),
-      vz: (prev ? prev.vz : airVel.z) + fz * 6,
-    };
-  }
-  onGround = false; superJump = null;
-  web.setEnabled(true);
+  } else { reelTo = Math.max(6, dist * 0.88); reelRate = 2.5; }
+  zip = null;
+  swing = {
+    ax, ay, az, len: dist, reelTo, reelRate, launch: ground, vx, vy: vy0, vz,
+    age: 0, shot: 0, shotDur: clamp(dist / 320, 0.05, 0.18), arm: armToward(ax, az), puffed: false,
+  };
+  onGround = false; superJump = null; ropeFx = null;
   sfx.webShot(1);
   return true;
 }
 function endSwing(fling) {
-  if (!swing) return;
   const s = swing;
+  if (!s) return;
   airVel.x = s.vx; airVel.z = s.vz;
   vy = s.vy;
   if (fling) {
-    // let go with a flick: a little extra lift and carry
-    const hs = Math.hypot(s.vx, s.vz);
-    vy = Math.max(vy, 0) + 4 + Math.min(hs, 30) * 0.12;
-    airVel.x *= 1.08; airVel.z *= 1.08;
+    // a timed release on the up-swing gives a little lift and carry (none on the down-swing)
+    const up = clamp(s.vy / 12, 0, 1);
+    vy += 1.5 + 3.5 * up;
+    const k = 1 + 0.06 * up;
+    airVel.x *= k; airVel.z *= k;
   }
+  onGround = false;
   swing = null;
-  web.setEnabled(false);
+  releaseRope(s);
+}
+// Walls: slide along them, losing only the speed going into them. Returns that speed.
+function wallSlide(o) {
+  const bx = pos.x, bz = pos.z;
+  collideHoriz(pos);
+  const nx = pos.x - bx, nz = pos.z - bz, nl = Math.hypot(nx, nz);
+  if (nl < 1e-4) return 0;
+  const vn = (o.vx * nx + o.vz * nz) / nl;
+  if (vn < 0) { o.vx -= (vn * nx) / nl; o.vz -= (vn * nz) / nl; }
+  return Math.min(0, vn);
+}
+// Touch down from the air: crouch into it; a fast landing rolls on a little.
+function touchDown(fallSpeed, hx, hz) {
+  if (inWater(pos.x, pos.z)) { if (fallSpeed > 3) { sfx.splash(fallSpeed); lastSplashAt = performance.now(); } }
+  else if (fallSpeed > 7) sfx.land(fallSpeed);
+  landT = Math.max(landT, clamp(fallSpeed / 24 + Math.hypot(hx, hz) / 70, 0, 1));
+  if (fallSpeed > 16) shake = Math.max(shake, clamp((fallSpeed - 16) / 60, 0, 0.3));
+  pushX += hx * 0.4; pushZ += hz * 0.4;
+}
+// Mouse steering: the travel direction turns toward where the camera looks
+// (rad/s, speed is kept). Small look offsets → gentle curve; big ones → full rate;
+// looking far off to the side / behind (> ~120°) fades it out so you can look around.
+const MOUSE_STEER = 1.9;
+function mouseSteer(vx, vz, w) {
+  const diff = angDiff(yaw, Math.atan2(vx, vz)), ad = Math.abs(diff);
+  if (ad < 0.02) return 0;
+  const fade = ad < 1.6 ? 1 : Math.max(0, 1 - (ad - 1.6) / 0.6);
+  return Math.sign(diff) * Math.min(1, ad / 0.7) * fade * MOUSE_STEER * (w ? 1.35 : 1);
 }
 function updateSwing(dt) {
   const s = swing;
-  s.age += dt; s.shot = Math.min(1, s.shot + dt / 0.09);
-  const fx = Math.sin(yaw), fz = Math.cos(yaw), rx = Math.cos(yaw), rz = -Math.sin(yaw);
-  let ix = 0, iz = 0;
-  if (keys.KeyW || keys.ArrowUp) { ix += fx; iz += fz; }
-  if (keys.KeyD || keys.ArrowRight) { ix += rx; iz += rz; }
-  if (keys.KeyA || keys.ArrowLeft) { ix -= rx; iz -= rz; }
-  const brake = keys.KeyS || keys.ArrowDown;
-  const il = Math.hypot(ix, iz);
-  if (s.yank <= 0) s.len = Math.max(s.minLen, s.len - 3.5 * dt);   // slow reel-in gives the swing its tug
+  s.age += dt; s.shot = Math.min(1, s.shot + dt / s.shotDur);
+  const taut = s.shot >= 1;                          // the rope only acts once the web has stuck
+  const fx = Math.sin(yaw), fz = Math.cos(yaw);
+  const W = keys.KeyW || keys.ArrowUp, brake = keys.KeyS || keys.ArrowDown;
+  const steer = (keys.KeyD || keys.ArrowRight ? 1 : 0) - (keys.KeyA || keys.ArrowLeft ? 1 : 0);
+  const boost = keys.ShiftLeft || keys.ShiftRight;
+  // Rope length: a slow reel-in gives the swing its dip and tug; from the street
+  // a hard yank comes first; and it never gets so long that the bottom of the
+  // arc would scrape the street / roof below (reeled in smoothly instead).
+  if (s.launch && s.len <= s.reelTo + 0.05) { s.launch = false; s.reelTo = Math.max(6, s.len * 0.88); s.reelRate = 2.5; }
+  let reelTo = s.reelTo, rate = s.reelRate;
+  const clearLen = s.ay - HAND - supportHeight(pos.x, pos.z, pos.y) - 1.0;
+  if (clearLen < reelTo) { reelTo = Math.max(3, clearLen); rate = Math.max(rate, Math.min(18, (s.len - reelTo) * 5)); }
   const sp0 = Math.hypot(s.vx, s.vy, s.vz);
   const n = Math.max(1, Math.ceil((sp0 * dt) / 0.3));            // sub-step so we can't tunnel through walls
   const h = dt / n;
+  let hitWall = 0;
   for (let i = 0; i < n && swing; i++) {
-    let ox = pos.x - s.a.x, oy = pos.y + HAND - s.a.y, oz = pos.z - s.a.z;
-    let d = Math.hypot(ox, oy, oz) || 1;
-    if (s.yank > 0) {
-      // reel hard toward the anchor, rope follows you in
-      s.yank -= h;
-      const pull = d > s.target ? 34 : 0;
-      s.vx -= (ox / d) * pull * h; s.vy -= (oy / d) * pull * h; s.vz -= (oz / d) * pull * h;
-      if (s.yank <= 0) s.len = Math.max(s.minLen, Math.min(s.len, d));
-    }
-    // pump along the swing (W / A / D steer, S brakes)
-    if (il) { s.vx += (ix / il) * 13 * h; s.vz += (iz / il) * 13 * h; }
-    if (brake) { const k = Math.exp(-1.8 * h); s.vx *= k; s.vz *= k; }
+    let ox = pos.x - s.ax, oy = pos.y + HAND - s.ay, oz = pos.z - s.az;
+    const d = Math.hypot(ox, oy, oz) || 1;
+    ox /= d; oy /= d; oz /= d;                       // unit vector anchor → hand
     s.vy -= GRAV * h;
-    let hx = pos.x + s.vx * h, hy = pos.y + HAND + s.vy * h, hz = pos.z + s.vz * h;
-    // rope: can't get further than len from the anchor
-    ox = hx - s.a.x; oy = hy - s.a.y; oz = hz - s.a.z;
-    d = Math.hypot(ox, oy, oz);
-    if (s.yank > 0) s.len = Math.min(s.len, Math.max(d, s.target));
-    if (d > s.len) {
-      ox /= d; oy /= d; oz /= d;
-      hx = s.a.x + ox * s.len; hy = s.a.y + oy * s.len; hz = s.a.z + oz * s.len;
-      const vr = s.vx * ox + s.vy * oy + s.vz * oz;
-      if (vr > 0) {
-        s.vx -= vr * ox; s.vy -= vr * oy; s.vz -= vr * oz;
-        // swinging through the bottom of the arc picks up a little speed
-        if (oy < -0.85) { const k = 1 + 0.25 * h; s.vx *= k; s.vz *= k; }
+    if (taut) {
+      const below = clamp(-oy, 0, 1);                // 1 at the bottom of the arc
+      const sp = Math.hypot(s.vx, s.vy, s.vz), hs = Math.hypot(s.vx, s.vz);
+      // pump: push along the arc the way the camera faces (strongest at the bottom)
+      let pump = (W ? 9 : 0) + (boost ? 8 : 0);
+      if (sp < 7 && s.age > 0.3) pump += 6;          // never stall dangling under the web
+      if (pump && below > 0.05) {
+        const fd = fx * ox + fz * oz;
+        const tx = fx - ox * fd, ty = -oy * fd, tz = fz - oz * fd, tl = Math.hypot(tx, ty, tz);
+        if (tl > 0.05) { const a = (pump * below * h) / tl; s.vx += tx * a; s.vy += ty * a; s.vz += tz * a; }
+      }
+      // steer: A / D carve, W drifts the swing round toward the camera (speed is kept)
+      if (hs > 2) {
+        let turn = steer * 1.3 + mouseSteer(s.vx, s.vz, W);
+        if (turn) {
+          const a = turn * h, c = Math.cos(a), sn = Math.sin(a);
+          const nvx = s.vx * c + s.vz * sn;
+          s.vz = -s.vx * sn + s.vz * c; s.vx = nvx;
+        }
       }
     }
-    const sp = Math.hypot(s.vx, s.vy, s.vz);
-    if (sp > SWING_MAX) { const k = SWING_MAX / sp; s.vx *= k; s.vy *= k; s.vz *= k; }
-    pos.set(hx, hy - HAND, hz);
-    // walls: slide along them, losing the speed going into them
-    const bx = pos.x, bz = pos.z;
-    collideHoriz(pos);
-    const nx = pos.x - bx, nz = pos.z - bz, nl = Math.hypot(nx, nz);
-    if (nl > 1e-4) {
-      const vn = (s.vx * nx + s.vz * nz) / nl;
-      if (vn < 0) { s.vx -= (vn * nx) / nl; s.vz -= (vn * nz) / nl; }
+    if (brake) { const k = Math.exp(-1.6 * h); s.vx *= k; s.vz *= k; }
+    let hx = pos.x + s.vx * h, hy = pos.y + HAND + s.vy * h, hz = pos.z + s.vz * h;
+    if (taut) {
+      // rope: can't get further than len from the anchor (projected back onto the sphere)
+      const want = s.len > reelTo ? rate : 0;
+      if (want) s.len = Math.max(reelTo, s.len - want * h);
+      let qx = hx - s.ax, qy = hy - s.ay, qz = hz - s.az;
+      const q = Math.hypot(qx, qy, qz);
+      if (q > s.len) {
+        qx /= q; qy /= q; qz /= q;
+        hx = s.ax + qx * s.len; hy = s.ay + qy * s.len; hz = s.az + qz * s.len;
+        const vr = s.vx * qx + s.vy * qy + s.vz * qz, cap = -want;   // reeling pulls you in at the reel speed
+        if (vr > cap) {
+          s.vx -= qx * (vr - cap); s.vy -= qy * (vr - cap); s.vz -= qz * (vr - cap);
+          // the rope catching a fall turns part of that speed into swing instead of killing it
+          const caught = vr - 3;
+          if (caught > 0) {
+            let tx = s.vx - qx * cap, ty = s.vy - qy * cap, tz = s.vz - qz * cap, tl = Math.hypot(tx, ty, tz);
+            if (tl < 0.5) { const fd = fx * qx + fz * qz; tx = fx - qx * fd; ty = -qy * fd; tz = fz - qz * fd; tl = Math.hypot(tx, ty, tz) || 1; }
+            const a = (caught * 0.5) / tl;
+            s.vx += tx * a; s.vy += ty * a; s.vz += tz * a;
+          }
+        }
+      }
     }
+    // soft speed cap (eases back instead of clamping)
+    const sp = Math.hypot(s.vx, s.vy, s.vz);
+    if (sp > SWING_MAX) { const k = (sp - (sp - SWING_MAX) * Math.min(1, 3 * h)) / sp; s.vx *= k; s.vy *= k; s.vz *= k; }
+    pos.set(hx, hy - HAND, hz);
+    hitWall = Math.min(hitWall, wallSlide(s));
     // the street / a roof: skim it during the launch, land on it afterwards
     const gh = supportHeight(pos.x, pos.z, pos.y);
     if (pos.y <= gh) {
       pos.y = gh;
-      if (s.yank > 0 || s.age < 0.35) { if (s.vy < 2) s.vy = 2; }
+      if (s.launch || s.age < 0.35) { if (s.vy < 2) s.vy = 2; }
       else if (s.vy <= 0) {
-        if (inWater(pos.x, pos.z)) sfx.splash(Math.hypot(s.vx, s.vy, s.vz));
-        else if (s.vy < -7) sfx.land(-s.vy);
-        swing = null; web.setEnabled(false);
+        touchDown(-s.vy, s.vx, s.vz);
+        swing = null; releaseRope(s);
         vy = 0; onGround = true; airVel.x = airVel.z = 0;
       }
     }
   }
+  if (hitWall < -12) { shake = Math.max(shake, clamp(-hitWall / 80, 0.1, 0.35)); sfx.bump(-hitWall * 0.5, "wall"); }
   if (!swing) return;
   if (!home) {
     pos.x = clamp(pos.x, WORLD.x0 + 2, WORLD.x1 - 2);
     pos.z = clamp(pos.z, WORLD.z0 + 2, WORLD.z1 - 2);
   }
   // swung up level with the anchor, or let go → release with a fling
-  if (s.yank <= 0 && pos.y + HAND > s.a.y - 1.5 && s.vy > 0) endSwing(true);
+  if (taut && !s.launch && pos.y + HAND > s.ay - 1.2 && s.vy > 0) endSwing(true);
   else if (!webHeld && s.age > 0.12) endSwing(true);
 }
-// Swing pose + web line (also runs on the frame the swing ends).
-function poseSwing(dt) {
-  const s = swing;
-  const vx = s ? s.vx : airVel.x, vz = s ? s.vz : airVel.z, vyy = s ? s.vy : vy;
-  if (Math.hypot(vx, vz) > 1) facing += angDiff(Math.atan2(vx, vz), facing) * Math.min(1, dt * 8);
+
+// ---- web zip
+function startZip() {
+  if (!canWeb()) return false;
+  scanZip();
+  if (!zipT.ok) { webMissShot(); return false; }
+  const m = takeMomentum();
+  const dx = zipT.x - pos.x, dy = zipT.y - pos.y - HAND, dz = zipT.z - pos.z, dist = Math.hypot(dx, dy, dz);
+  swing = null;
+  zip = {
+    ax: zipT.x, ay: zipT.y, az: zipT.z, nx: zipT.nx, nz: zipT.nz, top: zipT.top,
+    vx: m.x, vy: m.y, vz: m.z, t: 0, age: 0, shot: 0, shotDur: clamp(dist / 320, 0.05, 0.16),
+    arm: armToward(zipT.x, zipT.z), best: Infinity, bestT: 0, puffed: false,
+  };
+  if (onGround) { zip.vy = Math.max(zip.vy, 3); pos.y += 0.05; }      // hop off the ground
+  onGround = false; superJump = null; ropeFx = null; airVel.x = airVel.z = 0;
+  sfx.webShot(1.15);
+  return true;
+}
+function endZip() {
+  const z = zip;
+  airVel.x = z.vx; airVel.z = z.vz; vy = z.vy;
+  zip = null;
+  releaseRope(z);
+}
+// Arrived under the rim: vault up over it and drift in onto the roof.
+function arriveZip() {
+  const z = zip;
+  zip = null;
+  releaseRope(z);
+  vy = Math.sqrt(2 * GRAV * Math.max(0.6, z.top + 1.4 - pos.y));
+  airVel.x = -z.nx * 5.5 + z.vx * 0.25; airVel.z = -z.nz * 5.5 + z.vz * 0.25;
+  onGround = false;
+}
+function updateZip(dt) {
+  const z = zip;
+  z.age += dt; z.shot = Math.min(1, z.shot + dt / z.shotDur);
+  if (z.shot >= 1) z.t += dt;
+  const sp0 = Math.max(Math.hypot(z.vx, z.vy, z.vz), ZIP_MAX * 0.5);
+  const n = Math.max(1, Math.ceil((sp0 * dt) / 0.3));
+  const h = dt / n;
+  let d = 0;
+  for (let i = 0; i < n; i++) {
+    const dx = z.ax - pos.x, dy = z.ay - (pos.y + 1.0), dz = z.az - pos.z;
+    d = Math.hypot(dx, dy, dz);
+    if (d < 0.9) { arriveZip(); return; }
+    if (z.shot >= 1) {
+      // pulled along the web: speed ramps up, eases off on the final approach, and
+      // the current velocity blends into it (no snap from whatever you were doing)
+      const sp = Math.min(ZIP_MAX, 12 + z.t * 80, 6 + d * 5), k = 1 - Math.exp(-10 * h);
+      z.vx += ((dx / d) * sp - z.vx) * k; z.vy += ((dy / d) * sp - z.vy) * k; z.vz += ((dz / d) * sp - z.vz) * k;
+    } else z.vy -= GRAV * 0.5 * h;                  // web still flying out: keep drifting
+    pos.x += z.vx * h; pos.y += z.vy * h; pos.z += z.vz * h;
+    wallSlide(z);
+    const gh = supportHeight(pos.x, pos.z, pos.y);
+    if (pos.y < gh) { pos.y = gh; if (z.vy < 0) z.vy = 0; }
+  }
+  if (!home) {
+    pos.x = clamp(pos.x, WORLD.x0 + 2, WORLD.x1 - 2);
+    pos.z = clamp(pos.z, WORLD.z0 + 2, WORLD.z1 - 2);
+  }
+  // stuck behind something, or taking too long: let go with what we have
+  if (d < z.best - 0.5) { z.best = d; z.bestT = z.age; }
+  else if (z.age - z.bestT > 0.35 || z.age > 2.2) endZip();
+}
+
+// Pose while on a web (swing or zip): the shooting arm reaches up the line, the
+// free arm balances, the body leans with the arc, knees tuck on the down-swing.
+// Everything eases toward its target, so nothing snaps.
+function poseWeb(dt, w, zipping) {
+  airT = 1;
+  const vx = w.vx, vyy = w.vy, vz = w.vz, hs = Math.hypot(vx, vz);
+  if (hs > 1) facing += angDiff(Math.atan2(vx, vz), facing) * Math.min(1, dt * 7);
   player.position.copyFrom(pos);
   player.rotation.y = facing;
+  blob.setEnabled(true);
   const shadowY = supportHeight(pos.x, pos.z, pos.y + 0.01);
   blob.position.set(pos.x, shadowY + 0.1, pos.z);
+  blob.rotation.y = facing;
   const bs = Math.max(0.3, 1 - (pos.y - shadowY) * 0.25);
   blob.scaling.set(bs, 1, bs);
-  body.position.y = 0;
-  // lean with the arc: forward and tucked on the way down, stretched out on the way up
-  const k = Math.min(1, dt * 7);
+  const k = Math.min(1, dt * 7), ka = Math.min(1, dt * 14);
   const rising = clamp(vyy / 12, -1, 1);
-  const tgtLean = s ? 0.25 + Math.min(Math.hypot(vx, vz), 30) / 30 * 0.35 - rising * 0.2 : 0.2;
+  const tgtLean = zipping ? 0.5 : 0.2 + (Math.min(hs, 30) / 30) * 0.35 - rising * 0.2;
   body.rotation.x += (tgtLean - body.rotation.x) * k;
-  armR.sh.rotation.x = -2.95; armR.sh.rotation.z = 0.2; armR.el.rotation.x = -0.05;
-  armL.sh.rotation.x += ((s ? -0.4 - rising * 0.4 : -1.6) - armL.sh.rotation.x) * k;
-  armL.el.rotation.x += (-0.9 - armL.el.rotation.x) * k;
-  const tuck = clamp(-rising, 0, 1);
+  body.position.y += (0 - body.position.y) * k;
+  // shooting arm: aim the shoulder at the anchor in body space
+  const dx = w.ax - pos.x, dy = w.ay - (pos.y + 1.46), dz = w.az - pos.z;
+  const c = Math.cos(facing), sn = Math.sin(facing);
+  const fwd = dx * sn + dz * c, right = dx * c - dz * sn, r = Math.hypot(fwd, right, dy) || 1;
+  const roll = Math.asin(clamp(right / r, -0.85, 0.85));
+  let p = Math.atan2(-fwd, -dy);
+  if (p > 0.5) p -= Math.PI * 2;
+  p = clamp(p, -3.7, 0.4) - body.rotation.x;
+  const A = w.arm, B = A === armR ? armL : armR, side = A === armR ? 1 : -1;
+  A.sh.rotation.x += (p - A.sh.rotation.x) * ka;
+  A.sh.rotation.z += (roll - A.sh.rotation.z) * ka;
+  A.el.rotation.x += (-0.05 - A.el.rotation.x) * ka;
+  B.sh.rotation.x += ((-0.5 - rising * 0.4) - B.sh.rotation.x) * k;
+  B.sh.rotation.z += (-side * (0.5 + 0.4 * Math.max(0, -rising)) - B.sh.rotation.z) * k;
+  B.el.rotation.x += (-0.9 - B.el.rotation.x) * k;
+  const tuck = zipping ? 0.6 : clamp(-rising, 0, 1);
   legL.hip.rotation.x += ((-0.4 - tuck * 0.9) - legL.hip.rotation.x) * k;
   legL.knee.rotation.x += ((0.4 + tuck * 1.2) - legL.knee.rotation.x) * k;
   legR.hip.rotation.x += ((0.15 - tuck * 0.5) - legR.hip.rotation.x) * k;
   legR.knee.rotation.x += ((0.25 + tuck * 0.8) - legR.knee.rotation.x) * k;
-  if (!s) return;
-  // web from the raised right hand to the anchor (it shoots out first)
-  const hx = pos.x + Math.cos(facing) * 0.25, hy = pos.y + 2.25, hz = pos.z - Math.sin(facing) * 0.25;
-  const ex = hx + (s.a.x - hx) * s.shot, ey = hy + (s.a.y - hy) * s.shot, ez = hz + (s.a.z - hz) * s.shot;
-  const len = Math.max(0.05, Math.hypot(ex - hx, ey - hy, ez - hz));
-  web.position.set((hx + ex) / 2, (hy + ey) / 2, (hz + ez) / 2);
-  web.scaling.z = len;
-  web.lookAt(new V3(ex, ey, ez));
-}
-// A web that found nothing to stick to: shoots out ~22 m and drops away.
-let webMiss = null;
-function updateWebMiss(dt) {
-  if (!webMiss || swing) return;
-  webMiss.t += dt;
-  const T = 0.35;
-  if (webMiss.t > T) { webMiss = null; web.setEnabled(false); return; }
-  const out = Math.min(1, webMiss.t / 0.12) * 22, droop = Math.max(0, webMiss.t - 0.12) * 18;
-  const hx = pos.x + Math.cos(facing) * 0.25, hy = pos.y + 2.25, hz = pos.z - Math.sin(facing) * 0.25;
-  const d = webMiss.dir;
-  const ex = hx + d.x * out, ey = hy + d.y * out - droop, ez = hz + d.z * out;
-  web.setEnabled(true);
-  web.position.set((hx + ex) / 2, (hy + ey) / 2, (hz + ez) / 2);
-  web.scaling.z = Math.max(0.05, Math.hypot(ex - hx, ey - hy, ez - hz));
-  web.lookAt(new V3(ex, ey, ez));
 }
 
 // Swimming: on foot, at the surface of open water (river away from bridges,
 // pond, sea). Slower, the gun goes away, the body sits half under the water
 // tilted forward doing a front crawl; Space kicks up onto a bank / wall.
 let swimming = false, swimMove = 0, swimPhase = 0, lastSplashAt = 0;
+let airT = 0, landT = 0;     // air-pose blend (0 grounded … 1 airborne), landing crouch (decays)
+function easeRot(node, axis, v, k) { node.rotation[axis] += (v - node.rotation[axis]) * k; }
 function updatePlayer(dt) {
-  if (swing) { updateSwing(dt); poseSwing(dt); swimming = false; return; }
-  updateWebMiss(dt);
+  if (swing || zip) {
+    if (swing) updateSwing(dt); else updateZip(dt);
+    if (swing || zip) poseWeb(dt, swing || zip, !swing);
+    else { player.position.copyFrom(pos); player.rotation.y = facing; }
+    swimming = false;
+    return;
+  }
   const wasSwimming = swimming;
   swimming = !home && onGround && pos.y < 0.3 && inWater(pos.x, pos.z);
   if (swimming) {
@@ -744,16 +1168,28 @@ function updatePlayer(dt) {
   const speed = swimming ? (running ? 3.6 : 2.3) : aiming ? 2.6 : running ? 9 : 4.2;
   const gunUp = aiming || aimTimer > 0;
 
+  // momentum left over from a web swing / zip carries us through the air; the
+  // keys steer it (and can slow it) but can't push it past a run
+  const flying = !onGround && (airVel.x !== 0 || airVel.z !== 0);
   let dx = 0, dz = 0;
-  if (len > 0) { dx += (mx / len) * speed * dt; dz += (mz / len) * speed * dt; }
+  if (flying) {
+    if (len > 0) {
+      const cap = Math.max(Math.hypot(airVel.x, airVel.z), 9);
+      airVel.x += (mx / len) * 14 * dt; airVel.z += (mz / len) * 14 * dt;
+      const hs = Math.hypot(airVel.x, airVel.z);
+      if (hs > cap) { airVel.x *= cap / hs; airVel.z *= cap / hs; }
+    }
+    // mouse steering carries on between swings (same feel as on the web)
+    const turn = Math.hypot(airVel.x, airVel.z) > 4 ? mouseSteer(airVel.x, airVel.z, false) * 0.8 * dt : 0;
+    if (turn) {
+      const c = Math.cos(turn), sn = Math.sin(turn), nvx = airVel.x * c + airVel.z * sn;
+      airVel.z = -airVel.x * sn + airVel.z * c; airVel.x = nvx;
+    }
+    const ak = Math.exp(-0.12 * dt); airVel.x *= ak; airVel.z *= ak;
+    dx += airVel.x * dt; dz += airVel.z * dt;
+  } else if (len > 0) { dx += (mx / len) * speed * dt; dz += (mz / len) * speed * dt; }
   dx += pushX * dt; dz += pushZ * dt;
   const pk = Math.exp(-4 * dt); pushX *= pk; pushZ *= pk;
-  // momentum left over from a web swing carries us through the air
-  const flying = !onGround && (airVel.x || airVel.z);
-  if (flying) {
-    dx += airVel.x * dt; dz += airVel.z * dt;
-    const ak = Math.exp(-0.35 * dt); airVel.x *= ak; airVel.z *= ak;
-  }
   const sx = pos.x, sz = pos.z, wantX = dx, wantZ = dz;
   if (superJump && pos.y > superJump.clearY) {
     const gx = superJump.x - pos.x, gz = superJump.z - pos.z, gd = Math.hypot(gx, gz);
@@ -765,10 +1201,13 @@ function updatePlayer(dt) {
     collideHoriz(pos);
     if (onGround) { const g = supportHeight(pos.x, pos.z, pos.y); if (g > pos.y) pos.y = g; }
   }
-  // flew into a wall: lose the swing momentum instead of grinding along it
+  // flew into a wall: keep the speed along it, lose only the part going into it
   if (flying) {
-    const w2 = wantX * wantX + wantZ * wantZ;
-    if (w2 > 1e-6 && ((pos.x - sx) * wantX + (pos.z - sz) * wantZ) < 0.5 * w2) airVel.x = airVel.z = 0;
+    const gx = wantX - (pos.x - sx), gz = wantZ - (pos.z - sz), gl = Math.hypot(gx, gz);
+    if (gl > 1e-4) {
+      const vn = (airVel.x * gx + airVel.z * gz) / gl;
+      if (vn > 0) { airVel.x -= (gx / gl) * vn; airVel.z -= (gz / gl) * vn; }
+    }
   }
   // bump into pedestrians
   for (const p of peds) {
@@ -781,7 +1220,8 @@ function updatePlayer(dt) {
     // camera sits over the right shoulder, so they differ up close)
     const { o, d } = aimRay();
     poseToward(o.x + d.x * 30, o.y + d.y * 30, o.z + d.z * 30, dt);
-  } else if (len > 0) facing += angDiff(Math.atan2(mx, mz), facing) * Math.min(1, dt * 12);
+  } else if (flying && Math.hypot(airVel.x, airVel.z) > 2) facing += angDiff(Math.atan2(airVel.x, airVel.z), facing) * Math.min(1, dt * 6);
+  else if (len > 0) facing += angDiff(Math.atan2(mx, mz), facing) * Math.min(1, dt * 12);
   moveAmt += ((len > 0 ? (running ? 1 : 0.6) : 0) - moveAmt) * Math.min(1, dt * 10);
 
   if (onGround && keys.Space && !superJump && !downed) { vy = swimming ? 6.8 : 7.2; onGround = false; }
@@ -789,10 +1229,7 @@ function updatePlayer(dt) {
   const gh = supportHeight(pos.x, pos.z, pos.y);
   let ny = pos.y + vy * dt;
   if (vy > 0) { const c = ceilingAt(pos.x, pos.z, pos.y); if (ny + HEIGHT > c) { ny = c - HEIGHT; vy = 0; } }
-  if (!onGround && ny <= gh) {
-    if (vy < -3 && inWater(pos.x, pos.z)) { sfx.splash(-vy); lastSplashAt = performance.now(); }
-    else if (vy < -7) sfx.land(-vy);
-  }
+  if (!onGround && vy <= 0 && ny <= gh) touchDown(-vy, airVel.x, airVel.z);
   if (vy <= 0 && ny <= gh) { pos.y = gh; vy = 0; onGround = true; superJump = null; airVel.x = airVel.z = 0; }
   else if (onGround && vy <= 0 && pos.y - gh < 0.45) { pos.y = gh; vy = 0; }
   else { pos.y = ny; onGround = false; }
@@ -814,29 +1251,36 @@ function updatePlayer(dt) {
   const s = Math.max(0.3, 1 - (pos.y - shadowY) * 0.25);
   blob.scaling.set(s, 1, s);
 
-  if (swimming) { poseSwim(dt, len > 0, running); return; }
+  if (swimming) { airT = 0; landT = 0; poseSwim(dt, len > 0, running); return; }
   blob.setEnabled(true);
   const stepBefore = Math.floor(walkPhase / Math.PI);
   walkPhase += dt * (running ? 11 : 7.5) * (len > 0 ? 1 : 0);
   if (onGround && len > 0 && !downed && Math.floor(walkPhase / Math.PI) !== stepBefore) sfx.footstep(running);
-  const a = moveAmt * 0.75, sw = Math.sin(walkPhase);
-  if (onGround) {
-    legL.hip.rotation.x = -sw * a; legR.hip.rotation.x = sw * a;
-    legL.knee.rotation.x = Math.max(0, Math.sin(walkPhase + 1.2)) * a * 1.3;
-    legR.knee.rotation.x = Math.max(0, -Math.sin(walkPhase + 1.2)) * a * 1.3;
-  } else {
-    legL.hip.rotation.x = -0.5; legR.hip.rotation.x = -0.2;
-    legL.knee.rotation.x = 0.9; legR.knee.rotation.x = 0.5;
-  }
-  armL.sh.rotation.x = sw * a * 0.9; armL.sh.rotation.z = -0.16;
-  armL.el.rotation.x = -0.3 - moveAmt * 0.5;
+  // Pose = walk cycle blended with an air pose (knees tucked rising, legs reaching
+  // and arms out falling), plus a landing crouch; every joint eases toward it.
+  airT += ((onGround ? 0 : 1) - airT) * Math.min(1, dt * (onGround ? 16 : 8));
+  landT = Math.max(0, landT - dt * 3);
+  const a = moveAmt * 0.75, sw = Math.sin(walkPhase), g = 1 - airT, au = airT, L = landT;
+  const up = clamp(vy / 9, -1, 1) * 0.5 + 0.5, fall = au * (1 - up);
+  const k = Math.min(1, dt * 18);
+  easeRot(legL.hip, "x", -sw * a * g + au * (-0.75 * up - 0.15 * (1 - up)) - L * 0.75, k);
+  easeRot(legR.hip, "x", sw * a * g + au * (-0.15 * up + 0.2 * (1 - up)) - L * 0.55, k);
+  easeRot(legL.knee, "x", Math.max(0, Math.sin(walkPhase + 1.2)) * a * 1.3 * g + au * (1.15 * up + 0.35 * (1 - up)) + L * 1.3, k);
+  easeRot(legR.knee, "x", Math.max(0, -Math.sin(walkPhase + 1.2)) * a * 1.3 * g + au * (0.55 * up + 0.25 * (1 - up)) + L * 1.1, k);
+  easeRot(armL.sh, "x", sw * a * 0.9 * g - au * (0.45 + 0.9 * (1 - up)), k);
+  easeRot(armL.sh, "z", -0.16 - fall * 0.9, k);
+  easeRot(armL.el, "x", (-0.3 - moveAmt * 0.5) * g - au * 0.6, k);
   if (gunUp) { armR.sh.rotation.x = -Math.PI / 2 - aimElev; armR.sh.rotation.z = 0.05; armR.el.rotation.x = 0; }
-  else { armR.sh.rotation.x = -sw * a * 0.9; armR.sh.rotation.z = 0.16; armR.el.rotation.x = -0.3 - moveAmt * 0.5; }
+  else {
+    easeRot(armR.sh, "x", -sw * a * 0.9 * g - au * (0.45 + 0.9 * (1 - up)), k);
+    easeRot(armR.sh, "z", 0.16 + fall * 0.9, k);
+    easeRot(armR.el, "x", (-0.3 - moveAmt * 0.5) * g - au * 0.6, k);
+  }
   aimTimer = Math.max(0, aimTimer - dt);
-  body.position.y = Math.abs(Math.cos(walkPhase)) * 0.05 * moveAmt + Math.sin(performance.now() / 500) * 0.006;
+  body.position.y = (Math.abs(Math.cos(walkPhase)) * 0.05 * moveAmt + Math.sin(performance.now() / 500) * 0.006) * g - L * 0.24;
   // thrown: tumble flat onto the back, then get up again
-  const lieT = downed ? -1.5 : 0;
-  body.rotation.x += (lieT - body.rotation.x) * Math.min(1, dt * (downed ? 7 : 4));
+  const lean = downed ? -1.5 : L * 0.35 + fall * 0.12;
+  body.rotation.x += (lean - body.rotation.x) * Math.min(1, dt * (downed ? 7 : 5));
   if (downed) {
     body.position.y = 0.12;
     legL.hip.rotation.x = -0.3; legR.hip.rotation.x = 0.15;
@@ -883,7 +1327,7 @@ function playerFits(x, y, z) {
   return true;
 }
 function enterVehicle(v) {
-  if (swing || webMiss) { swing = null; webMiss = null; web.setEnabled(false); }
+  swing = null; zip = null; ropeFx = null; hideRope();
   airVel.x = airVel.z = 0;
   vehicle = v;
   sfx.door(); sfx.engineStart(specOf(v).name);
@@ -1276,11 +1720,15 @@ function fire() {
 
 // ---------------------------------------------------------------- camera
 const camTarget = new V3();
-function pointBlocked(x, y, z) {
-  for (const b of query(x - 0.2, x + 0.2, z - 0.2, z + 0.2)) if (pointIn(b, x, y, z, 0.18)) return true;
+function pointBlocked(x, y, z, m = 0.18) {
+  for (const b of query(x - m - 0.02, x + m + 0.02, z - m - 0.02, z + m + 0.02)) if (pointIn(b, x, y, z, m)) return true;
   return false;
 }
-let camSide = 0.6;
+let camSide = 0.6, camPivotY = pos.y, camExtra = 0, camOcc = camDist, swingCam = 0;
+const camLook = { x: 0, z: 0 }, camWant = new V3(), lookAt = new V3();
+const ORBIT_MIN = -0.45;     // lowest the camera orbits (looking up past this tilts the view instead)
+const SWING_ORBIT = 0.2;     // while web-swinging the camera rides a little above, looking along the street
+let lookUp = 0;
 function updateCamera(dt) {
   // On foot the camera sits over the right shoulder so the crosshair (screen
   // centre) is never hidden behind the player; aiming pulls it in tighter.
@@ -1288,31 +1736,83 @@ function updateCamera(dt) {
   if (vehicle) { const c = specOf(vehicle); dist = Math.max(camDist, c.camDist); h = c.camH; side = 0; }
   else if (home) { dist = Math.min(dist, 3.4); side = Math.min(side, 0.6); }
   else if (aiming) { dist = 2.8; side = 0.85; h = 1.72; }
+  const v = playerVel(), hs = Math.hypot(v.x, v.z), sp = Math.hypot(hs, v.y);
+  const free = !vehicle && !home && !aiming;
+  const airborne = !vehicle && !home && (!!swing || !!zip || !onGround);
+  // swing camera (blended in / out): centred behind the player, slightly above,
+  // rigidly attached (no trailing into walls), slow to zoom back out after a
+  // building has passed behind
+  const webbing = airborne && !aiming && (!!swing || !!zip || hs > 8);
+  swingCam += ((webbing ? 1 : 0) - swingCam) * Math.min(1, dt * (webbing ? 4 : 2));
+  side += (0.3 - side) * swingCam;
+  // in the air with the mouse left alone, ease the view round behind the direction of travel
+  if (free && airborne && hs > 10 && performance.now() - lastMouseAt > 1500)
+    yaw += angDiff(Math.atan2(v.x, v.z), yaw) * Math.min(1, dt * 0.9);
+  // faster → pull back a little, and look a little ahead of where we're heading
+  camExtra += ((free ? clamp((sp - 8) / 30, 0, 1) * 2 : 0) - camExtra) * Math.min(1, dt * 2.5);
+  dist += camExtra;
+  const la = free && airborne && hs > 0.5 ? Math.min(hs * 0.08, 2.4) / hs : 0;
+  const kl = Math.min(1, dt * 3);
+  camLook.x += (v.x * la - camLook.x) * kl; camLook.z += (v.z * la - camLook.z) * kl;
+  // the pivot trails the body's height a little in the air, so the arc of a
+  // swing doesn't jerk the view up and down
+  if (airborne) camPivotY = clamp(camPivotY + (pos.y - camPivotY) * Math.min(1, dt * 7), pos.y - 1.4, pos.y + 1.4);
+  else camPivotY += (pos.y - camPivotY) * Math.min(1, dt * 20);
+  if (Math.abs(camPivotY - pos.y) > 6) camPivotY = pos.y;      // teleported
+  const py = camPivotY;
   // don't push the pivot into a wall the player is hugging on the right
   const rx = Math.cos(yaw), rz = -Math.sin(yaw);
   for (let s = 0.15; s <= side; s += 0.15) {
-    if (pointBlocked(pos.x + rx * (s + 0.2), pos.y + h, pos.z + rz * (s + 0.2))) { side = Math.max(0, s - 0.15); break; }
+    if (pointBlocked(pos.x + rx * (s + 0.2), py + h, pos.z + rz * (s + 0.2))) { side = Math.max(0, s - 0.15); break; }
   }
   camSide += (side - camSide) * Math.min(1, dt * 10);
-  camTarget.set(pos.x + rx * camSide, pos.y + h, pos.z + rz * camSide);
-  const p = vehicle ? Math.max(pitch, 0.05) : pitch;
+  camTarget.set(pos.x + rx * camSide + camLook.x, py + h, pos.z + rz * camSide + camLook.z);
+  if ((camLook.x || camLook.z) && pointBlocked(camTarget.x, camTarget.y, camTarget.z)) {
+    camTarget.x -= camLook.x; camTarget.z -= camLook.z; camLook.x = camLook.z = 0;
+  }
+  // The camera only orbits a little below the shoulder (any lower and it hits the
+  // street); looking up further than that tilts the view up from where it sits.
+  const p = Math.max(pitch, vehicle ? 0.05 : ORBIT_MIN + (SWING_ORBIT - ORBIT_MIN) * swingCam);
   const cp = Math.cos(p);
   const dx = -Math.sin(yaw) * cp, dy = Math.sin(p), dz = -Math.cos(yaw) * cp;
+  // occlusion: walk out from the pivot; a fatter probe while swinging keeps the
+  // near plane from clipping into walls the camera brushes past
+  const m = 0.18 + 0.22 * swingCam;
   let d = dist;
   for (let s = 0.3; s <= dist; s += 0.25) {
-    if (pointBlocked(camTarget.x + dx * s, camTarget.y + dy * s, camTarget.z + dz * s)) { d = Math.max(0.35, s - 0.3); break; }
+    if (pointBlocked(camTarget.x + dx * s, camTarget.y + dy * s, camTarget.z + dz * s, m)) { d = Math.max(0.35, s - 0.3); break; }
   }
-  const want = new V3(camTarget.x + dx * d, Math.max(0.4, camTarget.y + dy * d), camTarget.z + dz * d);
+  // zoom in quickly when something gets in the way (instantly if the camera would
+  // be inside it), back out slowly — no pumping in and out down a street
+  if (camOcc > dist) camOcc = dist;
+  if (d < camOcc) {
+    camOcc += (d - camOcc) * Math.min(1, dt * 20);
+    if (pointBlocked(camTarget.x + dx * camOcc, camTarget.y + dy * camOcc, camTarget.z + dz * camOcc, m)) camOcc = d;
+  } else camOcc += (d - camOcc) * Math.min(1, dt * (2.5 + 9.5 * (1 - swingCam)));
+  const dd = vehicle || home ? d : camOcc;
+  camWant.set(camTarget.x + dx * dd, Math.max(0.4, camTarget.y + dy * dd), camTarget.z + dz * dd);
   const cur = V3.Distance(camera.position, camTarget);
-  const k = d < cur - 0.05 ? 1 : Math.min(1, dt * (vehicle ? 8 : 12));
-  camera.position = V3.Lerp(camera.position, want, k);
+  // snap in front of a wall; otherwise follow smoothly. In the air the camera is
+  // rigid (its smoothing comes from the pivot / zoom above), so it can't lag into a wall
+  const snap = (d < cur - 0.05) || (airborne && swingCam > 0.5);
+  const k = snap ? 1 : Math.min(1, dt * (vehicle ? 8 : 12));
+  V3.LerpToRef(camera.position, camWant, k, camera.position);
   if (shake > 0.001) {                                  // crash shake
     const s = shake * shake * 0.45;
     camera.position.addInPlaceFromFloats((Math.random() - 0.5) * s, (Math.random() - 0.5) * s, (Math.random() - 0.5) * s);
     shake = Math.max(0, shake - dt * 1.6);
   }
-  camera.setTarget(camTarget);
-  const airSpeed = swing ? Math.hypot(swing.vx, swing.vy, swing.vz) : onGround ? 0 : Math.hypot(airVel.x, airVel.z);
+  // extra look-up beyond the orbit: rotate the view direction up (smoothly, so
+  // there's no seam where the orbit stops and the tilt starts)
+  lookUp += (Math.max(0, p - pitch) - lookUp) * Math.min(1, dt * 20);
+  if (lookUp > 0.001) {
+    const vx = camTarget.x - camera.position.x, vy2 = camTarget.y - camera.position.y, vz = camTarget.z - camera.position.z;
+    const hl = Math.hypot(vx, vz) || 1e-3, len = Math.hypot(hl, vy2);
+    const a = Math.min(1.5, Math.atan2(vy2, hl) + lookUp), ch = (Math.cos(a) * len) / hl;
+    lookAt.set(camera.position.x + vx * ch, camera.position.y + Math.sin(a) * len, camera.position.z + vz * ch);
+    camera.setTarget(lookAt);
+  } else camera.setTarget(camTarget);
+  const airSpeed = airborne ? sp : 0;
   const fovT = aiming && !vehicle ? 0.62 : vehicle ? 1.05 + clamp(Math.abs(vehicle.speed) / 40, 0, 1) * 0.15
     : 1.0 + clamp(airSpeed / SWING_MAX, 0, 1) * 0.25;   // widen while web-swinging
   camera.fov += (fovT - camera.fov) * Math.min(1, dt * 10);
@@ -1355,8 +1855,7 @@ function updateSound(dt) {
     const fwd = keys.KeyW || keys.ArrowUp, back = keys.KeyS || keys.ArrowDown;
     veh = { name: vs.name, speed: vehicle.speed, max: vs.max * (boost ? vs.boost : 1), throttle: fwd ? 1 : back ? 0.6 : 0, boost: boost && fwd };
     windSpeed = Math.abs(vehicle.speed);
-  } else if (swing) windSpeed = Math.hypot(swing.vx, swing.vy, swing.vz);
-  else if (!onGround) windSpeed = Math.hypot(airVel.x, vy, airVel.z);
+  } else if (swing || zip || !onGround) { const v = playerVel(); windSpeed = Math.hypot(v.x, v.y, v.z); }
   let traf = null;
   if (!home) {
     let bd = 45;
@@ -1366,8 +1865,14 @@ function updateSound(dt) {
       if (d < bd) { bd = d; traf = { dist: d, speed: Math.abs(t.speed), pan: panOf(t.vx, t.vz) }; }
     }
   }
-  const swim = swimming && !vehicle && !swing ? swimMove : -1;   // -1 = not in the water
+  const swim = swimming && !vehicle && !swing && !zip ? swimMove : -1;   // -1 = not in the water
   sfx.update(dt, { vehicle: veh, windSpeed, horn: !!(vehicle && keys.KeyH), night: state.night, inside: !!home, traffic: traf, swim });
+}
+function webPrompt(what) {
+  const parts = [];
+  if (anchorT.ok) parts.push(`<kbd>Left click</kbd> ${what}`);
+  if (zipT.ok) parts.push("<kbd>Right click</kbd> Web zip");
+  return parts.join(" · ");
 }
 function updateHud(dt) {
   let loc = home ? `${home.typeLabel || home.label} · No. ${home.no}` : "";
@@ -1383,7 +1888,8 @@ function updateHud(dt) {
   setHud("loc", locEl, loc);
   setHud("speed", speedEl, vehicle ? `${Math.round(Math.abs(vehicle.speed) * 3.6)} <small>km/h</small>` : "");
   setHud("weapon", weaponEl, vehicle ? "" : weaponLabel());
-  crossEl.className = aiming ? "hud aim" : weapon === "web" ? "hud web" : "hud";
+  const cls = aiming ? "hud aim" : weapon === "web" ? (anchorT.ok && anchorT.aimed ? "hud web lock" : "hud web") : "hud";
+  if (crossEl.className !== cls) crossEl.className = cls;
   crossEl.style.display = locked() && !vehicle ? "block" : "none";
 
   hudTimer -= dt;
@@ -1402,15 +1908,16 @@ function updateHud(dt) {
   if (homeBusy) pr = "";
   else if (home) pr = atExit(pos.x, pos.z) ? "<kbd>E</kbd> Leave" : "";
   else if (vehicle) pr = "<kbd>E</kbd> Get out";
-  else if (swing) pr = "Hold <kbd>Left click</kbd> to swing · release to let go";
-  else if (weapon === "web" && !home && !onGround) pr = "<kbd>Left click</kbd> Web swing";
+  else if (swing) pr = "Release <kbd>Left click</kbd> to let go · <kbd>W</kbd> pump · <kbd>A</kbd><kbd>D</kbd> steer · <kbd>Shift</kbd> boost";
+  else if (zip) pr = "";
+  else if (weapon === "web" && !home && !onGround) pr = webPrompt("Web swing");
   else {
     const u = nearestUsable(), hm = onGround ? nearestHome(pos.x, pos.z, pos.y) : null;
     if (u) pr = `<kbd>E</kbd> ${u.e ? "Take the " + u.spec.name : u.spec.label}`;
     else if (talkPrompt()) pr = talkPrompt();
     else if (hm) pr = `<kbd>E</kbd> Enter ${hm.label.toLowerCase()}`;
     else if (onGround && roofCandidate()) pr = "<kbd>Space</kbd><kbd>Space</kbd> Jump onto roof";
-    else if (weapon === "web" && !home) pr = "<kbd>Left click</kbd> Web launch";
+    else if (weapon === "web" && !home) pr = webPrompt("Web launch");
   }
   setHud("prompt", promptEl, pr);
 }
@@ -1492,15 +1999,34 @@ function drawMinimap() {
   };
   // story characters: pink dots with a white ring
   for (const m of characterMarkers()) { dot(m.x, m.z, 5.2, "#ffffff"); dot(m.x, m.z, 3.8, "#ff4fb8"); }
-  // mission objective: a yellow marker, pinned to the rim when it's off the minimap
+  // mission objective: a navigation arrow on the line from you to it, pointing the
+  // way to go (its tip on the objective, or pinned to the rim when it's off the map),
+  // with a dashed guide line from you; a pulsing ring once you're right there
   const obj = missionObjective();
   if (obj) {
     const [ox, oz] = toMap(obj.x, obj.z);
-    let dx = ox - px, dz = oz - pz;
-    const d = Math.hypot(dx, dz), rim = R / 0.9 - 12;
-    if (d > rim) { dx *= rim / d; dz *= rim / d; }
-    mctx.fillStyle = "#1a1a1a"; mctx.beginPath(); mctx.arc(dx, dz, 8, 0, Math.PI * 2); mctx.fill();
-    mctx.fillStyle = "#ffcf4a"; mctx.beginPath(); mctx.arc(dx, dz, 6, 0, Math.PI * 2); mctx.fill();
+    const dx = ox - px, dz = oz - pz, d = Math.hypot(dx, dz), rim = R / 0.9 - 16;
+    const pulse = 1 + 0.1 * Math.sin(performance.now() / 170);
+    if (d < 16) {
+      mctx.lineWidth = 3;
+      mctx.strokeStyle = "#1a1a1a"; mctx.beginPath(); mctx.arc(dx, dz, 9 * pulse + 1, 0, Math.PI * 2); mctx.stroke();
+      mctx.strokeStyle = "#ffcf4a"; mctx.beginPath(); mctx.arc(dx, dz, 9 * pulse, 0, Math.PI * 2); mctx.stroke();
+    } else {
+      const a = Math.atan2(dz, dx), r = Math.min(d, rim) - 11;
+      mctx.save();
+      mctx.setLineDash([5, 6]); mctx.lineWidth = 2.5;
+      mctx.strokeStyle = "rgba(255,207,74,0.55)";
+      mctx.beginPath(); mctx.moveTo(Math.cos(a) * 14, Math.sin(a) * 14); mctx.lineTo(Math.cos(a) * (r - 8), Math.sin(a) * (r - 8)); mctx.stroke();
+      mctx.setLineDash([]);
+      mctx.translate(Math.cos(a) * r, Math.sin(a) * r);
+      mctx.rotate(a);
+      mctx.scale(pulse, pulse);
+      mctx.beginPath();
+      mctx.moveTo(13, 0); mctx.lineTo(-9, 10); mctx.lineTo(-4, 0); mctx.lineTo(-9, -10); mctx.closePath();
+      mctx.lineJoin = "round"; mctx.lineWidth = 4; mctx.strokeStyle = "#1a1a1a"; mctx.stroke();
+      mctx.fillStyle = "#ffcf4a"; mctx.fill();
+      mctx.restore();
+    }
   }
   mctx.restore();
   mctx.save();
@@ -1538,7 +2064,7 @@ function toggleBigMap(force) {
   bigEl.classList.toggle("show", bigMapOpen);
   if (!bigMapOpen) return;
   for (const k in keys) keys[k] = false;
-  firing = false; aiming = false; webHeld = false;
+  firing = false; aiming = false; webHeld = false; zipHeld = false;
   if (locked()) document.exitPointerLock();
   big.width = window.innerWidth; big.height = window.innerHeight;
   bigFit = Math.min(big.width / baked.width, big.height / baked.height) * 0.94;
@@ -1716,7 +2242,8 @@ engine.runRenderLoop(() => {
     }
   }
   if (superJumpQueued) { superJumpQueued = false; if (!vehicle) startSuperJump(); }
-  if (swingQueued) { swingQueued = false; if (!vehicle) startSwing(); }
+  if (swingQueued) { swingQueued = false; if (!vehicle && !homeBusy) startSwing(); }
+  if (zipQueued) { zipQueued = false; if (!vehicle && !homeBusy) startZip(); }
 
   // in a conversation: stand still and listen (number keys pick replies)
   if (inConversation()) { for (const k in keys) keys[k] = false; firing = false; aiming = false; }
@@ -1725,6 +2252,7 @@ engine.runRenderLoop(() => {
   else if (vehicle) updateVehicle(dt);
   else {
     updatePlayer(dt);
+    updateRope(dt);
     shotCooldown -= dt;
     if (firing && locked() && shotCooldown <= 0 && downTimer <= 0) fire();
   }
@@ -1735,7 +2263,9 @@ engine.runRenderLoop(() => {
   if (!home) updateCharacters(dt, tod, { pos, vehicle, armed: !vehicle && weapon === "gun" && (aiming || firing), shove: shovePlayer });
   else hideCharacterUI();
   updateMission(dt, { pos, vehicle });
+  if (!homeBusy) trackVelocity(dt);
   updateCamera(dt);
+  updateWebTargets(dt);
   updateTimeOfDay(dt);
   updateEffects(dt);
   updateHud(dt);

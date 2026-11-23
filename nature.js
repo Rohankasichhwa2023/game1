@@ -43,9 +43,10 @@ export function buildGround() {
   lawn(landmarks.roundabout.x, landmarks.roundabout.z, landmarks.roundabout.r + 1, "rbLawn");
 
   const sand = noiseTex("sand", "#d6c8a8", 1800, "255,250,235", "120,100,70", 256, [1, 3]);
-  sand.uScale = 55 / 12; sand.vScale = 1200 / 12;
-  const beach = MB.CreateGround("beach", { width: 55, height: 1200 }, scene);
-  beach.position.set(SHORE_X + 27.5, 0.015, 0);
+  const bz0 = -600, bz1 = 1340;              // the full length of the world
+  sand.uScale = 55 / 12; sand.vScale = (bz1 - bz0) / 12;
+  const beach = MB.CreateGround("beach", { width: 55, height: bz1 - bz0 }, scene);
+  beach.position.set(SHORE_X + 27.5, 0.015, (bz0 + bz1) / 2);
   beach.material = flatTexMat("beachM", sand, 0.2);
   const ocean = MB.CreateGround("ocean", { width: 2400, height: 4000 }, scene);
   ocean.position.set(SHORE_X - 1200, 0.06, 0);

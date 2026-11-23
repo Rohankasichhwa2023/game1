@@ -12,6 +12,7 @@ import {
 import { FAC, tileRoofTex, slateRoofTex, zincRoofTex, dormerTex, railingTex } from "./textures.js";
 import { edges, pathAt, roadDist, districtAt, PARIS, reserved, landmarks, WORLD } from "./roads.js";
 import { LON_CORE, lrand, lrr, lpick } from "./london.js";
+import { planKathmandu, buildKtm, KTM_MAPC } from "./ktmBuild.js";
 
 export const mapBuildings = [];  // minimap: {pts, color}
 export const roofs = [];         // double-jump targets
@@ -108,7 +109,7 @@ function initMats() {
   A.lonPlain = {};
   for (const [k, F] of Object.entries(FAC.lon)) A.lonPlain[k] = makeAcc("lonPlain_" + k, litMat("lonPlainM_" + k, hex(F.style.wall)));
   A.mansionPlain = makeAcc("lonPlainMansion", litMat("lonPlainMansionM", hex(FAC.lonMansion.style.wall)));
-  postFlush.push(() => glow.addIncludedOnlyMesh(A.light.mesh));
+  postFlush.push(() => { for (const m of A.light.meshes) glow.addIncludedOnlyMesh(m); });
 }
 
 // ---------------------------------------------------------------- templates
@@ -312,7 +313,9 @@ export function planBuildings(START) {
         const district = districtAt(p.x + rx * probeOff, p.z + rz * probeOff);
         const plan = district === "london"
           ? planLondon(e, run, p.x + rx * probeOff, p.z + rz * probeOff)
-          : planFor(e, district, p.x + rx * probeOff, p.z + rz * probeOff);
+          : district === "kathmandu"
+            ? planKathmandu(e, p.x + rx * probeOff, p.z + rz * probeOff)
+            : planFor(e, district, p.x + rx * probeOff, p.z + rz * probeOff);
         if (!plan) { s += 6; continue; }
         let ok = false;
         for (let attempt = 0; attempt < 4 && !ok; attempt++) {
@@ -1057,12 +1060,13 @@ export function buildBuildings() {
     else if (sp.cat === "haus") buildHaus(sp);
     else if (sp.cat === "lterr") buildLTerrace(sp);
     else if (sp.cat === "mansion") buildMansion(sp);
+    else if (sp.cat === "ktm") { const r = buildKtm(sp); if (r) roofs.push(r); }
     else buildHouse(sp);
     clearXF();
     if (sp.home) registerHome(sp);
     mapBuildings.push({
       pts: fpCorners(sp),
-      color: sp.enter ? "#c4902f" : MAPC[sp.cat],
+      color: sp.enter ? "#c4902f" : sp.cat === "ktm" ? KTM_MAPC[sp.style] : MAPC[sp.cat],
       door: sp.enter ? xfp(sp.xf, 0, -sp.hd) : null,
       homeDoor: sp.home ? [homes[homes.length - 1].tx, homes[homes.length - 1].tz] : null,
     });

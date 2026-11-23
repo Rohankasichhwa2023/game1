@@ -694,11 +694,13 @@ export function spawnParked(START) {
   }
 
   const parkable = (e) => e.w >= 10 && e.district !== "park" && !["roundabout", "circus", "bridge"].includes(e.kind) && e.len > 40;
+  // (none in Kathmandu: its roads are too narrow to park on)
   for (const [district, n] of [["city", 95], ["paris", 60], ["london", 70]]) {
     const pool = district === "city" ? T.cityParked : district === "london" ? T.londonParked : T.parisParked;
     let placed = 0;
     for (let tries = 0; tries < n * 6 && placed < n; tries++) {
       const e = pickEdge((x) => parkable(x) && x.district === district);
+      if (!e) break;                                   // no road here wide enough to park on
       const tpl = pick(pool), spec = SPECS[tpl.specKey];
       if (e.len < spec.hd * 2 + 30) continue;
       const s = rr(15 + spec.hd, e.len - 15 - spec.hd), side = rand() < 0.5 ? -1 : 1;
@@ -741,6 +743,7 @@ export function swapToBurnt(v) {
 const SPEED = {
   avenue: 13, street: 10, broadway: 12, roundabout: 8, radial: 13, plaza: 9, major: 11, minor: 8, outer: 13, parkway: 15,
   high: 10, lane: 8, mews: 5, bridge: 12, circus: 7,
+  artery: 13, collector: 10, galli: 6,
 };
 const TP = { x: 0, z: 0, tx: 0, tz: 1 };
 function laneTarget(t) {
@@ -749,11 +752,12 @@ function laneTarget(t) {
   return [p.x + fz * t.e.lane, p.z - fx * t.e.lane, Math.atan2(fx, fz)];
 }
 export function spawnTraffic() {
-  for (const [district, n] of [["city", 90], ["paris", 45], ["park", 10], ["london", 75]]) {
+  for (const [district, n] of [["city", 90], ["paris", 45], ["park", 10], ["london", 75], ["kathmandu", 45]]) {
     const pool = district === "paris" ? T.parisTraffic : district === "london" ? T.londonTraffic : T.cityTraffic;
     for (let i = 0; i < n; i++) {
       const tpl = pick(pool), spec = SPECS[tpl.specKey];
       const e = pickEdge((x) => x.district === district && x.len > 20 + spec.hd * 2);
+      if (!e) continue;
       const t = {
         e, dir: rand() < 0.5 ? 1 : -1, s: rr(5, e.len - 5), speed: 0, hits: 0, stopUntil: 0,
         tpl, spec, mesh: tpl.createInstance("traffic"),
@@ -775,9 +779,16 @@ function nextEdge(t, overflow) {
   if (e.a === nd) { t.dir = 1; t.s = overflow; } else { t.dir = -1; t.s = e.len - overflow; }
 }
 // ctx: { pos, vehicle, peds }
-export function updateTraffic(dt, now, ctx) {
+export function updateTraffic(dtFrame, now, ctx) {
   const pSpec = ctx.vehicle ? specOf(ctx.vehicle) : null;
   for (const t of traffic) {
+    // far from the player: no avoidance checks, and only every 4th frame (with
+    // the time saved up, so they still drive at the right speed)
+    const far = Math.abs(t.vx - ctx.pos.x) > 200 || Math.abs(t.vz - ctx.pos.z) > 200;
+    t.acc = (t.acc || 0) + dtFrame;
+    if (far && ((t.tick = (t.tick || 0) + 1) & 3)) continue;
+    const dt = Math.min(t.acc, 0.25);
+    t.acc = 0;
     // Knocked by a crash: slide + spin freely, then drift back into the lane.
     if (t.knockT > 0) {
       t.knockT -= dt;
@@ -803,14 +814,14 @@ export function updateTraffic(dt, now, ctx) {
       const ohd = pSpec ? pSpec.hd : 0.4, ohw = pSpec ? pSpec.hw : 0.4;
       if (ahead(ctx.pos.x, ctx.pos.z, ohw, 0.5, sp.hd + ohd + 4.5)) blocked = true;
     }
-    if (!blocked) {
+    if (!blocked && !far) {
       for (const o of traffic) {
         if (o === t || Math.abs(o.vx - t.vx) > 20 || Math.abs(o.vz - t.vz) > 20) continue;
         if (Math.abs(angDiff(o.heading, t.heading)) > 1.1) continue;
         if (ahead(o.vx, o.vz, o.spec.hw, 1.0, sp.hd + o.spec.hd + 4.5)) { blocked = true; break; }
       }
     }
-    if (!blocked) {
+    if (!blocked && !far) {
       for (const p of ctx.peds) {
         if (Math.abs(p.x - t.vx) > 14 || Math.abs(p.z - t.vz) > 14) continue;
         if (ahead(p.x, p.z, 0.3, 0.5, sp.hd + 5)) { blocked = true; break; }

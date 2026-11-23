@@ -8,19 +8,22 @@
 //                    a curving diagonal "Broadway".
 //   Park           : three winding parkways linking the two.
 //   London         : east of Midtown — organic streets, river, bridges (london.js).
+//   Kathmandu      : north of Midtown — grown lanes off a few arterials (kathmandu.js).
 import {
   scene, rand, rr, pick, clamp, hex, flatMat, flatTexMat, texMat, litMat, makeAcc, addFlatQuad,
   addBox, solidBox, setXF, clearXF, makeXF, radialTex, glow,
 } from "./engine.js";
 import { noiseTex, slabTex } from "./textures.js";
 import { LONDON, RW, riverDist, inLondon, generateLondonRoads, placeLondonLandmarks } from "./london.js";
+import { inKathmandu, generateKathmanduRoads } from "./kathmandu.js";
 
 export const PARIS = { x: -560, z: 0, R: 340 };
 export const CITY = { x0: -114, x1: 720, z0: -560, z1: 560 };
 export const SHORE_X = -960;
-export const WORLD = { x0: -1000, x1: 1600, z0: -600, z1: 600 };
+export const WORLD = { x0: -1000, x1: 1600, z0: -600, z1: 1340 };
 
 export function districtAt(x, z) {
+  if (inKathmandu(x, z)) return "kathmandu";
   if (Math.hypot(x - PARIS.x, z - PARIS.z) <= PARIS.R + 6) return "paris";
   if (x >= LONDON.x0 - 10 && inLondon(x, z)) return riverDist(x, z) < RW + 3 ? "river" : "london";
   if (x >= CITY.x0 && z > CITY.z0 && z < CITY.z1) return "city";
@@ -194,6 +197,13 @@ export function generateRoads() {
     eastNodes: [1, 4, 6, 8, 11].map((j) => G[AX.length - 1][j]),
   });
 
+  // ---------- Kathmandu: north of Midtown, reached up four avenues and from Paris ----------
+  generateKathmanduRoads({
+    node, edge, reserved, landmarks,
+    gates: [0, 1, 3, 5, 7].map((i) => G[i][SZ.length - 1]),
+    parisNode: N[2][Rs.length - 1],
+  });
+
   indexRoads();
   placeLondonLandmarks(roadDist, reserved, landmarks);
 }
@@ -266,6 +276,7 @@ export function buildRoadMeshes() {
     paris: makeAcc("walkParis", walkMat("walkParisM", slabTex("walkParisT", "#c9bea6", "rgba(110,95,70,0.45)", 6)), 3, 3),
     park: makeAcc("walkPark", walkMat("walkParkM", slabTex("walkParkT", "#b8b2a2", "rgba(90,85,70,0.4)")), 3, 3),
     london: makeAcc("walkLondon", walkMat("walkLondonM", slabTex("walkLondonT", "#a3a09a", "rgba(60,58,55,0.5)", 3)), 3, 3),
+    kathmandu: makeAcc("walkKtm", walkMat("walkKtmM", slabTex("walkKtmT", "#a8836a", "rgba(90,55,40,0.45)", 6)), 3, 3),
   };
   const lineM = (n, c) => { const m = flatMat(n, hex(c), 0.3); m.zOffset = -5; return m; };
   const white = makeAcc("lineWhite", lineM("lineWhiteM", "#e2dfd2"));
@@ -320,7 +331,7 @@ export function buildRoadMeshes() {
     }
     // zebra crossings at busy junctions
     for (const [nd, atStart] of [[e.a, true], [e.b, false]]) {
-      if (nd.edges.length < 3 || e.len < 30) continue;
+      if (nd.edges.length < 3 || e.len < 30 || e.kind === "galli") continue;
       let maxClear = 0;
       for (const o of nd.edges) if (o !== e) maxClear = Math.max(maxClear, o.w / 2 + o.sw);
       const s = atStart ? maxClear + 2.2 : e.len - maxClear - 2.2;
@@ -359,6 +370,7 @@ export function buildLamps() {
 
   const pools = [];
   for (const e of edges) {
+    if (e.kind === "galli") continue;                         // Kathmandu lanes: no street lamps
     const paris = e.district === "paris" || e.district === "london";
     const spacing = paris ? 26 : 34;
     let side = rand() < 0.5 ? 1 : -1;

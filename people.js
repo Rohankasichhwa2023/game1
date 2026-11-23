@@ -72,8 +72,9 @@ function initTemplates() {
   phoneT = mergedTemplate("pedPhone", [{ mesh: ph, mat: litMat("phoneM", hex("#151618"), 0.4) }, { mesh: scr, mat: glowM }]);
 }
 
-function pickEdge() {
-  const list = edges.filter((e) => e.district !== "park" || rand() < 0.3);
+function pickEdge(district = null) {
+  const list = district ? edges.filter((e) => e.district === district && e.len > 6)
+    : edges.filter((e) => e.district !== "park" || rand() < 0.3);
   const total = list.reduce((a, e) => a + e.len, 0);
   let r = rand() * total;
   for (const e of list) { r -= e.len; if (r <= 0) return e; }
@@ -142,6 +143,25 @@ function makePed(e, look = null) {
   return p;
 }
 
+// An extra crowd that lives in one district (Kathmandu's busy lanes). They
+// stay there (respawning there too), and while the player is far away they go
+// dormant — hidden and not updated — so the crowd costs nothing elsewhere.
+export function spawnDistrictPeds(district, count) {
+  initTemplates();
+  for (let i = 0; i < count; i++) {
+    const p = makePed(pickEdge(district));
+    p.home = district;
+    if (!p.persona.jogger && rand() < 0.25 && i + 1 < count) {          // friends / family walking together
+      const f = makePed(p.e);
+      f.home = district; f.leader = p; f.state = "follow"; p.hasFollower = true;
+      f.persona.jogger = false; f.walk = p.walk; f.speed = p.walk;
+      f.persona.nightOwl = p.persona.nightOwl;
+      f.dir = p.dir; f.s = p.s; f.lat = p.lat > 0.5 ? p.lat - 0.32 : p.lat + 0.32;
+      place(f, 0, true);
+      i++;
+    }
+  }
+}
 export function spawnPeds(count = 190) {
   initTemplates();
   while (peds.length < count) {
@@ -374,7 +394,7 @@ export function updatePeds(dt, ctx) {
     if (checkAway && !p.char) {
       if (p.state === "away") {
         if (!world.night && rand() < 0.08) {
-          const e = pickEdge(), s = rr(2, e.len - 2), q = pathAt(e, s, Q);
+          const e = pickEdge(p.home), s = rr(2, e.len - 2), q = pathAt(e, s, Q);
           if (Math.hypot(q.x - pos.x, q.z - pos.z) > 80) {
             p.e = e; p.s = s; p.side = 1; p.push = 0; p.root.setEnabled(true);
             toWalk(p); p.x = q.x; p.z = q.z; place(p, 0, true);
@@ -389,6 +409,14 @@ export function updatePeds(dt, ctx) {
       }
     }
     if (p.state === "away") continue;
+    // far from the player: dormant (hidden, not updated) until you come near —
+    // they're specks in the haze out there, and this keeps the crowds cheap.
+    // Story characters always stay awake.
+    if (!p.char) {
+      const dormant = Math.abs(p.x - pos.x) > 170 || Math.abs(p.z - pos.z) > 170;
+      if (dormant !== !!p.dormant) { p.dormant = dormant; p.root.setEnabled(!dormant); }
+      if (dormant) continue;
+    }
 
     // ---- knocked down
     if (p.state === "down") {

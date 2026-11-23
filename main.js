@@ -87,6 +87,12 @@ import {
   buildLondonWorld,
   updateLondon,
 } from "./londonWorld.js";
+import { KTM, KTM_CORE } from "./kathmandu.js";
+import {
+  buildKathmanduWorld,
+  initKathmanduCulling,
+  updateKathmandu,
+} from "./ktmBuild.js";
 import {
   initVehicleTemplates,
   spawnParked,
@@ -104,6 +110,7 @@ import {
 } from "./vehicles.js";
 import {
   spawnPeds,
+  spawnDistrictPeds,
   updatePeds,
   peds,
   knockDown,
@@ -125,11 +132,10 @@ const t0 = performance.now();
 createFacades();
 generateRoads();
 
-// Start in the middle of Saint-Clair: on the pavement of one of the radial
-// boulevards just outside the fountain plaza, a few steps before the junction,
-// looking in toward the fountain. The starter bikes stand on the pavement
-// behind you, the cars are parked at the kerb.
-const START = (() => {
+// The old start point in the middle of Saint-Clair: no longer where you spawn,
+// but still the reference for which Midtown towers get interiors and where the
+// park keeps a clear view (so moving the spawn doesn't reshuffle the world).
+const PARIS_START = (() => {
   const fallback = { x: PARIS.x + 14, z: PARIS.z, yaw: Math.PI / 2 };
   const r = (n) => Math.hypot(n.x - PARIS.x, n.z - PARIS.z);
   let best = null,
@@ -175,20 +181,71 @@ const START = (() => {
     ],
   };
 })();
+// Spawn in Kathmandu: on the pavement of an arterial a few steps before a busy
+// junction near Durbar Square, facing into it. The starter bikes stand on the
+// pavement behind you, the cars are parked at the kerb.
+const START = (() => {
+  const goal = landmarks.ktmDurbar || KTM_CORE;
+  const dG = (n) => Math.hypot(n.x - goal.x, n.z - goal.z);
+  let best = null,
+    bd = Infinity;
+  for (const n of nodes) {
+    if (n.edges.length < 3 || n.edges.some((e) => e.district !== "kathmandu"))
+      continue;
+    const e = n.edges.find((x) => x.kind === "artery" && x.len > 30);
+    if (!e || dG(n) >= bd) continue;
+    bd = dG(n);
+    best = { n, e };
+  }
+  if (!best) return PARIS_START;
+  const { n, e } = best;
+  const back = Math.min(16, e.len / 2),
+    atA = e.a === n,
+    s0 = atA ? back : e.len - back,
+    dir = atA ? -1 : 1; // dir: +1 = walking toward the node along +s
+  const at = (s, off) => {
+    const q = pathAt(e, s, {});
+    const fx = q.tx * dir,
+      fz = q.tz * dir;
+    return { x: q.x + fz * off, z: q.z - fx * off, h: Math.atan2(fx, fz) };
+  };
+  const walk = e.w / 2 + e.sw * 0.55,
+    kerb = e.w / 2 - 1.15;
+  const p = at(s0, walk);
+  return {
+    x: p.x,
+    z: p.z,
+    yaw: p.h,
+    parked: [
+      { key: "superbike", ...at(s0 - dir * 3.2, walk) },
+      { key: "bike", ...at(s0 - dir * 5.0, walk) },
+      { key: "supercar", ...at(s0 - dir * 9, kerb) },
+      { key: "suv", ...at(s0 - dir * 15.5, kerb) },
+    ],
+  };
+})();
 buildRoadMeshes();
 buildGround();
 buildLondonGround();
-planBuildings(START);
+planBuildings(PARIS_START);
 buildBuildings();
 buildLamps();
-buildNature(START);
+buildNature(PARIS_START);
 buildLondonWorld();
+{
+  // Kathmandu: ground, squares + temples, Durbar Square palace
+  const k = buildKathmanduWorld(landmarks);
+  mapBuildings.push(...k.map);
+  roofs.push(...k.roofs);
+}
 flushAccs();
+initKathmanduCulling();
 for (const f of postFlush) f();
 initVehicleTemplates();
 spawnParked(START);
 spawnTraffic();
-spawnPeds(280);
+spawnPeds(300);
+spawnDistrictPeds("kathmandu", 300); // Kathmandu's busy lanes (dormant while you're elsewhere)
 spawnCharacters();
 initMission();
 console.log(
@@ -3471,6 +3528,7 @@ const DISTRICTS = {
   park: ["RIVERSIDE PARK", "Between the city and Saint-Clair"],
   beach: ["THE COAST", "Saint-Clair beach"],
   london: ["LONDON", "Mind the maze of streets"],
+  kathmandu: ["KATHMANDU", "Alleys, temples and Basantapur Durbar Square"],
   river: ["THE THAMES", "Crossing the river"],
 };
 let curDistrict = null,
@@ -3635,9 +3693,22 @@ const toMap = (x, z) => [x - WORLD.x0, WORLD.z1 - z];
   c.fillRect(0, 0, toMap(SHORE_X, 0)[0], baked.height);
   c.fillStyle = "#8a7c5c";
   c.fillRect(toMap(SHORE_X, 0)[0], 0, 55, baked.height);
-  const [lx0, lz0] = toMap(752, WORLD.z1);
+  const [lx0, lz0] = toMap(752, 620);
   c.fillStyle = "#1d1b1e";
-  c.fillRect(lx0, lz0, WORLD.x1 - 752, baked.height);
+  c.fillRect(lx0, lz0, WORLD.x1 - 752, 1240);
+  const [kx0, kz0] = toMap(KTM.x0, KTM.z1);
+  c.fillStyle = "#2a231e";
+  c.fillRect(kx0, kz0, KTM.x1 - KTM.x0, KTM.z1 - KTM.z0);
+  c.fillStyle = "#4a463f";
+  for (const q of [
+    ...(landmarks.ktmSquares || []),
+    ...(landmarks.ktmDurbar ? [landmarks.ktmDurbar] : []),
+  ]) {
+    const [qx, qz] = toMap(q.x, q.z);
+    c.beginPath();
+    c.arc(qx, qz, q.r + 2, 0, Math.PI * 2);
+    c.fill();
+  }
   c.strokeStyle = "#2a6d8f";
   c.lineWidth = RW * 2;
   c.lineCap = "round";
@@ -3715,7 +3786,13 @@ function drawMinimap() {
   mctx.rotate(-yaw);
   mctx.scale(0.9, 0.9);
   const [px, pz] = toMap(pos.x, pos.z);
-  mctx.drawImage(baked, -px, -pz);
+  // only the patch of the baked map around the player (not the whole image every frame)
+  {
+    const r = Math.ceil((R / 0.9) * 1.42) + 2;
+    const sx0 = Math.max(0, Math.floor(px - r)), sz0 = Math.max(0, Math.floor(pz - r));
+    const sx1 = Math.min(baked.width, Math.ceil(px + r)), sz1 = Math.min(baked.height, Math.ceil(pz + r));
+    if (sx1 > sx0 && sz1 > sz0) mctx.drawImage(baked, sx0, sz0, sx1 - sx0, sz1 - sz0, sx0 - px, sz0 - pz, sx1 - sx0, sz1 - sz0);
+  }
   const dot = (x, z, r, col) => {
     const [tx, tz] = toMap(x, z);
     const dx = tx - px,
@@ -3826,6 +3903,7 @@ const MAP_LABELS = [
   { x: SHORE_X + 10, z: -420, t: "THE COAST", s: "" },
   { x: 1000, z: 120, t: "LONDON", s: "Old town" },
   { x: 1470, z: -260, t: "THE THAMES", s: "" },
+  { x: KTM_CORE.x, z: KTM.z1 - 40, t: "KATHMANDU", s: "Old Newar town" },
 ];
 function bigToScreen(x, z) {
   const [mx, mz] = toMap(x, z);
@@ -4171,6 +4249,7 @@ engine.runRenderLoop(() => {
   if (!home) {
     animateBillboards(dt);
     updateLondon(dt, tod);
+    updateKathmandu(dt, camera);
     pulseHomeMarkers(now / 1000);
   }
   updateSound(dt);

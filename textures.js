@@ -33,8 +33,9 @@ function makeFacade(name, style, withInner = false) {
     for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) style.cell(ctx, c * cw, r * ch, cw, ch, mode, c, r);
     if (style.post) style.post(ctx, S, mode, cw, ch);
   };
-  const tex = canvasTex(name, 512, paint("day"));
-  const nightTex = canvasTex(name + "N", 512, paint("night"));
+  const SZ = style.size || 512;
+  const tex = canvasTex(name, SZ, paint("day"));
+  const nightTex = canvasTex(name + "N", SZ, paint("night"));
   const mat = new BABYLON.StandardMaterial(name + "M", scene);
   mat.diffuseTexture = tex;
   const sp = style.spec ?? 0.04;
@@ -249,6 +250,7 @@ export function createFacades() {
   }));
 
   createLondonFacades();
+  createKathmanduFacades();
 }
 
 // ---------------- London ----------------
@@ -371,6 +373,177 @@ function createLondonFacades() {
     lonShop("lonShopTeal", "#2e6670", "#f4efe2"), lonShop("lonShopCream", "#d9cfb6", "#2b2b2b"),
   ];
   FAC.lonPubs = [lonShop("lonPubOx", "#4a1418", "#e0b84e"), lonShop("lonPubGreen", "#16352a", "#e0b84e")];
+}
+
+// ---------------- Kathmandu ----------------
+// Newar brick: thin red fired brick with pale mortar courses, dark carved
+// timber windows with a diamond lattice (they glow through the lattice at
+// night); shopfronts with roll-up shutters and painted signboards; plastered
+// concrete houses in the usual pastel / ochre washes.
+const KTM_WOOD = "#3b2418";
+function lattice(ctx, m, x, y, w, h, litP = 0.45) {
+  if (m === "night") fill(ctx, rand() < litP ? pick(LIT) : "#060a10", x, y, w, h);
+  else {
+    fill(ctx, KTM_WOOD, x - 6, y - 6, w + 12, h + 12);
+    fill(ctx, "#1c110b", x, y, w, h);
+  }
+  ctx.save();
+  ctx.beginPath(); ctx.rect(x, y, w, h); ctx.clip();
+  ctx.strokeStyle = m === "night" ? "#000" : "#6a4428"; ctx.lineWidth = m === "night" ? 2.5 : 2;
+  ctx.beginPath();
+  for (let k = -h; k < w + h; k += 10) { ctx.moveTo(x + k, y); ctx.lineTo(x + k + h, y + h); ctx.moveTo(x + k + h, y); ctx.lineTo(x + k, y + h); }
+  ctx.stroke();
+  ctx.restore();
+  if (m === "day") {
+    fill(ctx, KTM_WOOD, x - 14, y - 15, w + 28, 9);                 // carved lintel, ends sticking out
+    fill(ctx, "#4a2c1b", x - 9, y + h + 5, w + 18, 6);              // sill
+    fill(ctx, "rgba(0,0,0,0.25)", x - 9, y + h + 11, w + 18, 3);
+  }
+}
+function brickBg(ctx, S, m, wall) {
+  fill(ctx, bg(m, wall), 0, 0, S, S);
+  if (m !== "day") return;
+  speckle(ctx, S, 5200, "235,160,120", "70,25,12", 0.05, 0.18, 3, 9);
+  ctx.fillStyle = "#c9b79c"; ctx.globalAlpha = 0.32;
+  for (let yy = 0; yy < S; yy += 6) ctx.fillRect(0, yy, S, 1.3);       // brick courses
+  ctx.globalAlpha = 1;
+}
+function createKathmanduFacades() {
+  FAC.ktm = {};
+  // upper storeys: a wide carved window band and a pair of small lattice windows
+  for (const [key, wall] of [["brickDark", "#b5543a"], ["brickLight", "#c8693f"]]) {
+    FAC.ktm[key] = makeFacade("ktm_" + key, {
+      cols: 2, rows: 2, cellW: 2.4, cellH: 2.8, spec: 0.03, wall,
+      bg: (ctx, S, m) => brickBg(ctx, S, m, wall),
+      cell(ctx, x, y, cw, ch, m, c, r) {
+        if (r === 0) lattice(ctx, m, x + cw * 0.1, y + ch * 0.22, cw * 0.8, ch * 0.5);
+        else lattice(ctx, m, x + cw * 0.34, y + ch * 0.26, cw * 0.32, ch * 0.42, 0.35);
+      },
+      post(ctx, S, m) {
+        if (m === "day") for (let r = 0; r < 2; r++) fill(ctx, "rgba(40,15,8,0.16)", 0, r * S / 2 + S / 2 - 12, S, 12);  // soot under the eaves / bands
+      },
+    });
+  }
+  // ground storey: plain and solid, small lattice windows and a carved door
+  FAC.ktm.brickGround = makeFacade("ktm_brickGround", {
+    cols: 2, rows: 1, cellW: 2.4, cellH: 3.2, spec: 0.03, wall: "#a94d35",
+    bg(ctx, S, m) {
+      brickBg(ctx, S, m, "#a94d35");
+      if (m !== "day") return;
+      const g = ctx.createLinearGradient(0, S * 0.7, 0, S);
+      g.addColorStop(0, "rgba(30,15,10,0)"); g.addColorStop(1, "rgba(30,15,10,0.45)");   // damp + soot near the street
+      fill(ctx, g, 0, S * 0.7, S, S * 0.3);
+    },
+    cell(ctx, x, y, cw, ch, m, c) {
+      if (c === 0) { lattice(ctx, m, x + cw * 0.38, y + ch * 0.32, cw * 0.24, ch * 0.16, 0.3); return; }
+      const dx = x + cw * 0.27, dw = cw * 0.46, dy = y + ch * 0.3, dh = ch * 0.7;
+      if (m === "night") { fill(ctx, "#040404", dx, dy, dw, dh); return; }
+      fill(ctx, KTM_WOOD, dx - 10, dy - 22, dw + 20, dh + 22);                 // ornate frame
+      ctx.fillStyle = "#2a170e";
+      ctx.beginPath(); ctx.arc(dx + dw / 2, dy - 4, dw * 0.55, Math.PI, 0); ctx.fill();   // carved tympanum (torana)
+      fill(ctx, "#4a2c1b", dx, dy, dw / 2 - 2, dh); fill(ctx, "#43271a", dx + dw / 2 + 2, dy, dw / 2 - 2, dh);   // double door
+      ctx.fillStyle = "rgba(0,0,0,0.3)";
+      for (let k = 1; k < 4; k++) ctx.fillRect(dx, dy + (dh * k) / 4, dw, 3);
+      fill(ctx, "#c9a227", dx + dw / 2 - 8, dy + dh * 0.5, 4, 8); fill(ctx, "#c9a227", dx + dw / 2 + 4, dy + dh * 0.5, 4, 8);
+    },
+  });
+  // shopfronts: roll-up shutters (some open on lit, crowded shelves), signboards
+  const SIGNS = [["#b3261e", "#ffe9a8"], ["#1f4e8c", "#ffffff"], ["#1d6b3a", "#fff3c4"], ["#d9a21b", "#3a1a0a"]];
+  FAC.ktm.shops = [0, 1, 2].map((v) => makeFacade("ktm_shop" + v, {
+    cols: 2, rows: 1, cellW: 2.4, cellH: 3.2, spec: 0.06,
+    bg: (ctx, S, m) => fill(ctx, bg(m, v === 1 ? "#d9cdb6" : "#9d4a33"), 0, 0, S, S),
+    cell(ctx, x, y, cw, ch, m, c) {
+      const [board, ink] = SIGNS[(v + c) % SIGNS.length];
+      const ox = x + cw * 0.05, ow = cw * 0.9, oy = y + ch * 0.27, oh = ch * 0.73;
+      const open = (v + c) % 3 !== 2;
+      if (m === "night") { fill(ctx, open && rand() < 0.85 ? pick(LIT) : "#050505", ox, oy, ow, oh); return; }
+      fill(ctx, board, x + 2, y + ch * 0.06, cw - 4, ch * 0.17);                // signboard
+      ctx.fillStyle = ink;
+      for (let k = 0; k < 5; k++) ctx.fillRect(x + cw * (0.1 + k * 0.16), y + ch * 0.1, cw * 0.11, ch * 0.08);
+      if (open) {
+        fill(ctx, "#2b2018", ox, oy, ow, oh);
+        const goods = ["#d94f3d", "#f2c14e", "#3d8fd9", "#5fbf6a", "#e8e2d0", "#b05fd9"];
+        for (let k = 0; k < 70; k++) fill(ctx, pick(goods), ox + rand() * (ow - 8), oy + 6 + rand() * (oh * 0.75), rr(4, 10), rr(4, 9));
+        fill(ctx, "#8a8f94", ox, oy, ow, oh * 0.12);                            // shutter rolled up
+      } else {
+        fill(ctx, "#8a8f94", ox, oy, ow, oh);
+        ctx.fillStyle = "rgba(0,0,0,0.25)";
+        for (let yy = oy; yy < oy + oh; yy += 6) ctx.fillRect(ox, yy, ow, 2);
+      }
+    },
+  }));
+  // small grocery shops (kirana pasal): signboard, shutter rolled up on a
+  // cramped shop — shelves of packets, strings of snack packets hanging at the
+  // front, sacks of rice and lentils on the floor, a little counter
+  const GROC = [["#c62828", "#ffd54f"], ["#f9a825", "#7a1010"], ["#2e7d32", "#ffffff"]];
+  FAC.ktm.grocery = GROC.map(([board, ink], v) => makeFacade("ktm_grocery" + v, {
+    cols: 2, rows: 1, cellW: 2.4, cellH: 3.2, spec: 0.06,
+    bg: (ctx, S, m) => fill(ctx, bg(m, v === 2 ? "#cfc4ae" : "#a3523a"), 0, 0, S, S),
+    cell(ctx, x, y, cw, ch, m, c) {
+      const ox = x + cw * 0.04, ow = cw * 0.92, oy = y + ch * 0.26, oh = ch * 0.74;
+      if (m === "night") { fill(ctx, rand() < 0.9 ? pick(LIT) : "#050505", ox, oy, ow, oh); return; }
+      fill(ctx, board, x + 2, y + ch * 0.05, cw - 4, ch * 0.18);                  // signboard
+      ctx.fillStyle = ink;
+      for (let k = 0; k < 6; k++) ctx.fillRect(x + cw * (0.08 + k * 0.145), y + ch * 0.09, cw * 0.1, ch * 0.09);
+      fill(ctx, "#2a1e15", ox, oy, ow, oh);                                       // shop interior
+      const goods = ["#e53935", "#fdd835", "#1e88e5", "#43a047", "#fb8c00", "#f5f5f5", "#8e24aa", "#00acc1"];
+      for (let r = 0; r < 4; r++) {                                               // shelves stacked with packets
+        const sy = oy + oh * (0.12 + r * 0.16);
+        fill(ctx, "#6d4c33", ox + 4, sy + oh * 0.13, ow - 8, 4);
+        for (let gx = ox + 6; gx < ox + ow - 10; gx += rr(6, 11)) fill(ctx, pick(goods), gx, sy + rr(2, 6), rr(4, 9), oh * 0.13 - rr(2, 6));
+      }
+      for (let k = 0; k < 7; k++) {                                               // hanging strings of snack packets
+        const hx = ox + 8 + (k * (ow - 16)) / 6;
+        for (let j = 0; j < 5; j++) fill(ctx, pick(goods), hx - 4, oy + 4 + j * 10, 8, 8);
+      }
+      for (let k = 0; k < 4; k++) {                                               // sacks of rice / lentils / flour
+        const sx = ox + 6 + k * (ow / 4.2), sw = ow / 4.8;
+        ctx.fillStyle = pick(["#d7c49e", "#cbb184", "#e3d6b8"]);
+        ctx.beginPath(); ctx.ellipse(sx + sw / 2, oy + oh * 0.9, sw / 2, oh * 0.1, 0, 0, Math.PI * 2); ctx.fill();
+        fill(ctx, pick(["#f2c14e", "#c0703a", "#f5f0e0"]), sx + sw * 0.2, oy + oh * 0.8, sw * 0.6, oh * 0.05);   // grain heaped on top
+      }
+      if (c === 1) fill(ctx, "#5d4030", ox + ow * 0.55, oy + oh * 0.68, ow * 0.45, oh * 0.32);   // counter
+      fill(ctx, "#8a8f94", ox, oy, ow, oh * 0.07);                                // rolled-up shutter
+    },
+  }));
+  // plastered concrete houses
+  const PLASTER =[["cream", "#e8dcbf"], ["salmon", "#e3b9a4"], ["ochre", "#d8a55e"], ["sky", "#bcd2dc"]];
+  FAC.ktm.plaster = PLASTER.map(([k, wall]) => makeFacade("ktm_plaster_" + k, {
+    cols: 2, rows: 1, cellW: 2.4, cellH: 3.0, spec: 0.03, wall, size: 256,
+    bg(ctx, S, m) {
+      fill(ctx, bg(m, wall), 0, 0, S, S);
+      if (m !== "day") return;
+      speckle(ctx, S, 700, "255,255,255", "90,80,60", 0.04, 0.1, 2, 6);
+      for (let i = 0; i < 6; i++) fill(ctx, "rgba(80,70,55,0.08)", rand() * S, 0, rr(3, 10), S);   // rain streaks
+      fill(ctx, "rgba(255,255,255,0.35)", 0, S - 7, S, 5);                                     // slab edge
+    },
+    cell(ctx, x, y, cw, ch, m) {
+      const wx = x + cw * 0.22, wy = y + ch * 0.3, ww = cw * 0.56, wh = ch * 0.42;
+      if (m === "day") { fill(ctx, "rgba(0,0,0,0.18)", wx - 8, wy - 9, ww + 16, 6); fill(ctx, "#d7d4cc", wx - 4, wy - 4, ww + 8, wh + 8); }
+      fill(ctx, glass(m, ["#3b5560", "#46636e", "#2f4650"], 0.36), wx, wy, ww, wh);
+      if (m === "day") { fill(ctx, "#d7d4cc", wx + ww / 2 - 1, wy, 2, wh); fill(ctx, "#d7d4cc", wx, wy + wh / 2 - 1, ww, 2); }
+    },
+  }));
+  // whitewashed neoclassical (Durbar Square): white lattice windows, pilasters
+  FAC.ktm.white = makeFacade("ktm_white", {
+    cols: 2, rows: 1, cellW: 2.4, cellH: 3.2, spec: 0.05, wall: "#f2f0ea",
+    bg(ctx, S, m) {
+      fill(ctx, bg(m, "#f2f0ea"), 0, 0, S, S);
+      if (m !== "day") return;
+      speckle(ctx, S, 800, "255,255,255", "120,115,100", 0.03, 0.08, 2, 6);
+      for (let c = 0; c < 2; c++) fill(ctx, "rgba(0,0,0,0.07)", c * S / 2, 0, 10, S);       // pilasters
+      fill(ctx, "rgba(0,0,0,0.1)", 0, 12, S, 6);
+    },
+    cell(ctx, x, y, cw, ch, m) {
+      const wx = x + cw * 0.28, wy = y + ch * 0.22, ww = cw * 0.44, wh = ch * 0.56;
+      if (m === "night") { fill(ctx, rand() < 0.4 ? pick(LIT) : "#060a10", wx, wy, ww, wh); return; }
+      fill(ctx, "#e4e1d8", wx - 10, wy - 10, ww + 20, wh + 20);
+      fill(ctx, "#2f3a40", wx, wy, ww, wh);
+      ctx.fillStyle = "#f7f6f2";
+      for (let k = 1; k < 4; k++) ctx.fillRect(wx + (ww * k) / 4 - 2, wy, 4, wh);
+      for (let k = 1; k < 5; k++) ctx.fillRect(wx, wy + (wh * k) / 5 - 2, ww, 4);
+    },
+  });
 }
 
 // ---------------------------------------------------------------- roofs & small textures

@@ -423,23 +423,34 @@ export function solidCenter(s) {
 }
 
 // ---------------------------------------------------------------- mesh accumulators
+// A world accumulator is split by map chunk (CHUNK m squares): each primitive
+// goes into the sub-accumulator of the chunk it sits in, so every chunk becomes
+// its own mesh that the camera can cull — instead of one mesh per material
+// spanning the whole world that is always drawn. After flushAccs the
+// accumulator's meshes are in a.meshes (a.mesh = the first, for old callers).
+const CHUNK = 400;
 const accs = [];
 export function makeAcc(name, mat, tw = 1, th = 1) {
   mat.backFaceCulling = false;
-  const a = {
-    name,
-    mat,
-    tw,
-    th,
-    pos: [],
-    nrm: [],
-    uv: [],
-    idx: [],
-    mesh: null,
-  };
+  const a = { name, mat, tw, th, pos: [], nrm: [], uv: [], idx: [], mesh: null, meshes: [], subs: new Map() };
   accs.push(a);
   return a;
 }
+// The sub-accumulator of world accumulator `acc` for world point (x, z).
+// (Accumulators made elsewhere — e.g. house interiors — have no subs: as-is.)
+function chunkAcc(acc, x, z) {
+  if (!acc.subs) return acc;
+  const k = Math.floor(x / CHUNK) * 4096 + Math.floor(z / CHUNK);
+  let s = acc.subs.get(k);
+  if (!s) {
+    s = { name: acc.name + "_" + k, mat: acc.mat, tw: acc.tw, th: acc.th, pos: [], nrm: [], uv: [], idx: [], mesh: null, parent: acc };
+    acc.subs.set(k, s);
+    accs.push(s);
+  }
+  return s;
+}
+const worldX = (x, z) => (XF ? XF.cx + x * XF.c + z * XF.s : x);
+const worldZ = (x, z) => (XF ? XF.cz - x * XF.s + z * XF.c : z);
 function vert(acc, x, y, z, nx, ny, nz, u, v) {
   if (XF) {
     acc.pos.push(XF.cx + x * XF.c + z * XF.s, y, XF.cz - x * XF.s + z * XF.c);
@@ -454,6 +465,7 @@ const ZERO = { x: 0, y: 0, z: 0 };
 // Box in current frame. faceFn(dir, planeCoord) → acc | null, or a single acc.
 // UVs are planar from the (local) origin o so window grids line up.
 export function addBox(x0, y0, z0, x1, y1, z1, faceFn, o = ZERO) {
+  const mxl = (x0 + x1) / 2, mzl = (z0 + z1) / 2, wx = worldX(mxl, mzl), wz = worldZ(mxl, mzl);
   const faces = [
     ["+x", x1, 1, 0, 0],
     ["-x", x0, -1, 0, 0],
@@ -463,8 +475,9 @@ export function addBox(x0, y0, z0, x1, y1, z1, faceFn, o = ZERO) {
     ["-z", z0, 0, 0, -1],
   ];
   for (const [dir, c, nx, ny, nz] of faces) {
-    const acc = typeof faceFn === "function" ? faceFn(dir, c) : faceFn;
-    if (!acc) continue;
+    const acc0 = typeof faceFn === "function" ? faceFn(dir, c) : faceFn;
+    if (!acc0) continue;
+    const acc = chunkAcc(acc0, wx, wz);
     let v;
     if (dir[1] === "x")
       v = [
@@ -511,8 +524,9 @@ export function solidBox(x0, y0, z0, x1, y1, z1, faceFn, o) {
 }
 // Convex polygon (pts in current frame). The normal is oriented away from
 // `ref` (a point inside the solid). uvFn(p) → [u, v].
-export function addPoly(acc, pts, ref, uvFn) {
+export function addPoly(acc0, pts, ref, uvFn) {
   const [p0, p1, p2] = pts;
+  const acc = chunkAcc(acc0, worldX(p0[0], p0[2]), worldZ(p0[0], p0[2]));
   const e1 = [p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2]];
   const e2 = [p2[0] - p0[0], p2[1] - p0[1], p2[2] - p0[2]];
   let nx = e1[1] * e2[2] - e1[2] * e2[1],
@@ -539,7 +553,8 @@ export function addPoly(acc, pts, ref, uvFn) {
     acc.idx.push(base, base + i, base + i + 1);
 }
 // Flat world-space quad (no frame), used for road ribbons.
-export function addFlatQuad(acc, a, b, c, d, y, uvs) {
+export function addFlatQuad(acc0, a, b, c, d, y, uvs) {
+  const acc = chunkAcc(acc0, a[0], a[1]);
   const base = acc.pos.length / 3;
   for (let i = 0; i < 4; i++) {
     const p = [a, b, c, d][i];
@@ -564,5 +579,9 @@ export function flushAccs() {
     mesh.isPickable = false;
     a.mesh = mesh;
     a.pos = a.nrm = a.uv = a.idx = null; // free the JS arrays
+    if (a.parent) { a.parent.meshes.push(mesh); if (!a.parent.mesh) a.parent.mesh = mesh; }
+    else a.meshes.push(mesh);
+    // compile its shader now, not the first time it comes into view (a hitch)
+    if (a.mat.forceCompilation) a.mat.forceCompilation(mesh);
   }
 }

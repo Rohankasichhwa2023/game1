@@ -385,6 +385,13 @@
             font-weight: 700;
             letter-spacing: 2px;
             text-shadow: 0 2px 6px rgba(0, 0, 0, .4);
+            z-index: 100;
+            transition: opacity .45s ease;
+        }
+
+        #loading.done {
+            opacity: 0;
+            pointer-events: none;
         }
 
         #clickToPlay {
@@ -437,7 +444,8 @@
         <h2>Controls</h2>
         <div><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> Move</div>
         <div><kbd>Shift</kbd> Run</div>
-        <div><kbd>Space</kbd> Jump · <kbd>Space</kbd><kbd>Space</kbd> next to a building: leap onto its roof</div>
+        <div><kbd>Space</kbd> Jump</div>
+        <div><kbd>Q</kbd> Punch · three in a row ends in a kick</div>
         <div><kbd>F</kbd> Switch between web shooter and gun</div>
         <div>Web shooter: <kbd>Left click</kbd> web the white target · hold to swing · release to fly ·
             click again mid-air to chain · <kbd>Right click</kbd> web zip to the amber roof target</div>
@@ -462,7 +470,10 @@
     <div id="district" class="hud"></div>
     <div id="loading">Building the city…</div>
 
-    <script type="module" src="main.js"></script>
+    <!-- let "Building the city…" paint before the (long, blocking) world build starts -->
+    <script type="module">
+        requestAnimationFrame(() => requestAnimationFrame(() => import("./main.js")));
+    </script>
 </body>
 
 </html>

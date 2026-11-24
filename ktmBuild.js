@@ -19,8 +19,9 @@
 // camera can cull, and tiles past the fog are switched off entirely.
 import {
   scene, hex, clamp, litMat, texMat, flatTexMat, canvasTex, makeAcc, addBox, addPoly, addSolid,
-  setXF, clearXF, makeXF, xfp,
+  setXF, clearXF, makeXF, xfp, setLift, terrainH, landH,
 } from "./engine.js";
+import { TERRAIN_BOX } from "./terrain.js";
 import { FAC, noiseTex, slabTex } from "./textures.js";
 import { KTM, KTM_CORE, krand, krr, kpick } from "./kathmandu.js";
 
@@ -91,7 +92,9 @@ function initMats() {
   FAC.ktm.plaster.forEach((f, i) => fac("plaster" + i, f));
   fac("whiteFac", FAC.ktm.white);
 }
-const TX = 3, TZ = 3, tiles = [];
+// One tile: the engine already splits every accumulator into 400 m map chunks
+// that cull on their own; a finer grid on top only multiplied draw calls.
+const TX = 1, TZ = 1, tiles = [];
 let cur = 0;
 function useTile(x, z) {
   const ix = clamp(Math.floor(((x - KTM.x0) / (KTM.x1 - KTM.x0)) * TX), 0, TX - 1);
@@ -176,9 +179,23 @@ export const KTM_MAPC = { newar: "#5a3326", modern: "#4d4842" };
 // ---------------------------------------------------------------- houses
 // Called by buildings.js with the building's frame already set (local -z =
 // the street). Returns a roof-landing entry (flat roofs) or null.
-export function buildKtm(sp) {
+// On the hillside the house stands at the height of the street in front of
+// it (buildings.js has already set that lift); where the ground falls away
+// under it, a brick plinth fills the gap down to the lowest corner.
+export function buildKtm(sp, lift = 0) {
   initMats();
   useTile(sp.xf.cx, sp.xf.cz);
+  const { hw, hd } = sp;
+  let low = lift;
+  for (const [lx, lz] of [[-hw, -hd], [hw, -hd], [hw, hd], [-hw, hd]]) {
+    const [x, z] = xfp(sp.xf, lx, lz);
+    low = Math.min(low, terrainH(x, z));
+  }
+  if (low < lift - 0.03) {
+    const y0 = low - lift - 0.3;
+    addBox(-hw, y0, -hd, hw, 0, hd, sides(A("stone")));
+    addSolid(-hw, y0, -hd, hw, 0, hd);
+  }
   return sp.style === "newar" ? buildNewar(sp) : buildModern(sp);
 }
 function buildNewar(sp) {
@@ -399,15 +416,16 @@ export function buildKathmanduWorld(landmarks) {
   const gt = noiseTex("ktmGroundT", "#9c8770", 6000, "200,175,140", "80,60,45", 256, [1, 3]);
   const W = KTM.x1 - KTM.x0 + 40, D = KTM.z1 - KTM.z0 + 40;
   gt.uScale = W / 10; gt.vScale = D / 10;
-  const g = MB.CreateGround("ktmGround", { width: W, height: D }, scene);
-  g.position.set((KTM.x0 + KTM.x1) / 2, 0.016, (KTM.z0 + KTM.z1) / 2);
+  // (a few cm under the roads: on the slopes its 6 m grid sags differently
+  // from the road strips, so it needs the margin not to poke through)
+  const g = draped("ktmGround", (KTM.x0 + KTM.x1) / 2, (KTM.z0 + KTM.z1) / 2, W, D, -0.03);
   g.material = flatTexMat("ktmGroundM", gt, 0.2); g.material.zOffset = -1;
-  g.freezeWorldMatrix(); g.isPickable = false;
+  // (the hillside round the town is the island's own grass now — coast.js)
   const slab = slabTex("ktmSquareT", "#8e8a82", "rgba(60,58,54,0.4)", 5);
   const discM = flatTexMat("ktmSquareM", slab, 0.22); discM.zOffset = -2;
   const disc = (x, z, r, name) => {
     const d = MB.CreateDisc(name, { radius: r, tessellation: 40 }, scene);
-    d.rotation.x = Math.PI / 2; d.position.set(x, 0.035, z); d.material = discM;
+    d.rotation.x = Math.PI / 2; d.position.set(x, terrainH(x, z) + 0.035, z); d.material = discM;
     d.freezeWorldMatrix(); d.isPickable = false;
   };
   slab.uScale = slab.vScale = 10;
@@ -415,11 +433,13 @@ export function buildKathmanduWorld(landmarks) {
   for (const [i, q] of (landmarks.ktmSquares || []).entries()) {
     disc(q.x, q.z, q.r + 2, "ktmSquare" + i);
     useTile(q.x, q.z);
+    setLift(terrainH(q.x, q.z));
     setXF(makeXF(q.x, q.z, krr(0, Math.PI / 2)));
     const base = clamp(q.r * 0.42, 6.5, 8.5);
     createTieredPagoda({ tiers: kpick([2, 3, 3]), baseWidth: base, tierHeight: krr(2.8, 3.3) });
     if (krand() < 0.7) shrine(q.r * 0.62, q.r * 0.3);
     clearXF();
+    setLift(0);
     const half = base / 2 + 3.3;
     map.push({ pts: [[q.x - half, q.z - half], [q.x + half, q.z - half], [q.x + half, q.z + half], [q.x - half, q.z + half]], color: "#8a4a32" });
   }
@@ -429,14 +449,32 @@ export function buildKathmanduWorld(landmarks) {
     disc(d.x, d.z, d.r + 2, "ktmDurbar");
     useTile(d.x, d.z);
     const xf = makeXF(d.x, d.z, d.yaw);
+    const dy = terrainH(d.x, d.z);
+    setLift(dy);
     setXF(xf);
     const { shapes, neo } = createNewarPalace({ towerTiers: 5, wingLength: 26 });
     clearXF();
+    setLift(0);
     for (const s of shapes) map.push({ pts: [[s.x0, s.z0], [s.x1, s.z0], [s.x1, s.z1], [s.x0, s.z1]].map(([x, z]) => xfp(xf, x, z)), color: s.color });
     const [nx, nz] = xfp(xf, neo.x, neo.z);
-    roofsOut.push({ xf: makeXF(nx, nz, d.yaw), hw: neo.hw, hd: neo.hd, lhw: neo.hw - 1, lhd: neo.hd - 1, top: neo.top, mechs: [] });
+    roofsOut.push({ xf: makeXF(nx, nz, d.yaw), hw: neo.hw, hd: neo.hd, lhw: neo.hw - 1, lhd: neo.hd - 1, top: neo.top + dy, mechs: [] });
   }
   return { map, roofs: roofsOut };
+}
+
+// A ground mesh (w × d, centred on cx, cz) with its vertices following the
+// terrain, `y` above it.
+function draped(name, cx, cz, w, d, y) {
+  const g = BABYLON.MeshBuilder.CreateGround(name, {
+    width: w, height: d, subdivisionsX: Math.ceil(w / 6), subdivisionsY: Math.ceil(d / 6),
+  }, scene);
+  const p = g.getVerticesData(BABYLON.VertexBuffer.PositionKind);
+  for (let i = 0; i < p.length; i += 3) p[i + 1] = landH(cx + p[i], cz + p[i + 2]) + y;
+  g.setVerticesData(BABYLON.VertexBuffer.PositionKind, p);
+  g.position.set(cx, 0, cz);
+  g.refreshBoundingInfo();
+  g.freezeWorldMatrix(); g.isPickable = false;
+  return g;
 }
 
 // ---------------------------------------------------------------- culling
@@ -445,7 +483,7 @@ export function buildKathmanduWorld(landmarks) {
 export function initKathmanduCulling() {
   for (const t of tiles) {
     if (!t) continue;
-    for (const a of Object.values(t.accs)) if (a.mesh) t.meshes.push(a.mesh);
+    for (const a of Object.values(t.accs)) t.meshes.push(...(a.meshes.length ? a.meshes : a.mesh ? [a.mesh] : []));
   }
 }
 let cullT = 0;

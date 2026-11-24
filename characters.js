@@ -17,7 +17,7 @@
 // They only know their own world: no player name, no plot, rumours that are
 // sometimes wrong, and "no idea" when they don't know. Memory, money and
 // favours are saved in localStorage so they hold grudges between sessions.
-import { scene, camera, engine, canvas, hex, litMat, addSolidR, clamp, state as world } from "./engine.js";
+import { scene, camera, engine, canvas, hex, litMat, addSolidR, clamp, terrainH, state as world } from "./engine.js";
 import { edges, nodes, pathAt, landmarks, PARIS, SHORE_X } from "./roads.js";
 import { LON_CORE } from "./london.js";
 import { POND } from "./nature.js";
@@ -203,7 +203,7 @@ const CAST = [
     persona: { brave: 0.6, temper: 0.5, warmth: 0.7 }, walkSpeed: 1.4, jogSpeed: 2.7,
     addr: { hostile: "buddy", neutral: "hon", friend: "hon" },
     quirk: { pre: ["Okay, ", "Look, ", "Honestly? ", "Mm. "], post: ["", ", okay?", ". Anyway."] },
-    schedule: [[0, "midW", "lean", "on a break outside St. Agnes"], [7, "times", "eat", "grabbing coffee after her shift"], [9, "home"], [16, "pond", "jog", "jogging in Riverside Park"], [18, "midW", "phone", "calling her brother"], [19, "midW", "lean", "on shift at St. Agnes"]],
+    schedule: [[0, "midW", "lean", "on a break outside St. Agnes"], [7, "times", "eat", "grabbing coffee after her shift"], [9, "home"], [16, "pond", "jog", "jogging over the bay bridge"], [18, "midW", "phone", "calling her brother"], [19, "midW", "lean", "on shift at St. Agnes"]],
     greet: {
       first: ["If you're bleeding, I'm off the clock. If you're not — hi.", "Do I know you? Sorry, I've been awake for nineteen hours."],
       again: ["Oh, hey. You again."],
@@ -365,7 +365,7 @@ const CAST = [
     persona: { brave: 0.3, temper: 0.2, warmth: 0.65, curious: 0.9 }, walkSpeed: 1.3,
     addr: { hostile: "...you", neutral: "hey", friend: "you" },
     quirk: { pre: ["Um, ", "Oh— ", "Honestly, ", "Like, "], post: ["...", "", ", I guess.", ", you know?"] },
-    schedule: [[0, "londonPub", "lean", "listening to the busker"], [2, "home"], [10, "pond", "paint", "painting by the pond"], [15, "fountain", "paint", "sketching the fountain"], [20, "londonPub", "lean", "listening to the busker"]],
+    schedule: [[0, "londonPub", "lean", "listening to the busker"], [2, "home"], [10, "pond", "paint", "painting the bay from the bridge"], [15, "fountain", "paint", "sketching the fountain"], [20, "londonPub", "lean", "listening to the busker"]],
     greet: {
       first: ["Oh! Sorry, I didn't see you. I was looking at the light. It's doing a thing.", "Hi... are you in my drawing? You're kind of in my drawing."],
       again: ["Oh, hi again..."],
@@ -630,6 +630,57 @@ const CAST = [
     vs: { claude: "Thought about my offer, Moreau?", priya: "Ms. Shah. Always a pleasure. Never a profit." },
   },
   {
+    id: "laxmi", name: "Laxmi Shrestha", short: "Laxmi Didi", age: 61, role: "Temple caretaker", offset: -1.5,
+    look: { shirt: "#a8232e", sleeve: "#c9a227", skin: "#a8724e", hair: "#1a1410", pants: "#5a1a22", longHair: true },
+    persona: { brave: 0.7, temper: 0.35, warmth: 0.85 }, walkSpeed: 1.0,
+    addr: { hostile: "you", neutral: "babu", friend: "my child" },
+    quirk: { pre: ["Hai, ", "Listen, ", "Aama says — ", "Babu, "], post: [". Ke garne.", ", hai?", ". The gods are watching.", ""] },
+    schedule: [[0, "home"], [5, "durbar", "sweep", "sweeping the temple steps"], [9, "durbar", "inspect", "looking after the shrines"], [13, "durbar", "eat", "eating chiura in the shade"], [15, "durbar", "inspect", "lighting the evening lamps"], [20, "home"]],
+    greet: {
+      first: ["Namaste, babu. You're new to Kathmandu — I can tell, you're looking up at everything.", "Namaste. Mind the pigeons, they think they own the square."],
+      again: ["Namaste again, babu."],
+      friend: ["Ah, my child! Come, sit. Have you eaten?"],
+      hostile: ["Leave the square. The gods don't need your kind of trouble."],
+      busy: ["One moment — the lamps don't light themselves."],
+    },
+    small: {
+      sweep: ["Two hundred years these steps have been swept every morning. Not one day missed."],
+      inspect: ["The struts on the pagoda — every one carved by hand. Gods, dancers, demons. Look closely."],
+      eat: ["Chiura and a little achar. Simple food for a long life."],
+      any: ["The hills hold the city like two hands.", "Everything here is older than it looks, and stronger."],
+    },
+    rumors: [
+      { t: "There are boats at the west jetty now. Fishermen, they say. Fishermen with very clean hands.", need: -2 },
+      { t: "Old Tom the sailor knows every current in that bay. Ask him if you ever take a boat out.", need: 0 },
+      { t: "A rich man from London has been buying 'antiques'. Nothing he buys is antique to us — it's family.", need: 2 },
+    ],
+    bio: [
+      { t: "Laxmi Shrestha. My mother kept this square, and her mother before her.", need: -3 },
+      { t: "I was born in the lane behind the palace. I've never slept a night outside the valley.", need: 1 },
+      { t: "My son went to sea. He sends letters. I read them to the goddess, she likes to hear about the world.", need: 4 },
+    ],
+    deflect: ["That is my business, babu.", "Ask me again when you've had tea with me."],
+    opinions: {
+      tom: "The sailor? A good man who drinks a little. The sea does that.",
+      grant: "Holloway. I've heard that name, and not kindly.",
+      priya: "The architect girl drew our palace once. Beautifully. She understands old stones.",
+    },
+    needs: { hungry: ["Have you eaten? I haven't. Too much to do."], tired: ["My knees are older than the pagoda today."], broke: [] },
+    gift: { takes: true, att: 2, accept: ["For the temple? The goddess thanks you. So do I."] },
+    threat: { action: "none", lines: ["You'd threaten an old woman in front of the gods? Shame.", "Go on, then. I've seen worse than you."] },
+    bye: { hostile: ["Go."], neutral: ["Jaau, babu. Go well."], friend: ["Come back for tea, my child."] },
+    barks: { work: ["Om mani padme hum...", "Shoo, pigeons, shoo!"], friendly: ["My child!"], hostile: ["Not you again."], night: ["The lamps are lit. Go home, babu."] },
+    friends: ["tom"],
+    favor: {
+      need: 1, target: "tom",
+      ask: "Will you do an old woman a favour? Tell the sailor Tom that his letter came — he'll know which one.",
+      remind: "Did you find the sailor?",
+      thanks: "He cried? Good. Some letters should make you cry. Here — for the walk.", reward: { cash: 30, att: 2 },
+    },
+    receives: {},
+    vs: {},
+  },
+  {
     id: "kenji", name: "Kenji Watanabe", short: "Kenji", age: 27, role: "Courier", offset: 5,
     look: { shirt: "#27ae60", sleeve: "#1d1d1d", skin: "#e0b08c", hair: "#111111", pants: "#1d1d1d" }, hat: ["cap", "#111111"], backpack: "#f1c40f",
     persona: { brave: 0.65, temper: 0.4, warmth: 0.6 }, walkSpeed: 3.1,
@@ -707,10 +758,11 @@ function memOf(id) {
 const SPOT_INFO = {
   times: ["Times plaza", "Midtown"], rb: ["the Midtown roundabout", "Midtown"], midE: ["east Midtown", "Midtown"],
   midW: ["St. Agnes hospital", "Midtown"], broadway: ["Broadway", "Midtown"], plaza: ["the café on the Saint-Clair plaza", "Saint-Clair"],
-  fountain: ["the Saint-Clair fountain", "Saint-Clair"], stclairS: ["south Saint-Clair", "Saint-Clair"], pond: ["Riverside Park", "Park"],
+  fountain: ["the Saint-Clair fountain", "Saint-Clair"], stclairS: ["south Saint-Clair", "Saint-Clair"], pond: ["the bay bridge", "the Bay"],
   clock: ["the clock tower", "London"], wheel: ["the big wheel", "London"], square: ["the garden square", "London"],
   circus: ["the circus", "London"], highSt: ["the high street", "London"], londonPub: ["the Red Lion", "London"],
   bridge: ["the bridge", "London"], embank: ["the embankment", "London"],
+  durbar: ["Durbar Square", "Kathmandu"],
 };
 const SPOTS = {};
 function nearestRoad(x, z, filter) {
@@ -759,6 +811,7 @@ function resolveSpots() {
   makeSpot("londonPub", 880, 320, (e) => e.kind === "high" && e !== (SPOTS.highSt && SPOTS.highSt.e), false);
   const br = (L.londonBridges || [])[0];
   if (br) { SPOTS.bridge = { key: "bridge", name: "the bridge", city: "London", e: br, s: br.len / 2, side: 1, faceRoad: true }; }
+  if (L.ktmDurbar) makeSpot("durbar", L.ktmDurbar.x, L.ktmDurbar.z, (e) => e.district === "kathmandu");
   if (L.clockTower) makeSpot("embank", L.clockTower.x - L.clockTower.tx * 70, L.clockTower.z - L.clockTower.tz * 70, lon, false);
   // anything missing falls back to the nearest Midtown spot
   for (const k of Object.keys(SPOT_INFO)) if (!SPOTS[k]) SPOTS[k] = SPOTS.times || SPOTS.midE;
@@ -840,7 +893,7 @@ function propsAt(spotKey, ds, builder) {
   if (!sp) return;
   const [x, z, h] = spotXZ(sp, sp.s + ds, 0.82);
   const root = new BABYLON.TransformNode("chrProp", scene);
-  root.position.set(x, 0, z); root.rotation.y = h;
+  root.position.set(x, terrainH(x, z), z); root.rotation.y = h;
   builder(root, x, z, h);
   root.getChildMeshes().forEach((m) => { m.freezeWorldMatrix(); m.isPickable = false; });
 }
@@ -1416,7 +1469,7 @@ export function updateCharacters(dt, hour, ctx) {
   const dh = ((hour - lastHour) % 24 + 24) % 24;
   lastHour = hour; curHour = hour;
   save.clock += dh;
-  const onFoot = !ctx.vehicle && ctx.pos.y < 2.5;
+  const onFoot = !ctx.vehicle && ctx.pos.y - terrainH(ctx.pos.x, ctx.pos.z) < 2.5;
 
   candidate = null;
   let bestD = 2.8;
@@ -1451,7 +1504,7 @@ export function updateCharacters(dt, hour, ctx) {
     }
     // tag + bubble on screen
     const show = pd < 22 && !(convo && convo.c === c);
-    const top = 2.15 - p.crouch * 0.6;
+    const top = terrainH(p.x, p.z) + 2.15 - p.crouch * 0.6;
     if (show) placeEl(c.tagEl, project(p.x, top + 0.15, p.z), `${c.mem.known ? d.short : "?"}<small>${d.role}</small>`);
     else hideEl(c.tagEl);
     if (c.bubble && pd < 30) placeEl(c.bubEl, project(p.x, top + 0.55, p.z), c.bubble.text);

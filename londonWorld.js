@@ -4,8 +4,9 @@
 // observation wheel, plane trees, red phone boxes and pillar boxes.
 import {
   scene, glow, hex, V3, litMat, flatMat, flatTexMat, texMat, makeAcc, addBox, solidBox, addSolid, addSolidR, addPoly,
-  addFlatQuad, setXF, clearXF, makeXF, xfp, mergedTemplate, canvasTex,
+  addFlatQuad, setXF, clearXF, makeXF, xfp, mergedTemplate, canvasTex, staticInstance, ambientParticles, seaAt,
 } from "./engine.js";
+import { makeWaterMat } from "./waterMat.js";
 import { slabTex, noiseTex, railingTex } from "./textures.js";
 import { edges, pathAt, roadDist, asphaltDist, landmarks, lampSpots, bulbMats } from "./roads.js";
 import { LONDON, RW, river, riverDist, lrand, lrr, lpick } from "./london.js";
@@ -40,8 +41,7 @@ export function buildLondonGround() {
   g.freezeWorldMatrix(); g.isPickable = false;
 
   // water ribbon + stone coping strips along both banks
-  const waterTex = noiseTex("riverT", "#4b6a75", 2600, "120,160,170", "20,40,50", 256, [2, 10]);
-  const waterM = flatTexMat("riverM", waterTex, 0.25); waterM.zOffset = -2;
+  const waterM = makeWaterMat("riverM", -2);       // same moving water as the sea it flows into
   const water = makeAcc("riverWater", waterM, 1, 1);
   const copeM = flatMat("embankM", hex("#b7b0a1"), 0.25); copeM.zOffset = -2;
   const cope = makeAcc("embankCope", copeM);
@@ -55,6 +55,8 @@ export function buildLondonGround() {
   let u = 0;
   for (let i = 0; i < n - 1; i++) {
     const du = Math.hypot(river[i + 1][0] - river[i][0], river[i + 1][1] - river[i][1]) / 24;
+    // past London's shore the river has run out into the sea
+    if (seaAt((river[i][0] + river[i + 1][0]) / 2, (river[i][1] + river[i + 1][1]) / 2)) { u += du; continue; }
     addFlatQuad(water, P(i, -RW), P(i, RW), P(i + 1, RW), P(i + 1, -RW), 0.042, [[0, u], [1.6, u], [1.6, u + du], [0, u + du]]);
     u += du;
     for (const sd of [-1, 1]) addFlatQuad(cope, P(i, sd * RW), P(i, sd * (RW + 2.4)), P(i + 1, sd * (RW + 2.4)), P(i + 1, sd * RW), 0.05, [[0, 0], [1, 0], [1, 1], [0, 1]]);
@@ -68,7 +70,7 @@ function buildEmbankments() {
   for (const sd of [-1, 1]) {
     for (let i = 0; i < n - 2; i += 2) {
       const a = river[i], b = river[i + 2];
-      if (Math.abs(a[1]) > 615) continue;
+      if (seaAt(a[0], a[1]) || seaAt(b[0], b[1])) continue;     // the river mouth: open sea
       const off = (j) => {
         const p = river[Math.max(0, j - 1)], q = river[Math.min(n - 1, j + 1)];
         const l = Math.hypot(q[0] - p[0], q[1] - p[1]) || 1;
@@ -192,6 +194,7 @@ function buildCircusFountains() {
     ps.colorDead = new BABYLON.Color4(0.7, 0.85, 1, 0);
     ps.emitRate = 160;
     ps.start();
+    ambientParticles(ps, c.x, c.z);
   }
 }
 
@@ -373,8 +376,7 @@ function initFurniture() {
   postT = mergedTemplate("pillarBox", bp);
 }
 function place(tpl, x, z, yaw, hw, hd, h) {
-  const m = tpl.createInstance("lonF");
-  m.position.set(x, 0, z); m.rotation.y = yaw; m.freezeWorldMatrix();
+  staticInstance(tpl, x, 0, z, yaw);
   addSolidR(x, z, yaw, hw, hd, 0, h);
 }
 function buildStreetLife() {

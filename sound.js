@@ -148,6 +148,8 @@ const SAMPLE = {
   supercar: { rec: "car", rate: 1.22, bright: 7000, vol: 0.75 },
   bike: { rec: "bike", rate: 1.0, bright: 6500, vol: 0.7 },
   superbike: { rec: "bike", rate: 1.15, bright: 9000, vol: 0.72 },
+  // outboard motor: the bike recording, lower and muffled (heard over the water)
+  boat: { rec: "bike", rate: 0.74, bright: 2400, vol: 0.62 },
 };
 const sampleOf = (name) => SAMPLE[name] || SAMPLE.car;
 const bufFor = (name) => bufs[sampleOf(name).rec] || null;
@@ -346,6 +348,25 @@ export function crash(impact, what = "wall") {
     });
 }
 // A light knock: brushing a wall, nudging another car (impact ~2.5–5 m/s).
+// An enemy's gun: duller and quieter with distance.
+export function enemyShot(dist = 20, pan = 0) {
+  if (!live()) return;
+  const k = clamp(1 - dist / 150, 0.08, 1);
+  burst({ type: "lowpass", f: 1500 + 3500 * k, peak: 0.75 * k, attack: 0.001, decay: 0.1, pan });
+  burst({ type: "bandpass", f: 260, q: 1.2, peak: 0.45 * k, attack: 0.002, decay: 0.22, pan });
+}
+// You've been hit.
+export function hurt() {
+  if (!live()) return;
+  tone({ type: "sine", f: 95, to: 45, peak: 0.4, decay: 0.16 });
+  burst({ type: "lowpass", f: 500, peak: 0.35, decay: 0.1 });
+}
+// A punch / kick: a swish, and a thud if it lands.
+export function punch(landed) {
+  if (!live()) return;
+  burst({ type: "bandpass", f: 2200, q: 0.8, peak: 0.18, attack: 0.01, decay: 0.08, sweepTo: 900 });
+  if (landed) burst({ type: "lowpass", f: 700, peak: 0.7, attack: 0.001, decay: 0.09, at: 0.04 });
+}
 export function bump(impact, what = "wall") {
   if (!live()) return;
   const v = clamp((impact - 2) / 4, 0.1, 1);
@@ -436,6 +457,15 @@ export function blip() {
 // ---------------------------------------------------------------- engine
 // pitch range (Hz at idle / redline), gears, waveform and how gritty it is
 const ENGINES = {
+  boat: {
+    idle: 40,
+    top: 150,
+    gears: 1,
+    wave: "sawtooth",
+    grit: 0.4,
+    lp: [600, 2400],
+    vol: 0.5,
+  },
   car: {
     idle: 34,
     top: 150,

@@ -1,4 +1,6 @@
-// mission.js — Mission 1: "The Holloway Job".
+// mission.js — the mission card / banner / waypoint, and Mission 2:
+// "The Holloway Job" (Mission 1, "The Golden Torana", lives in torana.js and
+// runs first; the Holloway job opens once the torana is home).
 //
 //   0  Get to London                    (you start in Saint-Clair)
 //   1  Meet Grant Holloway              (the developer, at the garden square;
@@ -13,9 +15,13 @@
 //   4  Done                             ($500 from Holloway)
 //
 // Progress is saved; once Vinnie is dead he stays out of the game.
-import { scene, camera, engine, canvas, clamp } from "./engine.js";
+import { scene, camera, engine, canvas, clamp, terrainH } from "./engine.js";
 import { districtAt, landmarks } from "./roads.js";
 import { charById, storyHooks, speakAs, addCash, setGone } from "./characters.js";
+import {
+  initTorana, updateTorana, toranaDone, toranaChoices, toranaObjective, toranaCard, toranaShootables,
+  toranaHitGoon, toranaRespawn, toranaOnRespawn, toranaTimeScale,
+} from "./torana.js";
 
 const SAVE_KEY = "babylon.mission.v1";
 let M = { stage: 0 };
@@ -25,7 +31,7 @@ const persist = () => { try { localStorage.setItem(SAVE_KEY, JSON.stringify(M));
 
 const GIVER = "grant", TARGET = "vinnie";
 const STAGES = [
-  { title: "Get to London", hint: "Head east, through Midtown, over to London." },
+  { title: "Get to London", hint: "Cross the bridge south into Midtown, then over the bridges east to London." },
   { title: "Meet Grant Holloway", hint: "He's at the garden square in London. Walk up and press T to talk." },
   { title: "Find Vinnie Sour in Midtown", hint: "Flat cap, dark coat. Usually around Times plaza or Broadway." },
   { title: "Kill Vinnie Sour", hint: "He's running — chase him down." },
@@ -36,12 +42,39 @@ let chase = null;            // { stamina, tired, hiding, lostT, hp }
 let lastPos = null;
 
 // ---------------------------------------------------------------- setup
-export function initMission() {
+// opts: { moorings } (the boat jetties, for Mission 1)
+export function initMission(opts = {}) {
   injectUI();
-  storyHooks.choices = storyChoices;
+  storyHooks.choices = (c) => (c.def.id === "laxmi" ? toranaChoices(c) : storyChoices(c));
+  initTorana({
+    moorings: opts.moorings,
+    combat: opts.combat || {},
+    banner: (t, sub, ms) => showBanner(t, sub, ms),
+    subs: (lines) => playSubs(lines),
+    choice: (title, options, cb) => showChoice(title, options, cb),
+    onDone: () => { applyStage(); showBanner("MISSION 2: THE HOLLOWAY JOB", STAGES[M.stage < 4 ? M.stage : 4].hint, 4200); },
+  });
   if (M.stage >= 4) { setGone(TARGET); }
   applyStage();
 }
+// Big map open: the mission card, banner and waypoint get out of the way.
+let uiHidden = false;
+export function setMissionUIHidden(h) {
+  uiHidden = h;
+  if (hud) hud.style.visibility = h ? "hidden" : "";
+  if (subsEl) subsEl.style.visibility = h ? "hidden" : "";
+  if (banner) banner.style.visibility = h ? "hidden" : "";
+  if (marker) marker.style.visibility = h ? "hidden" : "";
+}
+// Things a bullet can hit that aren't ordinary solids (the smugglers' boat).
+export const missionShootables = () => toranaShootables();
+// A mission gunman hit by a bullet / punch / kick. dmg in hits.
+export const missionHitGoon = (p, dmg, fx, fz, how = "bullet") => toranaHitGoon(p, dmg, fx, fz, how);
+// Where to get back up after going down (null = where you fell).
+export const missionRespawn = () => (toranaDone() ? null : toranaRespawn());
+export const missionOnRespawn = () => { if (!toranaDone()) toranaOnRespawn(); };
+// Slow motion for the big moments.
+export const missionTimeScale = () => toranaTimeScale();
 function setStage(s, bannerText) {
   M.stage = s;
   persist();
@@ -51,13 +84,14 @@ function setStage(s, bannerText) {
 // keep the characters where the story needs them
 function applyStage() {
   const g = charById(GIVER), v = charById(TARGET);
+  if (!toranaDone()) { if (g) g.forceSlot = null; if (v && M.stage < 4) v.forceSlot = null; return; }   // the Holloway job hasn't started yet
   if (g) g.forceSlot = M.stage <= 1 ? { spot: "square", pose: "inspect", doing: "waiting for someone at the garden square" } : null;
   if (v && M.stage < 4) v.forceSlot = M.stage >= 2 ? { spot: "times", pose: "lean", doing: "watching the plaza" } : null;
 }
 
 // ---------------------------------------------------------------- dialogue with Holloway
 function storyChoices(c) {
-  if (c.def.id !== GIVER) return [];
+  if (c.def.id !== GIVER || !toranaDone()) return [];
   if (M.stage <= 1) {
     if (!briefed) return [{
       label: "Mr. Holloway? You sent for me.",
@@ -80,7 +114,7 @@ function storyChoices(c) {
 // ---------------------------------------------------------------- the target goes down
 // force = how hard they were hit (bullets ~3, cars / blasts much more)
 export function missionOnPedDown(p, force) {
-  if (M.stage < 2 || M.stage >= 4) return;
+  if (!toranaDone() || M.stage < 2 || M.stage >= 4) return;
   const v = charById(TARGET);
   if (!v || v.p !== p) return;
   if (!chase) startChase(v);                       // shot before he even saw you
@@ -163,6 +197,11 @@ function updateChase(dt, v, ctx) {
 // ctx: { pos, vehicle }
 export function updateMission(dt, ctx) {
   lastPos = ctx.pos;
+  if (!toranaDone()) {
+    updateTorana(dt, ctx);
+    renderHud(ctx);
+    return;
+  }
   if (M.stage === 0 && districtAt(ctx.pos.x, ctx.pos.z) === "london") setStage(1);
   const v = charById(TARGET);
   if (M.stage === 2 && v && v.p.state !== "away" && !v.p.dead) {
@@ -175,6 +214,7 @@ export function updateMission(dt, ctx) {
 
 // Where the current objective is (for the maps and the on-screen marker).
 export function missionObjective() {
+  if (!toranaDone()) return toranaObjective();
   if (M.stage >= 4) return null;
   if (M.stage === 0) {
     const sq = (landmarks.londonSquares || [])[0];
@@ -207,11 +247,52 @@ function injectUI() {
   #missionMarker{position:fixed;transform:translate(-50%,-100%);color:#ffcf4a;font:700 13px "Segoe UI",system-ui,sans-serif;text-align:center;
     text-shadow:0 1px 4px #000;pointer-events:none;z-index:19;display:none}
   #missionMarker i{display:block;font-style:normal;font-size:22px;line-height:18px}
+  #missionSubs{position:fixed;left:50%;bottom:118px;transform:translateX(-50%);max-width:780px;width:80%;text-align:center;z-index:24;pointer-events:none;
+    font:600 19px/1.4 "Segoe UI",system-ui,sans-serif;color:#fff;text-shadow:0 2px 6px #000,0 0 2px #000;opacity:0;transition:opacity .25s}
+  #missionSubs.on{opacity:1}
+  #missionSubs b{color:#ffcf4a;font-weight:800;letter-spacing:1px;margin-right:8px}
+  #missionChoice{position:fixed;left:50%;bottom:150px;transform:translateX(-50%);background:rgba(12,14,20,.88);border-top:3px solid #ffcf4a;border-radius:6px;
+    padding:14px 22px;z-index:26;font:15px "Segoe UI",system-ui,sans-serif;color:#eee;display:none;min-width:360px}
+  #missionChoice .t{font-size:12px;letter-spacing:2px;color:#ffcf4a;font-weight:700;margin-bottom:8px}
+  #missionChoice div.o{margin:5px 0}
+  #missionChoice kbd{display:inline-block;min-width:20px;padding:0 6px;margin-right:8px;border-radius:4px;background:#eee;color:#222;font:700 13px/22px monospace;text-align:center}
   @media (max-width:640px){#missionHud{width:auto;left:16px;right:16px;top:auto;bottom:150px}}`;
   document.head.appendChild(css);
   hud = document.createElement("div"); hud.id = "missionHud"; document.body.appendChild(hud);
   banner = document.createElement("div"); banner.id = "missionBanner"; document.body.appendChild(banner);
   marker = document.createElement("div"); marker.id = "missionMarker"; document.body.appendChild(marker);
+  subsEl = document.createElement("div"); subsEl.id = "missionSubs"; document.body.appendChild(subsEl);
+  choiceEl = document.createElement("div"); choiceEl.id = "missionChoice"; document.body.appendChild(choiceEl);
+  window.addEventListener("keydown", (e) => {
+    if (!choiceCb) return;
+    const n = { Digit1: 0, Digit2: 1, Digit3: 2, Numpad1: 0, Numpad2: 1, Numpad3: 2 }[e.code];
+    if (n === undefined || n >= choiceN) return;
+    const cb = choiceCb;
+    choiceCb = null;
+    choiceEl.style.display = "none";
+    cb(n);
+  });
+}
+// ---- subtitles: [{ who, text, dur }] played one after another
+let subsEl, choiceEl, choiceCb = null, choiceN = 0, subsTimer = null;
+function playSubs(lines) {
+  clearTimeout(subsTimer);
+  const q = lines.slice();
+  const next = () => {
+    const l = q.shift();
+    if (!l) { subsEl.classList.remove("on"); return; }
+    subsEl.innerHTML = l.who ? `<b>${l.who}</b>${l.text}` : l.text;
+    subsEl.classList.add("on");
+    subsTimer = setTimeout(next, (l.dur || Math.max(2.2, l.text.length * 0.055)) * 1000);
+  };
+  next();
+}
+// ---- a decision: number keys pick
+function showChoice(title, options, cb) {
+  choiceEl.innerHTML = `<div class="t">${title}</div>` + options.map((o, i) => `<div class="o"><kbd>${i + 1}</kbd>${o}</div>`).join("");
+  choiceEl.style.display = "block";
+  choiceCb = cb;
+  choiceN = options.length;
 }
 let bannerTimer = null;
 function showBanner(title, sub = "", ms = 3200) {
@@ -222,29 +303,46 @@ function showBanner(title, sub = "", ms = 3200) {
   bannerTimer = setTimeout(() => banner.classList.remove("on"), ms);
 }
 let lastHtml = "", doneHideAt = 0;
+// DOM writes only when something actually changed (each write can force a re-layout)
+const domCache = new WeakMap();
+function setStyle(el, k, v) {
+  let c = domCache.get(el);
+  if (!c) domCache.set(el, (c = {}));
+  if (c[k] !== v) { c[k] = v; if (k === "html") el.innerHTML = v; else el.style[k] = v; }
+}
 const V = BABYLON.Vector3, TMP = new V(0, 0, 0);
 function renderHud(ctx) {
-  const st = STAGES[Math.min(M.stage, 4)];
   const obj = missionObjective();
   const dist = obj ? Math.round(Math.hypot(obj.x - ctx.pos.x, obj.z - ctx.pos.z)) : null;
-  let extra = "";
-  if (M.stage === 3 && chase) extra = chase.hiding ? "He's stopped to catch his breath." : chase.tired ? "He's tiring — close in!" : "He's sprinting.";
-  if (M.stage === 3 && chase) extra += ` &nbsp;·&nbsp; ${"●".repeat(Math.max(0, chase.hp))}${"○".repeat(3 - Math.max(0, chase.hp))}`;
-  const html = M.stage >= 4
-    ? `<div class="mt">MISSION 1 — COMPLETE</div><div class="mo">The Holloway Job</div><div class="md">${st.hint}</div>`
-    : `<div class="mt">MISSION 1 — THE HOLLOWAY JOB</div><div class="mo">${st.title}</div><div class="md">${st.hint}</div>` +
-      (obj ? `<div class="ms">${obj.label}${extra ? " · " + extra : ""}</div>` : "");
+  let html, done;
+  if (!toranaDone()) {
+    const c = toranaCard();
+    html = `<div class="mt">${c.name}</div><div class="mo">${c.title}</div><div class="md">${c.hint}</div>` +
+      (obj || c.extra ? `<div class="ms">${obj ? obj.label : ""}${c.extra ? (obj ? " · " : "") + c.extra : ""}</div>` : "");
+    done = false;
+  } else {
+    const st = STAGES[Math.min(M.stage, 4)];
+    let extra = "";
+    if (M.stage === 3 && chase) extra = chase.hiding ? "He's stopped to catch his breath." : chase.tired ? "He's tiring — close in!" : "He's sprinting.";
+    if (M.stage === 3 && chase) extra += ` &nbsp;·&nbsp; ${"●".repeat(Math.max(0, chase.hp))}${"○".repeat(3 - Math.max(0, chase.hp))}`;
+    html = M.stage >= 4
+      ? `<div class="mt">MISSION 2 — COMPLETE</div><div class="mo">The Holloway Job</div><div class="md">${st.hint}</div>`
+      : `<div class="mt">MISSION 2 — THE HOLLOWAY JOB</div><div class="mo">${st.title}</div><div class="md">${st.hint}</div>` +
+        (obj ? `<div class="ms">${obj.label}${extra ? " · " + extra : ""}</div>` : "");
+    done = M.stage >= 4;
+  }
   if (html !== lastHtml) { hud.innerHTML = html; lastHtml = html; }
-  if (M.stage >= 4 && !doneHideAt) doneHideAt = performance.now() + 15000;      // the "complete" card fades after a while
-  hud.style.display = M.stage >= 4 && performance.now() > doneHideAt ? "none" : "block";
+  if (done && !doneHideAt) doneHideAt = performance.now() + 15000;      // the "complete" card fades after a while
+  setStyle(hud, "display", done && performance.now() > doneHideAt ? "none" : "block");
   // on-screen waypoint over the objective
-  if (!obj || dist < 4) { marker.style.display = "none"; return; }
-  TMP.set(obj.x, obj.target ? 2.6 : 6, obj.z);
+  // (no waypoint inside a house: interiors are built far off the map)
+  if (!obj || dist < 4 || ctx.inside) { setStyle(marker, "display", "none"); return; }
+  TMP.set(obj.x, obj.y !== undefined ? obj.y + 4.5 : terrainH(obj.x, obj.z) + (obj.target ? 2.6 : 6), obj.z);
   const w = engine.getRenderWidth(), h = engine.getRenderHeight();
   const s = V.Project(TMP, BABYLON.Matrix.IdentityReadOnly, scene.getTransformMatrix(), camera.viewport.toGlobal(w, h));
-  if (s.z < 0 || s.z > 1) { marker.style.display = "none"; return; }
+  if (s.z < 0 || s.z > 1) { setStyle(marker, "display", "none"); return; }
   const x = clamp(s.x * canvas.clientWidth / w, 30, canvas.clientWidth - 30), y = clamp(s.y * canvas.clientHeight / h, 40, canvas.clientHeight - 20);
-  marker.style.display = "block";
-  marker.style.left = x + "px"; marker.style.top = y + "px";
-  marker.innerHTML = `<i>▼</i>${obj.label} · ${dist} m`;
+  setStyle(marker, "display", "block");
+  setStyle(marker, "left", Math.round(x) + "px"); setStyle(marker, "top", Math.round(y) + "px");
+  setStyle(marker, "html", `<i>▼</i>${obj.label} · ${dist} m`);
 }

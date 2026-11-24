@@ -3,8 +3,9 @@
 // makes the streets feel inhabited: boulevard trees, café terraces, hydrants.
 import {
   scene, rand, rr, pick, hex, litMat, flatMat, flatTexMat, mergedTemplate, addSolid, addSolidR, makeAcc, addBox,
-  setXF, clearXF, makeXF, V3, radialTex,
+  setXF, clearXF, makeXF, V3, radialTex, terrainH, staticInstance, ambientParticles, landSdf,
 } from "./engine.js";
+import { makeWaterMat } from "./waterMat.js";
 import { noiseTex, slabTex, cobbleTex } from "./textures.js";
 import { edges, pathAt, roadDist, asphaltDist, districtAt, PARIS, CITY, SHORE_X, reserved, landmarks, lampSpots } from "./roads.js";
 import { gardenTrees, insideAnyFootprint } from "./buildings.js";
@@ -14,16 +15,17 @@ const MB = BABYLON.MeshBuilder;
 
 // ---------------------------------------------------------------- ground
 export function buildGround() {
-  const grassTex = noiseTex("grass", "#6f9a4e", 9000, "150,190,100", "40,70,30", 256, [1, 3]);
-  grassTex.uScale = grassTex.vScale = 4000 / 14;
-  const g = MB.CreateGround("grass", { width: 4000, height: 4000 }, scene);
-  g.material = flatTexMat("grassM", grassTex, 0.16);
+  // Beyond the coastline meshes (coast.js) the world is open ocean to the horizon.
+  const g = MB.CreateGround("farSea", { width: 6000, height: 6000 }, scene);
+  g.position.y = -0.3;
+  g.material = makeWaterMat("farSeaM");
 
+  // Midtown's paving stops at its east shore (the channel to London)
   const conc = slabTex("concrete", "#a6a49e", "rgba(80,80,80,0.25)", 3);
-  const cw = CITY.x1 - CITY.x0 + 30, ch = CITY.z1 - CITY.z0;
+  const cw = CITY.x1 - CITY.x0 + 2, ch = CITY.z1 - CITY.z0;
   conc.uScale = cw / 9; conc.vScale = ch / 9;
   const c = MB.CreateGround("cityGround", { width: cw, height: ch }, scene);
-  c.position.set((CITY.x0 + CITY.x1) / 2 + 15, 0.015, (CITY.z0 + CITY.z1) / 2);
+  c.position.set(CITY.x0 + cw / 2, 0.015, (CITY.z0 + CITY.z1) / 2);
   c.material = flatTexMat("cityGroundM", conc, 0.18);
 
   const cob = cobbleTex();
@@ -38,34 +40,17 @@ export function buildGround() {
     const d = MB.CreateDisc(name, { radius: r, tessellation: 48 }, scene);
     d.rotation.x = Math.PI / 2; d.position.set(x, 0.03, z);
     d.material = flatMat(name + "M", hex("#5f8f42"), 0.16);
+    return d;
   };
-  lawn(PARIS.x, PARIS.z, 31, "plazaLawn");
-  lawn(landmarks.roundabout.x, landmarks.roundabout.z, landmarks.roundabout.r + 1, "rbLawn");
-
-  const sand = noiseTex("sand", "#d6c8a8", 1800, "255,250,235", "120,100,70", 256, [1, 3]);
-  const bz0 = -600, bz1 = 1340;              // the full length of the world
-  sand.uScale = 55 / 12; sand.vScale = (bz1 - bz0) / 12;
-  const beach = MB.CreateGround("beach", { width: 55, height: bz1 - bz0 }, scene);
-  beach.position.set(SHORE_X + 27.5, 0.015, (bz0 + bz1) / 2);
-  beach.material = flatTexMat("beachM", sand, 0.2);
-  const ocean = MB.CreateGround("ocean", { width: 2400, height: 4000 }, scene);
-  ocean.position.set(SHORE_X - 1200, 0.06, 0);
-  ocean.material = flatMat("oceanM", hex("#4fa3d6"), 0.18);
-
-  const pond = MB.CreateDisc("pond", { radius: POND.r, tessellation: 64 }, scene);
-  pond.rotation.x = Math.PI / 2; pond.position.set(POND.x, 0.05, POND.z);
-  pond.material = flatMat("pondM", hex("#5aa6c8"), 0.18);
-  const rim = MB.CreateTorus("pondRim", { diameter: POND.r * 2, thickness: 1.0, tessellation: 64 }, scene);
-  rim.position.set(POND.x, 0.05, POND.z); rim.scaling.y = 0.35;
-  rim.material = litMat("pondRimM", hex("#b8b0a0"));
-  reserved.push({ x: POND.x, z: POND.z, r: POND.r + 3 });
+  const l1 = lawn(PARIS.x, PARIS.z, 31, "plazaLawn");
+  const l2 = lawn(landmarks.roundabout.x, landmarks.roundabout.z, landmarks.roundabout.r + 1, "rbLawn");
+  // (the old park — its pond and the long west beach — is under the sea now;
+  // every island has its own beach, see coast.js)
   // Layered flat surfaces are only cm apart: polygon offsets keep them from
   // z-fighting at distance (roads/sidewalks use -3…-5, decals -6/-7).
-  c.material.zOffset = -1; pd.material.zOffset = -1; beach.material.zOffset = -1;
-  pond.material.zOffset = -2;
-  scene.getMaterialByName("plazaLawnM").zOffset = -2;
-  scene.getMaterialByName("rbLawnM").zOffset = -2;
-  for (const m of [g, c, pd, beach, ocean, pond, rim]) { m.freezeWorldMatrix(); m.isPickable = false; }
+  c.material.zOffset = -1; pd.material.zOffset = -1;
+  l1.material.zOffset = -2; l2.material.zOffset = -2;
+  for (const m of [g, c, pd, l1, l2]) { m.freezeWorldMatrix(); m.isPickable = false; }
 }
 
 // ---------------------------------------------------------------- trees
@@ -78,7 +63,8 @@ function initTreeTemplates() {
     const tr = MB.CreateCylinder("trunk", { diameterTop: trunkD * 0.7, diameterBottom: trunkD, height: trunkH, tessellation: 7 }, scene);
     tr.position.y = trunkH / 2; parts.push({ mesh: tr, mat: bark });
     for (const [x, y, z, d, sy] of blobs) {
-      const s = MB.CreateSphere("blob", { diameter: d, segments: 6 }, scene);
+      // (4 segments: there are thousands of these trees on screen in London)
+      const s = MB.CreateSphere("blob", { diameter: d, segments: 4 }, scene);
       s.position.set(x, y, z); s.scaling.y = sy ?? 0.85;
       parts.push({ mesh: s, mat: leaf });
     }
@@ -98,12 +84,10 @@ function initTreeTemplates() {
   T.pine = mergedTemplate("pine", pparts);
 }
 export function addTree(x, z, kind, scale = 1) {
-  const t = T[kind].createInstance(kind);
-  t.position.set(x, 0, z);
-  t.rotation.y = rand() * Math.PI * 2;
-  t.scaling.setAll(scale);
-  t.freezeWorldMatrix();
-  addSolid(x - 0.25 * scale, 0, z - 0.25 * scale, x + 0.25 * scale, 3.2 * scale, z + 0.25 * scale);
+  if (landSdf(x, z) > -1.5) return null;          // not in the sea (or on a bridge)
+  const gy = terrainH(x, z);
+  const t = staticInstance(T[kind], x, gy && gy - 0.1, z, rand() * Math.PI * 2, scale);
+  addSolid(x - 0.25 * scale, gy, z - 0.25 * scale, x + 0.25 * scale, gy + 3.2 * scale, z + 0.25 * scale);
   return t;
 }
 const nearLamp = (x, z, r = 3) => lampSpots.some((l) => Math.abs(l.x - x) < r && Math.abs(l.z - z) < r);
@@ -144,9 +128,10 @@ function initFurniture() {
   binT = mergedTemplate("bin", [{ mesh: bin, mat: litMat("binM", hex("#2f4a3a"), 0.2) }]);
 }
 function place(tpl, x, z, yaw, solidHW = 0, solidHD = 0, h = 1) {
-  const m = tpl.createInstance("f");
-  m.position.set(x, 0, z); m.rotation.y = yaw; m.freezeWorldMatrix();
-  if (solidHW) addSolidR(x, z, yaw, solidHW, solidHD, 0, h);
+  if (landSdf(x, z) > -1.5) return null;          // not in the sea (or on a bridge)
+  const gy = terrainH(x, z);
+  const m = staticInstance(tpl, x, gy, z, yaw);
+  if (solidHW) addSolidR(x, z, yaw, solidHW, solidHD, gy, gy + h);
   return m;
 }
 
@@ -184,6 +169,7 @@ function buildFountain() {
   ps.emitRate = 420;
   ps.blendMode = BABYLON.ParticleSystem.BLENDMODE_STANDARD;
   ps.start();
+  ambientParticles(ps, x, z);
   // flower beds sit between the 8 boulevards so the street axes (and the
   // view down them) stay open
   for (let k = 0; k < 8; k++) { const a = (k + 0.5) * Math.PI / 4; plantBed(x + Math.cos(a) * 22, z + Math.sin(a) * 22); }

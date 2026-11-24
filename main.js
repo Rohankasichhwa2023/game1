@@ -1,6 +1,6 @@
 // main.js — builds the world (roads → buildings → lamps → nature → vehicles →
 // people), then runs the game: third-person player, shooting, driving,
-// rooftop super-jumps, night mode, camera, HUD, minimap and the main loop.
+// night mode, camera, HUD, minimap and the main loop.
 import {
   V3,
   C3,
@@ -33,6 +33,16 @@ import {
   rayBox,
   xfp,
   xfl,
+  makeXF,
+  removeSolid,
+  terrainH,
+  terrainSlope,
+  addTerrainFlat,
+  landH,
+  groundAt,
+  beginStatic,
+  flushStatic,
+  updateAmbient,
 } from "./engine.js";
 import { createFacades, facadeList } from "./textures.js";
 import {
@@ -73,6 +83,7 @@ import {
   WORLD_MASK,
   INSIDE_MASK,
   BOTH_MASK,
+  RENDER_SHIFT,
 } from "./interiors.js";
 import { buildGround, buildNature, POND } from "./nature.js";
 import { RW, river, riverDist } from "./london.js";
@@ -81,6 +92,12 @@ import {
   updateMission,
   missionObjective,
   missionOnPedDown,
+  missionShootables,
+  setMissionUIHidden,
+  missionHitGoon,
+  missionRespawn,
+  missionOnRespawn,
+  missionTimeScale,
 } from "./mission.js";
 import {
   buildLondonGround,
@@ -88,6 +105,9 @@ import {
   updateLondon,
 } from "./londonWorld.js";
 import { KTM, KTM_CORE } from "./kathmandu.js";
+import { TERRAIN_BOX } from "./terrain.js";
+import { buildBridges, seaAt, deckAt, landSdf, onBridge } from "./water.js";
+import { buildCoast, buildBridgeStructures, buildDocks, animateSea } from "./coast.js";
 import {
   buildKathmanduWorld,
   initKathmanduCulling,
@@ -96,6 +116,10 @@ import {
 import {
   initVehicleTemplates,
   spawnParked,
+  spawnBoats,
+  driveBoat,
+  sinkMesh,
+  updateSinking,
   spawnTraffic,
   updateTraffic,
   vehicles,
@@ -131,6 +155,13 @@ import {
 const t0 = performance.now();
 createFacades();
 generateRoads();
+// the districts are islands: roads over the sea become bridges (water.js)
+buildBridges(edges, pathAt);
+// Kathmandu's hillside: level terraces for the temple squares and Durbar Square
+// (before anything is built on the terrain)
+for (const q of landmarks.ktmSquares || []) addTerrainFlat(q.x, q.z, q.r + 4, 60);
+if (landmarks.ktmDurbar)
+  addTerrainFlat(landmarks.ktmDurbar.x, landmarks.ktmDurbar.z, 46, 75);
 
 // The old start point in the middle of Saint-Clair: no longer where you spawn,
 // but still the reference for which Midtown towers get interiors and where the
@@ -184,7 +215,34 @@ const PARIS_START = (() => {
 // Spawn in Kathmandu: on the pavement of an arterial a few steps before a busy
 // junction near Durbar Square, facing into it. The starter bikes stand on the
 // pavement behind you, the cars are parked at the kerb.
+// You start in the middle of Durbar Square's stone courtyard, looking up at
+// the palace and its five-tier pagoda tower — temples, crowds and the hill
+// town all round, the bikes and a supercar parked at the courtyard's edge,
+// and Laxmi Didi (Mission 1) a few steps away by the road.
 const START = (() => {
+  const d = landmarks.ktmDurbar;
+  if (!d) return startRoadside();
+  const at = (lx, lz) => xfp(makeXF(d.x, d.z, d.yaw), lx, lz);
+  const [x, z] = at(-4, -15);
+  const side = d.yaw + Math.PI / 2; // parked across the courtyard front
+  const car = (key, lx, lz, h) => {
+    const [px, pz] = at(lx, lz);
+    return { key, x: px, z: pz, h };
+  };
+  return {
+    x,
+    z,
+    yaw: d.yaw, // facing the palace (local +z)
+    parked: [
+      car("superbike", 3.5, -19, side + 0.3),
+      car("bike", 5.2, -20.5, side + 0.3),
+      car("supercar", -14, -22, side),
+      car("suv", 13, -22.5, side + Math.PI),
+    ],
+  };
+})();
+// (the old spawn: on an arterial just before a busy junction near the square)
+function startRoadside() {
   const goal = landmarks.ktmDurbar || KTM_CORE;
   const dG = (n) => Math.hypot(n.x - goal.x, n.z - goal.z);
   let best = null,
@@ -223,7 +281,8 @@ const START = (() => {
       { key: "suv", ...at(s0 - dir * 15.5, kerb) },
     ],
   };
-})();
+}
+beginStatic(); // static props are batched into thin instances (see engine.js)
 buildRoadMeshes();
 buildGround();
 buildLondonGround();
@@ -238,16 +297,40 @@ buildLondonWorld();
   mapBuildings.push(...k.map);
   roofs.push(...k.roofs);
 }
+// islands: sea, beaches, bridges, and jetties with boats round the bay
+buildCoast();
+buildBridgeStructures();
+const MOORINGS = buildDocks([
+  { x: KTM.x0 - 45, z: 830 },    // Kathmandu's west shore (nearest the start)
+  { x: PARIS.x, z: PARIS.z + 368 }, // Saint-Clair's north shore
+  { x: -150, z: 470 },           // Midtown's north-west corner
+]);
 flushAccs();
+flushStatic();
 initKathmanduCulling();
 for (const f of postFlush) f();
 initVehicleTemplates();
 spawnParked(START);
+spawnBoats(MOORINGS);
 spawnTraffic();
 spawnPeds(300);
 spawnDistrictPeds("kathmandu", 300); // Kathmandu's busy lanes (dormant while you're elsewhere)
 spawnCharacters();
-initMission();
+initMission({
+  moorings: MOORINGS,
+  combat: {
+    hurtPlayer: (n, fx, fz) => hurtPlayer(n, fx, fz),
+    tracer: (a, b) => tracer(a, b),
+    spark: (p, s, l) => spark(p, s, l),
+    shotClear: (a, b) => shotClear(a, b),
+    shotSound: (x, z) => sfx.enemyShot(Math.hypot(x - pos.x, z - pos.z), panOf(x, z)),
+    deathSound: (x, z) => sfx.npcDeath(Math.hypot(x - pos.x, z - pos.z), panOf(x, z)),
+    playerVehicle: () => vehicle,
+    playerDead: () => playerDead,
+    flushAccs: () => flushAccs(),
+    setTime: (h) => setTime(h),
+  },
+});
 console.log(
   `World built in ${Math.round(performance.now() - t0)} ms — ${edges.length} roads, ${mapBuildings.length} buildings (${homes.length} homes), ${traffic.length} cars, ${peds.length} people`,
 );
@@ -629,7 +712,10 @@ function applyTimeOfDay() {
   moonMat.alpha = skyMat.alpha;
   moon.setEnabled(skyMat.alpha > 0.01);
   moon.position.set(-sx * 800, Math.max(120, -elev * 700 + 250), 450); // rises opposite the sun
-  glow.intensity = 0.35 + 0.55 * lit;
+  glow.intensity = 0.42 + 0.55 * lit;
+  // bloom only once it's getting dark (lamps / windows / headlights matter);
+  // in full daylight it was the biggest GPU cost for very little to see
+  glow.isEnabled = lit > 0.02;
   document.body.classList.toggle("night", state.night);
 
   const hh = Math.floor(tod),
@@ -658,9 +744,8 @@ function setTime(h) {
 
 // ---------------------------------------------------------------- input
 const keys = {};
-let lastSpaceAt = 0,
-  superJumpQueued = false,
-  interactQueued = false,
+let meleeQueued = false;
+let interactQueued = false,
   swingQueued = false,
   zipQueued = false;
 window.addEventListener("keydown", (e) => {
@@ -690,12 +775,8 @@ window.addEventListener("keydown", (e) => {
   }
   keys[e.code] = true;
   if (e.repeat) return;
-  if (e.code === "Space") {
-    const now = performance.now();
-    if (now - lastSpaceAt < 320) superJumpQueued = true;
-    lastSpaceAt = now;
-  }
   if (e.code === "KeyE" || e.code === "Enter") interactQueued = true;
+  if (e.code === "KeyQ") meleeQueued = true;
   if (e.code === "KeyF") toggleWeapon();
   if (e.code === "KeyN") skipTime();
 });
@@ -809,7 +890,7 @@ const RADIUS = 0.4,
   STEP = 0.42,
   HEIGHT = 1.8,
   GRAV = 22;
-const pos = new V3(START.x, 0, START.z);
+const pos = new V3(START.x, terrainH(START.x, START.z), START.z);
 let home = null; // the home we're inside (its interior is the only thing drawn)
 let homeBusy = false; // fading in / out
 let vy = 0,
@@ -819,12 +900,14 @@ let vy = 0,
   moveAmt = 0;
 let pushX = 0,
   pushZ = 0,
-  superJump = null,
   aimTimer = 0,
   vehicle = null;
 
+// height of the player above the bare ground (not counting roofs etc.)
+const aboveGround = () => pos.y - terrainH(pos.x, pos.z);
 function supportHeight(x, z, y) {
-  let best = 0;
+  // the ground itself (hilly in Kathmandu), or a bridge deck if you're up on it
+  let best = groundAt(x, z, y);
   for (const s of query(x - 0.3, x + 0.3, z - 0.3, z + 0.3)) {
     if (s.maxY > y + STEP || s.maxY <= best) continue;
     if (circleHit(s, x, z, 0.28)) best = s.maxY;
@@ -861,54 +944,6 @@ function indoorsNow() {
   return null;
 }
 
-function roofCandidate() {
-  if (vehicle || home || indoorsNow()) return null;
-  let best = null,
-    bestD = 3.2;
-  for (const r of roofs) {
-    if (Math.abs(r.xf.cx - pos.x) > 60 || Math.abs(r.xf.cz - pos.z) > 60)
-      continue;
-    if (r.top < pos.y + 1.5) continue;
-    const [lx, lz] = xfl(r.xf, pos.x, pos.z);
-    const d = Math.hypot(
-      Math.max(Math.abs(lx) - r.hw, 0),
-      Math.max(Math.abs(lz) - r.hd, 0),
-    );
-    if (d < bestD) {
-      bestD = d;
-      best = r;
-    }
-  }
-  return best;
-}
-function startSuperJump() {
-  const r = roofCandidate();
-  if (!r) return false;
-  let lx, lz;
-  if (r.landing) {
-    lx = r.landing.x;
-    lz = r.landing.z;
-  } else {
-    [lx, lz] = xfl(r.xf, pos.x, pos.z);
-    lx = clamp(lx, -Math.max(0.2, r.lhw), Math.max(0.2, r.lhw));
-    lz = clamp(lz, -Math.max(0.2, r.lhd), Math.max(0.2, r.lhd));
-    for (const m of r.mechs) {
-      if (Math.hypot(lx - m.x, lz - m.z) < m.r) {
-        const a = Math.atan2(lz - m.z, lx - m.x);
-        lx = clamp(m.x + Math.cos(a) * (m.r + 0.5), -r.hw + 0.8, r.hw - 0.8);
-        lz = clamp(m.z + Math.sin(a) * (m.r + 0.5), -r.hd + 0.8, r.hd - 0.8);
-      }
-    }
-  }
-  const [tx, tz] = xfp(r.xf, lx, lz);
-  const rim = r.rim ?? r.top;
-  vy = Math.sqrt(2 * GRAV * (rim + 2.6 - pos.y));
-  onGround = false;
-  superJump = { x: tx, z: tz, clearY: rim + 0.35 };
-  facing = Math.atan2(tx - pos.x, tz - pos.z);
-  return true;
-}
-
 // ---------------------------------------------------------------- web swinging
 // With the web shooter selected the game keeps a web target picked for you: a
 // spot on a building above and ahead (the way you're travelling / looking),
@@ -924,6 +959,7 @@ const WEB_RANGE = 70,
   HAND = 1.6,
   ZIP_RANGE = 55,
   ZIP_MAX = 34;
+let lastWebAt = 0;
 let swing = null; // { ax, ay, az, len, reelTo, reelRate, launch, vx, vy, vz, age, shot, shotDur, arm }
 let zip = null; // { ax, ay, az, nx, nz, top, vx, vy, vz, t, age, shot, shotDur, arm, best, bestT }
 const airVel = { x: 0, z: 0 }; // horizontal momentum carried through the air after a swing / zip
@@ -1670,7 +1706,6 @@ function startSwing() {
     puffed: false,
   };
   onGround = false;
-  superJump = null;
   ropeFx = null;
   sfx.webShot(1);
   return true;
@@ -1713,6 +1748,41 @@ function wallSlide(o) {
     o.vz -= (vn * nz) / nl;
   }
   return Math.min(0, vn);
+}
+// Web moves (swing / zip) only slid along walls sideways; swinging up under an
+// overhang or into a roof edge at an angle could leave the body inside the
+// building. After each step: stop under anything overhead, and if still
+// inside a solid, stand on it (came down onto it) or go back to where we were.
+function unstick(px, py, pz, o) {
+  if (o.vy > 0) {
+    const c = ceilingAt(pos.x, pos.z, py);
+    if (pos.y + HEIGHT > c) {
+      pos.y = Math.max(py, c - HEIGHT);
+      o.vy = Math.min(0, o.vy);
+    }
+  }
+  for (const b of query(pos.x - 0.3, pos.x + 0.3, pos.z - 0.3, pos.z + 0.3)) {
+    if (b.vehicle || b.maxY <= pos.y + STEP || b.minY >= pos.y + HEIGHT - 0.05) continue;
+    if (!pointIn(b, pos.x, pos.y + 0.9, pos.z, 0.05)) continue;
+    if (py >= b.maxY - 0.6) pos.y = b.maxY; // dropped onto it: on top
+    else {
+      // came in from the side / below: back out, losing the speed into it
+      const ix = pos.x - px,
+        iz = pos.z - pz,
+        il = Math.hypot(ix, iz);
+      pos.x = px;
+      pos.z = pz;
+      if (pos.y + HEIGHT > b.minY && py + HEIGHT <= b.minY + 0.05) pos.y = Math.min(pos.y, py);
+      if (il > 1e-4) {
+        const vn = (o.vx * ix + o.vz * iz) / il;
+        if (vn > 0) {
+          o.vx -= (vn * ix) / il;
+          o.vz -= (vn * iz) / il;
+        }
+      }
+    }
+    break;
+  }
 }
 // Touch down from the air: crouch into it; a fast landing rolls on a little.
 function touchDown(fallSpeed, hx, hz) {
@@ -1770,10 +1840,16 @@ function updateSwing(dt) {
   }
   let reelTo = s.reelTo,
     rate = s.reelRate;
-  const clearLen = s.ay - HAND - supportHeight(pos.x, pos.z, pos.y) - 1.0;
+  // What's below you jumps from the street to a roof the instant you pass
+  // over a building; reacting to that raw yanked you up the rope at up to
+  // 18 m/s — a jolt high up. The floor is smoothed and the reel eased.
+  const floorT = supportHeight(pos.x, pos.z, pos.y);
+  if (s.floorS === undefined) s.floorS = floorT;
+  s.floorS += (floorT - s.floorS) * Math.min(1, dt * (floorT > s.floorS ? 2.5 : 6));
+  const clearLen = s.ay - HAND - s.floorS - 1.0;
   if (clearLen < reelTo) {
     reelTo = Math.max(3, clearLen);
-    rate = Math.max(rate, Math.min(18, (s.len - reelTo) * 5));
+    rate = Math.max(rate, Math.min(9, (s.len - reelTo) * 2.5));
   }
   const sp0 = Math.hypot(s.vx, s.vy, s.vz);
   const n = Math.max(1, Math.ceil((sp0 * dt) / 0.3)); // sub-step so we can't tunnel through walls
@@ -1880,8 +1956,12 @@ function updateSwing(dt) {
       s.vy *= k;
       s.vz *= k;
     }
+    const px = pos.x,
+      py = pos.y,
+      pz = pos.z;
     pos.set(hx, hy - HAND, hz);
     hitWall = Math.min(hitWall, wallSlide(s));
+    unstick(px, py, pz, s);
     // the street / a roof: skim it during the launch, land on it afterwards
     const gh = supportHeight(pos.x, pos.z, pos.y);
     if (pos.y <= gh) {
@@ -1959,7 +2039,6 @@ function startZip() {
     pos.y += 0.05;
   } // hop off the ground
   onGround = false;
-  superJump = null;
   ropeFx = null;
   airVel.x = airVel.z = 0;
   sfx.webShot(1.15);
@@ -2011,10 +2090,14 @@ function updateZip(dt) {
       z.vy += ((dy / d) * sp - z.vy) * k;
       z.vz += ((dz / d) * sp - z.vz) * k;
     } else z.vy -= GRAV * 0.5 * h; // web still flying out: keep drifting
+    const px = pos.x,
+      py = pos.y,
+      pz = pos.z;
     pos.x += z.vx * h;
     pos.y += z.vy * h;
     pos.z += z.vz * h;
     wallSlide(z);
+    unstick(px, py, pz, z);
     const gh = supportHeight(pos.x, pos.z, pos.y);
     if (pos.y < gh) {
       pos.y = gh;
@@ -2353,7 +2436,7 @@ function updatePlayer(dt) {
     mz = 0;
   const downed = downTimer > 0; // thrown from a crash: lie there for a moment
   if (downed) downTimer -= dt;
-  if (!superJump && !downed) {
+  if (!downed) {
     if (keys.KeyW || keys.ArrowUp) {
       mx += fwdX;
       mz += fwdZ;
@@ -2430,16 +2513,6 @@ function updatePlayer(dt) {
     sz = pos.z,
     wantX = dx,
     wantZ = dz;
-  if (superJump && pos.y > superJump.clearY) {
-    const gx = superJump.x - pos.x,
-      gz = superJump.z - pos.z,
-      gd = Math.hypot(gx, gz);
-    if (gd > 0.05) {
-      const s = Math.min(gd, 14 * dt);
-      dx += (gx / gd) * s;
-      dz += (gz / gd) * s;
-    }
-  }
   const n = Math.max(1, Math.ceil(Math.hypot(dx, dz) / 0.15));
   for (let i = 0; i < n; i++) {
     pos.x += dx / n;
@@ -2478,7 +2551,7 @@ function updatePlayer(dt) {
       p.state === "down" ||
       Math.abs(p.x - pos.x) > 1 ||
       Math.abs(p.z - pos.z) > 1 ||
-      pos.y > 1.5
+      aboveGround() > 1.5
     )
       continue;
     const ddx = pos.x - p.x,
@@ -2502,7 +2575,7 @@ function updatePlayer(dt) {
   moveAmt +=
     ((len > 0 ? (running ? 1 : 0.6) : 0) - moveAmt) * Math.min(1, dt * 10);
 
-  if (onGround && keys.Space && !superJump && !downed) {
+  if (onGround && keys.Space && !downed) {
     vy = swimming ? 6.8 : 7.2;
     onGround = false;
   }
@@ -2521,7 +2594,6 @@ function updatePlayer(dt) {
     pos.y = gh;
     vy = 0;
     onGround = true;
-    superJump = null;
     airVel.x = airVel.z = 0;
   } else if (onGround && vy <= 0 && pos.y - gh < 0.45) {
     pos.y = gh;
@@ -2539,7 +2611,7 @@ function updatePlayer(dt) {
     const ddx = pos.x - t.vx,
       ddz = pos.z - t.vz,
       d = Math.hypot(ddx, ddz);
-    if (d < 2.6 && d > 0.01 && pos.y < 1.5) {
+    if (d < 2.6 && d > 0.01 && aboveGround() < 1.5) {
       pos.x += (ddx / d) * (2.6 - d);
       pos.z += (ddz / d) * (2.6 - d);
     }
@@ -2640,6 +2712,7 @@ function updatePlayer(dt) {
     armL.sh.rotation.x = -2.4;
     armR.sh.rotation.x = -2.1;
   }
+  if (strikeT > 0) poseStrike(dt);
 }
 
 // Front crawl: body sunk to the waist and tilted forward (more upright when
@@ -2702,7 +2775,6 @@ function enterVehicle(v) {
   v.solid.off = true;
   v.speed = 0;
   v.mesh.unfreezeWorldMatrix();
-  superJump = null;
   firing = false;
   aiming = false;
   aimTimer = 0;
@@ -2714,7 +2786,9 @@ function enterVehicle(v) {
   if (v.kind === "car") player.setEnabled(false);
   else {
     player.parent = v.mesh;
-    player.position.set(0, 0.1, -0.22);
+    // (rider origin sits ~0.82 m below the seat top, as on the bikes)
+    if (v.kind === "boat") player.position.set(0.2, -0.1, -0.3);
+    else player.position.set(0, 0.1, -0.22);
     player.rotation.y = 0;
     body.position.y = 0;
     body.rotation.x = 0.28;
@@ -2740,20 +2814,41 @@ function exitVehicle() {
     [Math.sin(h) * (c.hd + 1), Math.cos(h) * (c.hd + 1)],
   ];
   let spot = null;
-  for (const [ox, oz] of opts) {
-    const x = p.x + ox,
-      z = p.z + oz,
-      y = supportHeight(x, z, p.y + 0.3);
-    if (playerFits(x, y, z)) {
-      spot = [x, y, z];
-      break;
+  if (v.kind === "boat") {
+    // look round the boat for somewhere dry to step onto (jetty, beach)
+    for (let r = c.hw + 0.8; r <= 6 && !spot; r += 0.8) {
+      for (let k = 0; k < 16; k++) {
+        const a = (k / 16) * Math.PI * 2,
+          x = p.x + Math.sin(a) * r,
+          z = p.z + Math.cos(a) * r,
+          y = supportHeight(x, z, 1.5);
+        if (!inWater(x, z, y) && playerFits(x, y, z)) {
+          spot = [x, y, z];
+          break;
+        }
+      }
     }
-  }
+    // nowhere to stand: over the side into the water
+    if (!spot) spot = [opts[0][0] + p.x, 0, opts[0][1] + p.z];
+  } else
+    for (const [ox, oz] of opts) {
+      const x = p.x + ox,
+        z = p.z + oz,
+        y = supportHeight(x, z, p.y + 0.3);
+      if (playerFits(x, y, z)) {
+        spot = [x, y, z];
+        break;
+      }
+    }
   if (!spot) spot = [p.x, p.y + c.ht + 0.1, p.z];
   vehicle = null;
   v.solid = vehicleSolid(v);
   v.mesh.rotation.z = 0;
-  v.mesh.rotation.x = 0;
+  v.mesh.rotation.x = v.pitch || 0;   // a car left on a hill stays tilted with it
+  if (v.kind === "boat") {
+    v.vx = v.vz = 0;
+    v.lean = 0;
+  }
   v.wobble = 0;
   v.mesh.freezeWorldMatrix();
   beam.setEnabled(false);
@@ -2768,20 +2863,48 @@ function exitVehicle() {
   onGround = true;
   facing = h;
 }
+const vehicleIsBoat = () => !!vehicle && vehicle.kind === "boat";
+// The player's car / bike has gone into the water: out you come, swimming,
+// and the vehicle goes down (and is gone for good).
+function drownVehicle(v) {
+  const sp = v.speed;
+  exitVehicle();
+  if (v.solid) removeSolid(v.solid);
+  v.solid = null;
+  if (v.smokePS) {
+    v.smokePS.dispose();
+    v.smokePS = null;
+  }
+  const i = vehicles.indexOf(v);
+  if (i >= 0) vehicles.splice(i, 1);
+  sinkMesh(v.mesh, Math.sin(v.heading) * sp * 0.4, Math.cos(v.heading) * sp * 0.4);
+  // in the water beside it, swimming
+  pos.y = 0;
+  vy = 0;
+  onGround = true;
+  sfx.splash(Math.min(12, 4 + Math.abs(sp) * 0.4));
+  lastSplashAt = performance.now();
+  shake = Math.max(shake, 0.15);
+}
 function nearestUsable() {
   let best = null,
     bestD = Infinity;
   for (const v of vehicles) {
-    if (v.wrecked) continue;
-    const d = V3.Distance(v.mesh.position, pos);
-    if (d < (v.kind === "car" ? specOf(v).hd + 1.6 : 2.6) && d < bestD) {
+    if (v.wrecked || v.locked) continue;
+    const d =
+      v.kind === "boat"
+        ? Math.hypot(v.mesh.position.x - pos.x, v.mesh.position.z - pos.z)
+        : V3.Distance(v.mesh.position, pos);
+    const reach =
+      v.kind === "car" ? specOf(v).hd + 1.6 : v.kind === "boat" ? specOf(v).hd + 1.2 : 2.6;
+    if (d < reach && d < bestD) {
       best = v;
       bestD = d;
     }
   }
   for (const t of traffic) {
     const d = Math.hypot(t.vx - pos.x, t.vz - pos.z);
-    if (d < t.spec.hd + 1.6 && d < bestD && pos.y < 2) {
+    if (d < t.spec.hd + 1.6 && d < bestD && aboveGround() < 2) {
       best = t;
       bestD = d;
     }
@@ -2790,7 +2913,10 @@ function nearestUsable() {
 }
 function updateVehicle(dt) {
   const v = vehicle;
-  const res = driveVehicle(v, dt, keys, enterables, supportHeight);
+  const boat = v.kind === "boat";
+  const res = boat
+    ? driveBoat(v, dt, keys)
+    : driveVehicle(v, dt, keys, enterables, supportHeight);
   if (res.impact > 5) {
     onCrash(v, res);
     if (vehicle !== v) return;
@@ -2811,15 +2937,23 @@ function updateVehicle(dt) {
     );
     crashSparks.manualEmitCount = 6;
   }
-  // body wobble after an impact (pitch + a little roll, decaying)
-  if (v.wobble > 0.002) {
+  // body wobble after an impact (pitch + a little roll, decaying), on top of
+  // the slope the vehicle is sitting on (boats rock on their own)
+  if (boat) {
+    /* driveBoat sets the hull's attitude */
+  } else if (v.wobble > 0.002) {
     const t = performance.now() / 1000;
-    v.mesh.rotation.x = Math.sin(t * 28) * v.wobble;
+    v.mesh.rotation.x = (v.pitch || 0) + Math.sin(t * 28) * v.wobble;
     if (v.kind === "car") v.mesh.rotation.z = Math.sin(t * 21) * v.wobble * 0.6;
     v.wobble *= Math.exp(-5 * dt);
-  } else if (v.mesh.rotation.x) {
-    v.mesh.rotation.x = 0;
+  } else {
+    v.mesh.rotation.x = v.pitch || 0;
     if (v.kind === "car") v.mesh.rotation.z = 0;
+  }
+  // drove into the sea / river: you're thrown out, the vehicle sinks
+  if (!boat && inWater(v.mesh.position.x, v.mesh.position.z, v.mesh.position.y)) {
+    drownVehicle(v);
+    return;
   }
   if (performance.now() - lastMouseAt > 1200 && Math.abs(v.speed) > 2)
     yaw += angDiff(v.heading, yaw) * Math.min(1, dt * 2.5);
@@ -2876,6 +3010,13 @@ function raycast(o, d, tmin, tmax) {
       hit = { traffic: t };
     }
   }
+  for (const m of missionShootables()) {
+    const th = rayBox(o, d, m.box, tmin, best);
+    if (th !== null && th < best) {
+      best = th;
+      hit = { mission: m };
+    }
+  }
   for (const p of peds) {
     if (Math.abs(p.x - o.x) > 120 || Math.abs(p.z - o.z) > 120) continue;
     const down = p.state === "down";
@@ -2883,21 +3024,61 @@ function raycast(o, d, tmin, tmax) {
     pedBox.lx1 = p.x + (down ? 0.9 : 0.3);
     pedBox.lz0 = p.z - (down ? 0.9 : 0.3);
     pedBox.lz1 = p.z + (down ? 0.9 : 0.3);
-    pedBox.maxY = down ? 0.45 : 1.8;
+    const py = terrainH(p.x, p.z);
+    pedBox.minY = py;
+    pedBox.maxY = py + (down ? 0.45 : 1.8);
     const th = rayBox(o, d, pedBox, tmin, best);
     if (th !== null && th < best) {
       best = th;
       hit = { ped: p };
     }
   }
-  if (d.y < 0) {
-    const tg = -o.y / d.y;
-    if (tg > tmin && tg < best) {
-      best = tg;
-      hit = { ground: true };
-    }
+  const tg = groundHit(o, d, tmin, best);
+  if (tg !== null) {
+    best = tg;
+    hit = { ground: true };
   }
   return { t: best, hit };
+}
+// Where a ray meets the ground (the y = 0 plane, or Kathmandu's hillside).
+function groundHit(o, d, tmin, tmax) {
+  const T = TERRAIN_BOX;
+  const ex = o.x + d.x * tmax,
+    ez = o.z + d.z * tmax;
+  const overHills =
+    Math.max(o.x, ex) > T.x0 &&
+    Math.min(o.x, ex) < T.x1 &&
+    Math.max(o.z, ez) > T.z0 &&
+    Math.min(o.z, ez) < T.z1;
+  if (!overHills) {
+    if (d.y >= 0) return null;
+    const tg = -o.y / d.y;
+    return tg > tmin && tg < tmax ? tg : null;
+  }
+  // march along the ray, then refine the crossing
+  const above = (t) =>
+    o.y + d.y * t - terrainH(o.x + d.x * t, o.z + d.z * t);
+  const end = Math.min(tmax, 600);
+  let ta = tmin,
+    fa = above(ta);
+  if (fa < 0) return null;
+  for (let t = tmin + 1.5; ; t += 1.5) {
+    const tb = Math.min(t, end),
+      fb = above(tb);
+    if (fb < 0) {
+      let lo = ta,
+        hi = tb;
+      for (let k = 0; k < 8; k++) {
+        const m = (lo + hi) / 2;
+        if (above(m) < 0) hi = m;
+        else lo = m;
+      }
+      return hi < tmax ? hi : null;
+    }
+    if (tb >= end) return null;
+    ta = tb;
+    fa = fb;
+  }
 }
 function explode(at, scale = 1) {
   sfx.explosion(
@@ -3020,10 +3201,11 @@ function debris(at, n, power) {
 
 // Sound lives in sound.js; the browser only lets it start after a click / key.
 canvas.addEventListener("pointerdown", () => sfx.unlock());
-// Is (x, z) open water — the London river (not on a bridge), the park pond or the sea?
-function inWater(x, z) {
-  if (x < SHORE_X) return true;
-  if (Math.hypot(x - POND.x, z - POND.z) < POND.r) return true;
+// Is (x, z) open water — the sea (unless you're up on a bridge deck over it)
+// or the London river (not on one of its bridges)? y = your height.
+function inWater(x, z, y = pos.y) {
+  if (home) return false; // (interiors are built far out in what is now open sea)
+  if (seaAt(x, z)) return !(onBridge(x, z) && y >= deckAt(x, z) - 1.6);
   return riverDist(x, z) < RW - 0.3 && roadDist(x, z) > 0;
 }
 // Left/right placement (-1..1) of a world point relative to the camera.
@@ -3108,7 +3290,7 @@ function throwPlayer(v, impact, dirSign) {
     // the bike falls over where it stopped
     v.mesh.unfreezeWorldMatrix();
     v.mesh.rotation.z = 1.35;
-    v.mesh.position.y = 0.15;
+    v.mesh.position.y = terrainH(v.mesh.position.x, v.mesh.position.z) + 0.15;
     v.mesh.freezeWorldMatrix();
   }
   const p = v.mesh.position;
@@ -3252,6 +3434,8 @@ function fire() {
     spark(end.subtract(dir.scale(0.05)));
     if (hit.solid && hit.solid.vehicle) damageVehicle(hit.solid.vehicle);
     else if (hit.traffic) damageTraffic(hit.traffic);
+    else if (hit.mission) hit.mission.onHit();
+    else if (hit.ped && hit.ped.goon) missionHitGoon(hit.ped, 1, dir.x, dir.z);
     else if (hit.ped) knockDown(hit.ped, dir.x * 3, dir.z * 3);
   }
 }
@@ -3300,8 +3484,9 @@ let camSide = 0.6,
   camExtra = 0,
   camOcc = camDist,
   swingCam = 0,
-  camRaise = 0;
-const SWING_MIN_DIST = 3; // the swing camera never comes closer than this (the body stays in view)
+  camRaise = 0,
+  camSlope = 0, // smoothed slope of the road ahead (hills / bridge ramps)
+  camLift = 0; // smoothed lift to keep the camera off rising ground behind you
 const SWING_EXTRA_DIST = 4; // how much further back the camera sits while swinging
 const camLook = { x: 0, z: 0 },
   camWant = new V3(),
@@ -3336,7 +3521,13 @@ function updateCamera(dt) {
   // swing camera (blended in / out): centred behind the player, slightly above,
   // rigidly attached (no trailing into walls), slow to zoom back out after a
   // building has passed behind
-  const webbing = airborne && !aiming && (!!swing || !!zip || hs > 8);
+  // (held for a moment after letting go, so slowing between swings doesn't
+  // pump the camera in and out)
+  if (swing || zip) lastWebAt = performance.now();
+  const webbing =
+    airborne &&
+    !aiming &&
+    (!!swing || !!zip || hs > 8 || performance.now() - lastWebAt < 1200);
   swingCam +=
     ((webbing ? 1 : 0) - swingCam) * Math.min(1, dt * (webbing ? 4 : 2));
   side += (0.3 - side) * swingCam;
@@ -3354,13 +3545,13 @@ function updateCamera(dt) {
   camLook.z += (v.z * la - camLook.z) * kl;
   // the pivot trails the body's height a little in the air, so the arc of a
   // swing doesn't jerk the view up and down
-  if (airborne)
-    camPivotY = clamp(
-      camPivotY + (pos.y - camPivotY) * Math.min(1, dt * 7),
-      pos.y - 1.4,
-      pos.y + 1.4,
-    );
-  else camPivotY += (pos.y - camPivotY) * Math.min(1, dt * 20);
+  // (it catches up faster the further it falls behind, instead of hitting a
+  // hard limit — that limit was a jerk at the top and bottom of big arcs)
+  if (airborne) {
+    const lag = pos.y - camPivotY;
+    camPivotY += lag * Math.min(1, dt * (7 + Math.max(0, Math.abs(lag) - 0.8) * 9));
+    camPivotY = clamp(camPivotY, pos.y - 3, pos.y + 3);
+  } else camPivotY += (pos.y - camPivotY) * Math.min(1, dt * 20);
   if (Math.abs(camPivotY - pos.y) > 6) camPivotY = pos.y; // teleported
   const py = camPivotY;
   // don't push the pivot into a wall the player is hugging on the right
@@ -3433,20 +3624,33 @@ function updateCamera(dt) {
   }
   camRaise +=
     (raiseT - camRaise) * Math.min(1, dt * (raiseT > camRaise ? 5 : 1.5));
-  const p = Math.min(1.25, p0 + camRaise * swingCam);
+  // On hills and bridge ramps the view tips with the road, like a driving
+  // game: downhill the camera rises behind you and looks down the slope,
+  // uphill it settles lower. The slope is smoothed so bumps don't jolt it.
+  let slopeT = 0;
+  if (!home && !airborne) {
+    const hd = vehicle ? vehicle.heading : yaw;
+    slopeT = terrainSlope(pos.x, pos.z, Math.sin(hd) * 3, Math.cos(hd) * 3) / 3;
+  }
+  camSlope += (slopeT - camSlope) * Math.min(1, dt * 2.5);
+  const p = clamp(
+    p0 + camRaise * swingCam - Math.atan(camSlope) * (vehicle ? 0.85 : 0.6),
+    -0.35,
+    1.25,
+  );
   const cp = Math.cos(p);
   const dx = -Math.sin(yaw) * cp,
     dy = Math.sin(p),
     dz = -Math.cos(yaw) * cp;
   let d = camProbe(dx, dy, dz, dist, m, big);
-  if (big) d = Math.max(d, Math.min(dist, SWING_MIN_DIST));
+  // (the swing camera used to be held at least 3 m back even when a wall was
+  // closer than that — which parked it inside the building)
   // zoom in quickly when something gets in the way (instantly if the camera would
   // be inside it), back out slowly — no pumping in and out down a street
   if (camOcc > dist) camOcc = dist;
   if (d < camOcc) {
     camOcc += (d - camOcc) * Math.min(1, dt * 20);
     if (
-      !big &&
       pointBlocked(
         camTarget.x + dx * camOcc,
         camTarget.y + dy * camOcc,
@@ -3458,17 +3662,39 @@ function updateCamera(dt) {
   } else
     camOcc += (d - camOcc) * Math.min(1, dt * (2.5 + 9.5 * (1 - swingCam)));
   const dd = vehicle || home ? d : camOcc;
-  camWant.set(
-    camTarget.x + dx * dd,
-    Math.max(0.4, camTarget.y + dy * dd),
-    camTarget.z + dz * dd,
+  const cwx = camTarget.x + dx * dd,
+    cwz = camTarget.z + dz * dd;
+  // keep clear of the ground under (and around) the camera, but ease the
+  // lift in and out — following every bump of a hillside made the view judder
+  const want = camTarget.y + dy * dd;
+  const gnd = Math.max(
+    landH(cwx, cwz),
+    landH(cwx + 1.5, cwz),
+    landH(cwx - 1.5, cwz),
+    landH(cwx, cwz + 1.5),
+    landH(cwx, cwz - 1.5),
   );
+  const liftT = Math.max(0, gnd + 0.9 - want);
+  camLift += (liftT - camLift) * Math.min(1, dt * (liftT > camLift ? 9 : 3));
+  camWant.set(cwx, want + camLift, cwz);
   const cur = V3.Distance(camera.position, camTarget);
   // snap in front of a wall; otherwise follow smoothly. In the air the camera is
   // rigid (its smoothing comes from the pivot / zoom above), so it can't lag into a wall
   const snap = d < cur - 0.05 || (airborne && swingCam > 0.5);
   const k = snap ? 1 : Math.min(1, dt * (vehicle ? 8 : 12));
   V3.LerpToRef(camera.position, camWant, k, camera.position);
+  // last line of defence: never leave the camera inside a building — pull it
+  // in along the view line to the probed free distance
+  if (!home && pointBlocked(camera.position.x, camera.position.y, camera.position.z, 0.12, big)) {
+    camera.position.set(camTarget.x + dx * d, camTarget.y + dy * d + camLift, camTarget.z + dz * d);
+    if (pointBlocked(camera.position.x, camera.position.y, camera.position.z, 0.12, big))
+      camera.position.set(camTarget.x + dx * d, camTarget.y + dy * d, camTarget.z + dz * d);
+    camOcc = Math.min(camOcc, d);
+  }
+  {
+    const gy = landH(camera.position.x, camera.position.z) + 0.15; // last-resort only
+    if (camera.position.y < gy) camera.position.y = gy;
+  }
   if (shake > 0.001) {
     // crash shake
     const s = shake * shake * 0.45;
@@ -3525,8 +3751,10 @@ function setHud(key, node, html) {
 const DISTRICTS = {
   city: ["MIDTOWN", "Babylon City"],
   paris: ["SAINT-CLAIR", "Residential quarter"],
-  park: ["RIVERSIDE PARK", "Between the city and Saint-Clair"],
+  park: ["THE BAY", "Between the islands"],
   beach: ["THE COAST", "Saint-Clair beach"],
+  sea: ["THE BAY", "Open water between the islands"],
+  bridge: ["THE BRIDGE", "Over the bay"],
   london: ["LONDON", "Mind the maze of streets"],
   kathmandu: ["KATHMANDU", "Alleys, temples and Basantapur Durbar Square"],
   river: ["THE THAMES", "Crossing the river"],
@@ -3604,7 +3832,7 @@ function updateHud(dt) {
       break;
     }
   }
-  if (!loc && !vehicle && pos.y > 8 && onGround) loc = "Rooftop";
+  if (!loc && !vehicle && aboveGround() > 8 && onGround) loc = "Rooftop";
   if (!loc && !vehicle && swimming)
     loc = "Swimming · <kbd>Space</kbd> climb out";
   setHud("loc", locEl, loc);
@@ -3629,7 +3857,14 @@ function updateHud(dt) {
   hudTimer -= dt;
   if (hudTimer > 0) return;
   hudTimer = 0.12;
-  const dname = home ? curDistrict : districtAt(pos.x, pos.z);
+  // out on the water (or on a bridge over it) the islands' names don't apply
+  const dname = home
+    ? curDistrict
+    : seaAt(pos.x, pos.z)
+      ? onBridge(pos.x, pos.z) && !vehicleIsBoat()
+        ? "bridge"
+        : "sea"
+      : districtAt(pos.x, pos.z);
   if (dname !== curDistrict) {
     curDistrict = dname;
     const [t, s] = DISTRICTS[dname];
@@ -3654,8 +3889,6 @@ function updateHud(dt) {
       pr = `<kbd>E</kbd> ${u.e ? "Take the " + u.spec.name : u.spec.label}`;
     else if (talkPrompt()) pr = talkPrompt();
     else if (hm) pr = `<kbd>E</kbd> Enter ${hm.label.toLowerCase()}`;
-    else if (onGround && roofCandidate())
-      pr = "<kbd>Space</kbd><kbd>Space</kbd> Jump onto roof";
     else if (weapon === "web" && !home) pr = webPrompt("Web launch");
   }
   setHud("prompt", promptEl, pr);
@@ -3689,10 +3922,6 @@ const toMap = (x, z) => [x - WORLD.x0, WORLD.z1 - z];
   c.beginPath();
   c.arc(px, pz, 216, 0, Math.PI * 2);
   c.fill();
-  c.fillStyle = "#1f5f80";
-  c.fillRect(0, 0, toMap(SHORE_X, 0)[0], baked.height);
-  c.fillStyle = "#8a7c5c";
-  c.fillRect(toMap(SHORE_X, 0)[0], 0, 55, baked.height);
   const [lx0, lz0] = toMap(752, 620);
   c.fillStyle = "#1d1b1e";
   c.fillRect(lx0, lz0, WORLD.x1 - 752, 1240);
@@ -3708,6 +3937,28 @@ const toMap = (x, z) => [x - WORLD.x0, WORLD.z1 - z];
     c.beginPath();
     c.arc(qx, qz, q.r + 2, 0, Math.PI * 2);
     c.fill();
+  }
+  // the sea round the islands (from the same coastline as the 3D world), with
+  // a light edge of beach; painted per 2 m pixel block
+  {
+    const img = c.getImageData(0, 0, baked.width, baked.height),
+      d = img.data,
+      W = baked.width,
+      H = baked.height;
+    for (let my = 0; my < H; my += 2)
+      for (let mx = 0; mx < W; mx += 2) {
+        const v = landSdf(mx + WORLD.x0, WORLD.z1 - my);
+        if (v < -6) continue;
+        const [r, g, b] = v > 0 ? [31, 95, 128] : [138, 124, 92];
+        for (let yy = my; yy < Math.min(H, my + 2); yy++)
+          for (let xx = mx; xx < Math.min(W, mx + 2); xx++) {
+            const k = (yy * W + xx) * 4;
+            d[k] = r;
+            d[k + 1] = g;
+            d[k + 2] = b;
+          }
+      }
+    c.putImageData(img, 0, 0);
   }
   c.strokeStyle = "#2a6d8f";
   c.lineWidth = RW * 2;
@@ -3726,11 +3977,6 @@ const toMap = (x, z) => [x - WORLD.x0, WORLD.z1 - z];
     c.arc(sx, sz, s.r - 1, 0, Math.PI * 2);
     c.fill();
   }
-  const [qx, qz] = toMap(POND.x, POND.z);
-  c.fillStyle = "#2a6d8f";
-  c.beginPath();
-  c.arc(qx, qz, POND.r, 0, Math.PI * 2);
-  c.fill();
   c.lineCap = "round";
   c.lineJoin = "round";
   for (const pass of [0, 1]) {
@@ -3899,8 +4145,8 @@ let bigMapOpen = false,
 const MAP_LABELS = [
   { x: 330, z: 0, t: "MIDTOWN", s: "Babylon City" },
   { x: PARIS.x, z: PARIS.z + 120, t: "SAINT-CLAIR", s: "Residential quarter" },
-  { x: -175, z: -330, t: "RIVERSIDE PARK", s: "" },
-  { x: SHORE_X + 10, z: -420, t: "THE COAST", s: "" },
+  { x: -330, z: 470, t: "THE BAY", s: "Boats at the jetties" },
+  { x: SHORE_X + 10, z: -420, t: "OPEN SEA", s: "" },
   { x: 1000, z: 120, t: "LONDON", s: "Old town" },
   { x: 1470, z: -260, t: "THE THAMES", s: "" },
   { x: KTM_CORE.x, z: KTM.z1 - 40, t: "KATHMANDU", s: "Old Newar town" },
@@ -3919,6 +4165,7 @@ function centerBigMap() {
 function toggleBigMap(force) {
   bigMapOpen = force ?? !bigMapOpen;
   bigEl.classList.toggle("show", bigMapOpen);
+  setMissionUIHidden(bigMapOpen); // the mission card / waypoint shouldn't sit over the map
   if (!bigMapOpen) return;
   for (const k in keys) keys[k] = false;
   firing = false;
@@ -4087,7 +4334,6 @@ window.__city = {
   peds,
   setTime,
   fire,
-  startSuperJump,
   edges,
 };
 yaw = START.yaw; // look into the junction
@@ -4110,12 +4356,12 @@ yaw = START.yaw; // look into the junction
           Math.hypot(b.xf.cx - START.x, b.xf.cz - START.z),
       )[0];
     const [x, z] = xfp(r.xf, 0, -r.hd - 1.5);
-    pos.set(x, 0, z);
+    pos.set(x, terrainH(x, z), z);
     yaw = r.xf.yaw;
   }
   if (q.get("at")) {
     const [x, z, y2] = q.get("at").split(",").map(Number);
-    pos.set(x, 0, z);
+    pos.set(x, terrainH(x, z), z);
     if (!isNaN(y2)) yaw = y2;
   }
   if (q.get("pitch") !== null) pitch = +q.get("pitch");
@@ -4171,10 +4417,185 @@ function homeTransition(entering, h) {
   }, 380);
 }
 
+// ---------------------------------------------------------------- health, getting hurt, going down
+// 100 health; it comes back after a few seconds out of the fire. A vehicle
+// takes half the sting out of bullets. At zero: down, a fade, and back on
+// your feet at the mission's last checkpoint (or where you were).
+let playerHP = 100,
+  hurtAt = -1e9,
+  hurtFlash = 0,
+  playerDead = false;
+const hpWrap = document.createElement("div");
+hpWrap.style.cssText =
+  "position:fixed;left:34px;bottom:330px;width:230px;height:9px;background:rgba(0,0,0,.55);border-radius:5px;overflow:hidden;z-index:15;pointer-events:none;box-shadow:0 1px 6px rgba(0,0,0,.4)";
+const hpBar = document.createElement("div");
+hpBar.style.cssText = "height:100%;width:100%;background:#58c25a;transition:width .15s";
+hpWrap.appendChild(hpBar);
+document.body.appendChild(hpWrap);
+const hurtEl = document.createElement("div");
+hurtEl.style.cssText =
+  "position:fixed;inset:0;pointer-events:none;z-index:14;opacity:0;background:radial-gradient(ellipse at center,rgba(150,0,0,0) 45%,rgba(170,0,0,.85) 100%)";
+document.body.appendChild(hurtEl);
+let hpShown = -1,
+  hurtShown = -1;
+function hurtPlayer(n, fx = 0, fz = 0) {
+  if (playerDead || home || homeBusy) return;
+  if (vehicle) n *= 0.5;
+  playerHP -= n;
+  hurtAt = performance.now();
+  hurtFlash = Math.min(1, hurtFlash + 0.25 + n / 30);
+  shake = Math.max(shake, 0.05 + n * 0.006);
+  sfx.hurt();
+  if (!vehicle && n > 14 && onGround) {
+    pushX += fx * 1.5;
+    pushZ += fz * 1.5;
+  }
+  if (playerHP <= 0) die();
+}
+function updateHealth(dt) {
+  if (!playerDead && performance.now() - hurtAt > 5000 && playerHP < 100)
+    playerHP = Math.min(100, playerHP + 14 * dt);
+  hurtFlash = Math.max(0, hurtFlash - dt * 1.2);
+  // health bar: hidden at full health out of a fight
+  const v = Math.round(Math.max(0, playerHP));
+  if (v !== hpShown) {
+    hpShown = v;
+    hpBar.style.width = v + "%";
+    hpBar.style.background = v > 50 ? "#58c25a" : v > 25 ? "#e0b13a" : "#d8423a";
+  }
+  hpWrap.style.opacity = playerHP >= 99.5 && performance.now() - hurtAt > 8000 ? "0" : "1";
+  const f = Math.round((hurtFlash * 0.8 + (playerHP < 30 ? 0.25 + 0.1 * Math.sin(performance.now() / 180) : 0)) * 100) / 100;
+  if (f !== hurtShown) {
+    hurtShown = f;
+    hurtEl.style.opacity = String(Math.max(0, f));
+  }
+}
+function die() {
+  if (playerDead) return;
+  playerDead = true;
+  if (vehicle) exitVehicle();
+  swing = null;
+  zip = null;
+  hideRope();
+  downTimer = 2.5;
+  homeBusy = true; // freeze input while the screen goes dark
+  const span = fadeEl.querySelector("span");
+  const old = span ? span.textContent : "";
+  if (span) span.textContent = "YOU WERE TAKEN DOWN";
+  fadeEl.classList.add("on");
+  setTimeout(() => {
+    const r = missionRespawn() || { x: pos.x, z: pos.z, yaw };
+    pos.set(r.x, terrainH(r.x, r.z) + 0.05, r.z);
+    if (r.yaw !== undefined) yaw = facing = r.yaw;
+    vy = 0;
+    onGround = true;
+    airVel.x = airVel.z = 0;
+    pushX = pushZ = 0;
+    downTimer = 0;
+    playerHP = 100;
+    hurtFlash = 0;
+    playerDead = false;
+    camera.position.set(pos.x, pos.y + 2, pos.z);
+    updateCamera(1);
+    missionOnRespawn();
+    setTimeout(() => {
+      fadeEl.classList.remove("on");
+      homeBusy = false;
+      if (span) span.textContent = old;
+    }, 300);
+  }, 2400);
+}
+// Is the straight line a → b clear of buildings / walls / crates (for enemy fire)?
+function shotClear(a, b) {
+  const dx = b.x - a.x,
+    dy = b.y - a.y,
+    dz = b.z - a.z,
+    dist = Math.hypot(dx, dy, dz);
+  if (dist < 0.5) return true;
+  _ro.set(a.x, a.y, a.z);
+  _rd.set(dx / dist, dy / dist, dz / dist);
+  for (let t = 0; t < dist; t += 6) {
+    const t2 = Math.min(t + 6, dist);
+    for (const s of query(
+      Math.min(a.x + _rd.x * t, a.x + _rd.x * t2) - 0.5,
+      Math.max(a.x + _rd.x * t, a.x + _rd.x * t2) + 0.5,
+      Math.min(a.z + _rd.z * t, a.z + _rd.z * t2) - 0.5,
+      Math.max(a.z + _rd.z * t, a.z + _rd.z * t2) + 0.5,
+    )) {
+      if (s.off || s.maxY - s.minY < 0.6) continue;
+      const th = rayBox(_ro, _rd, s, 0.3, dist - 0.4);
+      if (th !== null) return false;
+    }
+  }
+  return true;
+}
+
+// ---- melee: Q — jab, cross, then a knock-down kick
+let strikeT = 0,
+  strikeN = 0,
+  strikeKind = 0,
+  lastStrikeAt = 0;
+const STRIKE_LEN = 0.28;
+function melee() {
+  const now = performance.now();
+  if (strikeT > STRIKE_LEN * 0.45) return; // still mid-swing
+  strikeN = now - lastStrikeAt < 750 ? (strikeN + 1) % 3 : 0;
+  lastStrikeAt = now;
+  strikeKind = strikeN; // 0 jab (left), 1 cross (right), 2 kick
+  strikeT = STRIKE_LEN * (strikeKind === 2 ? 1.35 : 1);
+  // face where you're looking and hit whoever's in front
+  facing = yaw;
+  const fx = Math.sin(yaw),
+    fz = Math.cos(yaw);
+  let best = null,
+    bd = strikeKind === 2 ? 2.6 : 2.3;
+  for (const p of peds) {
+    if (p.state === "down" || p.state === "away" || p.dormant) continue;
+    const dx = p.x - pos.x,
+      dz = p.z - pos.z,
+      d = Math.hypot(dx, dz);
+    if (d > bd || (dx * fx + dz * fz) / (d || 1) < 0.3) continue;
+    bd = d;
+    best = p;
+  }
+  sfx.punch(!!best);
+  if (!best) return;
+  const kick = strikeKind === 2;
+  if (best.goon) missionHitGoon(best, kick ? 2 : 1, fx, fz, kick ? "kick" : "punch");
+  else if (kick) knockDown(best, fx * 6, fz * 6);
+  else {
+    best.state = "annoyed";
+    best.timer = 1.2;
+  }
+  shake = Math.max(shake, kick ? 0.12 : 0.06);
+  pushX += fx * 0.6;
+  pushZ += fz * 0.6;
+}
+function poseStrike(dt) {
+  const len = STRIKE_LEN * (strikeKind === 2 ? 1.35 : 1);
+  const k = 1 - strikeT / len; // 0 → 1 through the strike
+  const out = Math.sin(Math.min(1, k * 1.6) * Math.PI); // snap out, pull back
+  if (strikeKind === 2) {
+    legR.hip.rotation.x = -1.55 * out;
+    legR.knee.rotation.x = 0.9 * (1 - out);
+    body.rotation.x = -0.25 * out;
+    armL.sh.rotation.x = -0.9;
+    armR.sh.rotation.x = -0.9;
+  } else {
+    const arm = strikeKind === 0 ? armL : armR,
+      other = strikeKind === 0 ? armR : armL;
+    arm.sh.rotation.x = -1.2 - 0.45 * out;
+    arm.el.rotation.x = -1.4 * (1 - out);
+    other.sh.rotation.x = -1.0;
+    other.el.rotation.x = -1.6;
+  }
+  strikeT = Math.max(0, strikeT - dt);
+}
+
 // ---------------------------------------------------------------- loop
 let mapTimer = 0;
 engine.runRenderLoop(() => {
-  const dt = Math.min(engine.getDeltaTime() / 1000, 0.05);
+  const dt = Math.min(engine.getDeltaTime() / 1000, 0.05) * missionTimeScale();
   const now = performance.now();
   if (interactQueued) {
     interactQueued = false;
@@ -4192,10 +4613,11 @@ engine.runRenderLoop(() => {
       }
     }
   }
-  if (superJumpQueued) {
-    superJumpQueued = false;
-    if (!vehicle) startSuperJump();
+  if (meleeQueued) {
+    meleeQueued = false;
+    if (!vehicle && !home && !homeBusy && !swing && !zip && !swimming && downTimer <= 0) melee();
   }
+  updateHealth(dt);
   if (swingQueued) {
     swingQueued = false;
     if (!vehicle && !homeBusy) startSwing();
@@ -4239,7 +4661,7 @@ engine.runRenderLoop(() => {
       shove: shovePlayer,
     });
   else hideCharacterUI();
-  updateMission(dt, { pos, vehicle });
+  updateMission(dt, { pos, vehicle, inside: !!home });
   if (!homeBusy) trackVelocity(dt);
   updateCamera(dt);
   updateWebTargets(dt);
@@ -4253,6 +4675,9 @@ engine.runRenderLoop(() => {
     pulseHomeMarkers(now / 1000);
   }
   updateSound(dt);
+  updateAmbient(dt, camera.position.x, camera.position.z);
+  animateSea(dt);
+  updateSinking(dt);
   mapTimer += dt;
   if (mapTimer > 1 / 30) {
     mapTimer = 0;
@@ -4262,7 +4687,54 @@ engine.runRenderLoop(() => {
     bigTimer = 0;
     drawBigMap();
   } // live player position
-  scene.render();
+  if (home) renderIndoors();
+  else scene.render();
 });
+
+// Interiors are drawn near (0, 0) (see RENDER_SHIFT in interiors.js) to keep
+// GPU float precision: shift everything visible indoors into that frame for
+// the draw, then put it back so gameplay never sees the offset.
+function renderIndoors() {
+  const dx = RENDER_SHIFT.x,
+    dz = RENDER_SHIFT.z;
+  const movers = [camera, blob];
+  if (!player.parent) movers.push(player);
+  for (const n of movers) {
+    n.position.x -= dx;
+    n.position.z -= dz;
+  }
+  scene.render();
+  for (const n of movers) {
+    n.position.x += dx;
+    n.position.z += dz;
+  }
+}
 window.addEventListener("resize", () => engine.resize());
-document.getElementById("loading")?.remove();
+// Keep "Building the city…" up until every shader is compiled and a few real
+// frames have been drawn: otherwise the first second shows the world popping
+// in piece by piece (bare ground tiles first), and the compile hitches land
+// in gameplay instead of here.
+{
+  const el = document.getElementById("loading");
+  let revealed = false;
+  const reveal = () => {
+    if (revealed || !el) return;
+    revealed = true;
+    let n = 0;
+    const tick = () => {
+      if (++n < 4) return requestAnimationFrame(tick);
+      el.classList.add("done");
+      setTimeout(() => el.remove(), 500);
+    };
+    requestAnimationFrame(tick);
+  };
+  // poll readiness ourselves (a bounded number of times: Babylon's own
+  // whenReady keeps polling forever if anything never becomes ready)
+  const t0 = performance.now();
+  const check = () => {
+    if (revealed) return;
+    if (scene.isReady() || performance.now() - t0 > 10000) reveal();
+    else setTimeout(check, 250);
+  };
+  setTimeout(check, 100);
+}

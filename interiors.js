@@ -21,6 +21,12 @@ export const WORLD_MASK = 0x0fffffff;
 export const INSIDE_MASK = 0x10000000;
 export const BOTH_MASK = WORLD_MASK | INSIDE_MASK;
 const ORIGIN = { x: 24000, z: 24000 };
+// Gameplay (collisions, player position) lives out at ORIGIN, but 32-bit GPU
+// floats only resolve ~2-5 mm out there, so thin layered surfaces (screens,
+// tiles, trims, pictures) z-fight and shimmer as the camera moves. Interior
+// meshes are therefore built relative to ORIGIN and drawn near (0, 0); main.js
+// shifts the camera + player by -RENDER_SHIFT for each indoor frame.
+export const RENDER_SHIFT = ORIGIN;
 const T_IN = 0.075, T_EX = 0.25;
 
 // ---------------------------------------------------------------- floor plans
@@ -119,6 +125,41 @@ const TYPES = {
     ]],
   },
 };
+// ---- Kathmandu. Newar houses are tall and narrow, and used from the bottom
+// up: the ground floor (chheli) for storage and the family's craft, then the
+// bedrooms (mattan), the sitting room behind the big carved window (chota),
+// and right under the roof the kitchen and the shrine (baiga) — the purest
+// floor, where outsiders don't go. Steep timber stairs; exposed joists; walls
+// lime-washed above a red-earth dado; brick and mud floors; lattice windows.
+const NEWAR_PAINT = { nhall: "#efe6d2", nlanding: "#efe6d2", store: "#e6dcc6", workshop: "#e6dcc6", nbed: "#efe6d2", baithak: "#f1e9d6", puja: "#f3e6c9", bhutu: "#e9dfca" };
+const NEWAR = {
+  newarTall: {
+    label: "Newar house", door: 2.4, fh: 2.9, party: true, newar: true, paint: NEWAR_PAINT,
+    floors: [
+      [P(0, 0, 3.4, 9.6, "nhall", { stairs: "L" }), P(3.4, 0, 4, 5, "store"), P(3.4, 5, 4, 4.6, "workshop")],
+      [P(0, 0, 3.4, 9.6, "nlanding", { stairs: "R" }), P(3.4, 0, 4, 5, "nbed"), P(3.4, 5, 4, 4.6, "nbed")],
+      [P(0, 0, 3.4, 9.6, "nlanding", { stairs: "L" }), P(3.4, 0, 4, 9.6, "baithak")],
+      [P(0, 0, 3.4, 9.6, "nlanding"), P(3.4, 0, 4, 4.4, "puja"), P(3.4, 4.4, 4, 5.2, "bhutu")],
+    ],
+  },
+  newarWide: {
+    label: "Newar house", door: 5.3, fh: 2.9, party: true, newar: true, paint: NEWAR_PAINT,
+    floors: [
+      [P(0, 0, 3.2, 8.4, "store"), P(3.2, 0, 3.2, 8.4, "nhall", { stairs: "L" }), P(6.4, 0, 3.2, 8.4, "workshop")],
+      [P(0, 0, 3.2, 8.4, "nbed"), P(3.2, 0, 3.2, 8.4, "nlanding", { stairs: "R" }), P(6.4, 0, 3.2, 8.4, "nbed")],
+      [P(0, 0, 3.2, 4.2, "puja"), P(0, 4.2, 3.2, 4.2, "bhutu"), P(3.2, 0, 3.2, 8.4, "nlanding"), P(6.4, 0, 3.2, 8.4, "baithak")],
+    ],
+  },
+  // the newer concrete houses: a modern flat, but still a shrine upstairs
+  ktmModern: {
+    label: "Kathmandu house", door: 1.9, party: true, fh: 3.0,
+    paint: { hall: "#e8e2d0", landing: "#e8e2d0", living: "#cfe3dc", kitchen: "#f3e7c4", bed: "#ecd3dc", bath: "#dfe9ec", puja: "#f6dfb0" },
+    floors: [
+      [P(0, 0, 2.8, 9, "hall", { stairs: "L" }), P(2.8, 0, 5, 5, "living"), P(2.8, 5, 5, 4, "kitchen")],
+      [P(0, 0, 2.8, 9, "landing", { stairs: "L" }), P(2.8, 0, 5, 5, "bed"), P(2.8, 5, 2.6, 4, "puja"), P(5.4, 5, 2.4, 4, "bath")],
+    ],
+  },
+};
 const BY_KIND = {
   brown: ["brownstone", "victorian", "openModern", "artistLoft", "narrow"],
   house: ["cottage", "familyHouse", "openModern", "victorian"],
@@ -127,6 +168,10 @@ const BY_KIND = {
   mansion: ["mansionFlat", "studentFlat", "penthouse", "studio", "parisApartment"],
 };
 export function homeType(home) {
+  if (home.kind === "ktm") {
+    if (home.style !== "newar") return NEWAR.ktmModern;
+    return (Math.imul(home.no, 7919) >>> 0) % 3 === 0 ? NEWAR.newarWide : NEWAR.newarTall;
+  }
   const list = BY_KIND[home.kind] || BY_KIND.house;
   return TYPES[list[(Math.imul(home.no, 7919) >>> 0) % list.length]];
 }
@@ -136,10 +181,10 @@ export const insideHome = () => current;
 
 // ---------------------------------------------------------------- door lookup
 export function nearestHome(x, z, y) {
-  if (y > 2.6) return null;
   let best = null, bd = 2.0;
   for (const h of homes) {
     if (Math.abs(h.tx - x) > bd || Math.abs(h.tz - z) > bd) continue;
+    if (Math.abs(y - (h.ty || 0)) > 2.6) continue;     // on a roof / balcony above it
     const d = Math.hypot(h.tx - x, h.tz - z);
     if (d < bd) { bd = d; best = h; }
   }
@@ -163,7 +208,17 @@ function kit() {
     brick: litMat("homeBrick", hex("#9a5a44")), porcelain: litMat("homePorcelain", hex("#f5f5f2"), 0.6),
     mirror: litMat("homeMirror", hex("#b9c8d2"), 0.9), black: litMat("homeBlack", hex("#141416"), 0.5),
     steel: litMat("homeSteel", hex("#b6bcc2"), 0.8), oak: litMat("homeOak", hex("#b78a5c"), 0.15),
+    // Newar
+    timber: litMat("homeTimber", hex("#3b2418"), 0.08), lime: litMat("homeLime", hex("#efe8d6")),
+    ochre: litMat("homeOchre", hex("#8e3b24")), mud: litMat("homeMud", hex("#7a5236")),
+    copper: litMat("homeCopper", hex("#b0643a"), 0.6), clay: litMat("homeClay", hex("#a0603a")),
+    sack: litMat("homeSack", hex("#cdb48a")), straw: litMat("homeStraw", hex("#c9a96b")),
+    marigold: litMat("homeMarigold", hex("#f39a12")), vermilion: litMat("homeVermilion", hex("#c4231b")),
+    soot: litMat("homeSoot", hex("#1c1714")), wool: litMat("homeWool", hex("#9b2d2a")),
+    lattice: scene.getMaterialByName("ktmLatticeM") || litMat("homeLattice", hex("#2a1a10")),
   };
+  // plain colours read flat indoors: give them a little self-light (set per visit)
+  K.newarLit = ["timber", "lime", "ochre", "mud", "copper", "clay", "sack", "straw", "marigold", "vermilion", "soot", "wool"].map((k) => K[k]);
   return K;
 }
 function paintMat(c) {
@@ -185,8 +240,17 @@ export function enterHome(home) {
   clearXF();
   captureSolids(null);
   const all = [...new Set([...extra, ...accs])];
+  // instances (plants etc.) created during the build: move them into the
+  // local render frame too
+  for (const mesh of scene.meshes.slice(m0)) {
+    mesh.unfreezeWorldMatrix();
+    mesh.position.x -= ORIGIN.x;
+    mesh.position.z -= ORIGIN.z;
+    mesh.freezeWorldMatrix();
+  }
   for (const a of all) {
     if (!a.pos.length) continue;
+    for (let i = 0; i < a.pos.length; i += 3) { a.pos[i] -= ORIGIN.x; a.pos[i + 2] -= ORIGIN.z; }
     const mesh = new BABYLON.Mesh("homePart", scene);
     const vd = new BABYLON.VertexData();
     vd.positions = a.pos; vd.normals = a.nrm; vd.uvs = a.uv; vd.indices = a.idx;
@@ -209,7 +273,7 @@ export function leaveHome() {
   for (const m of current.meshes) m.dispose(false, false);
   for (const s of current.solids) removeSolid(s);
   current = null;
-  return { x: h.ox, y: 0, z: h.oz, yaw: h.outYaw };
+  return { x: h.ox, y: h.oy || 0, z: h.oz, yaw: h.outYaw };
 }
 
 // ---------------------------------------------------------------- interval helpers
@@ -247,7 +311,11 @@ function build(home, A, F, accs) {
   const G = {
     glass: mk(Kt.glass), water: mk(Kt.water), gold: mk(Kt.gold), brick: mk(Kt.brick, 0.6, 0.6), porcelain: mk(Kt.porcelain),
     mirror: mk(Kt.mirror), black: mk(Kt.black), steel: mk(Kt.steel), oak: mk(Kt.oak),
+    timber: mk(Kt.timber), lime: mk(Kt.lime), ochre: mk(Kt.ochre), mud: mk(Kt.mud, 1.5, 1.5), copper: mk(Kt.copper),
+    clay: mk(Kt.clay), sack: mk(Kt.sack), straw: mk(Kt.straw), marigold: mk(Kt.marigold), vermilion: mk(Kt.vermilion),
+    soot: mk(Kt.soot), wool: mk(Kt.wool), lattice: mk(Kt.lattice, 1.2, 1.2),
   };
+  for (const m of Kt.newarLit) m.emissiveColor = m.diffuseColor.scale(night ? 0.42 : 0.24);
   const paintAcc = new Map();
   const paintOf = (t) => {
     const c = type.paint[t] || "#e6e1d6";
@@ -281,16 +349,34 @@ function build(home, A, F, accs) {
     }
     return R;
   }));
+  // Stairwell openings: every flight (on any floor but the top) comes up
+  // through a hole in the slab above it. A room standing over a hole keeps
+  // furniture off its side wall and across its ends, like a stair room.
+  const holes = floors.map(() => []);
+  for (let f = 0; f < plans.length - 1; f++) {
+    for (const R of plans[f]) if (R.st) holes[f + 1].push({ x0: R.st.sx0, x1: R.st.sx1, z0: R.st.zs - 0.02, z1: R.st.ze + 0.02, side: R.st.side, st: R.st });
+  }
+  for (let f = 1; f < plans.length; f++) for (const R of plans[f]) {
+    for (const h of holes[f]) {
+      if (h.x1 <= R.x + EPS || h.x0 >= R.x + R.w - EPS || h.z1 <= R.z + EPS || h.z0 >= R.z + R.d - EPS) continue;
+      R.hole = h;
+      const side = Math.abs(h.x0 - R.x) < 0.05 ? 2 : Math.abs(h.x1 - (R.x + R.w)) < 0.05 ? 3 : -1;
+      R.holeSide = side;
+      if (side >= 0) R.walls[side].blocks.push([-1e9, 1e9]);
+      for (const s of [0, 1]) R.walls[s].blocks.push([h.x0 - 0.1, h.x1 + 0.1]);
+    }
+  }
 
   // ---- floors, slabs, ceiling
-  const finishOf = (t) => (["kitchen", "kitchenDining", "bath", "utility"].includes(t) ? A.tileF : ["bed", "kids", "study"].includes(t) ? A.carpet : A.wood);
+  const finishOf = (t, f) => type.newar
+    ? (f === 0 ? G.brick : G.mud)                       // brick paving downstairs, smooth mud floors above
+    : (["kitchen", "kitchenDining", "bath", "utility", "puja"].includes(t) ? A.tileF : ["bed", "kids", "study"].includes(t) ? A.carpet : A.wood);
   const H = floors.length * FH;
+  const ceilM = type.newar ? G.lime : A.ceiling;
   solidBox(-T_EX, -0.3, -T_EX, W + T_EX, 0, D + T_EX, () => null);
-  solidBox(-T_EX, H, -T_EX, W + T_EX, H + 0.3, D + T_EX, (d) => (d === "-y" ? A.ceiling : null));
-  let hole = null;
-  for (const R of plans[0]) if (R.st) hole = { x0: R.st.sx0, x1: R.st.sx1, z0: R.st.zs - 0.02, z1: R.st.ze + 0.02 };
-  const minusHole = (x0, z0, x1, z1) => {
-    if (!hole || hole.x1 <= x0 || hole.x0 >= x1 || hole.z1 <= z0 || hole.z0 >= z1) return [[x0, z0, x1, z1]];
+  solidBox(-T_EX, H, -T_EX, W + T_EX, H + 0.3, D + T_EX, (d) => (d === "-y" ? ceilM : null));
+  const cut = (hole, [x0, z0, x1, z1]) => {
+    if (hole.x1 <= x0 || hole.x0 >= x1 || hole.z1 <= z0 || hole.z0 >= z1) return [[x0, z0, x1, z1]];
     const out = [];
     if (hole.z0 > z0) out.push([x0, z0, x1, hole.z0]);
     if (hole.z1 < z1) out.push([x0, hole.z1, x1, z1]);
@@ -298,26 +384,44 @@ function build(home, A, F, accs) {
     if (hole.x1 < x1) out.push([hole.x1, Math.max(z0, hole.z0), x1, Math.min(z1, hole.z1)]);
     return out;
   };
+  const minusHoles = (f, x0, z0, x1, z1) => {
+    let parts = [[x0, z0, x1, z1]];
+    for (const h of holes[f] || []) parts = parts.flatMap((r) => cut(h, r));
+    return parts;
+  };
   for (let f = 1; f < floors.length; f++) {
     const y = f * FH;
-    for (const [a, b, c, d] of minusHole(-T_EX, -T_EX, W + T_EX, D + T_EX)) {
-      solidBox(a, y - 0.3, b, c, y, d, (dir) => (dir === "-y" ? A.ceiling : dir === "+y" ? null : A.plaster));
+    for (const [a, b, c, d] of minusHoles(f, -T_EX, -T_EX, W + T_EX, D + T_EX)) {
+      solidBox(a, y - 0.3, b, c, y, d, (dir) => (dir === "-y" ? ceilM : dir === "+y" ? null : A.plaster));
     }
   }
   for (const rooms of plans) for (const R of rooms) {
-    for (const [a, b, c, d] of R.f > 0 ? minusHole(R.x, R.z, R.x + R.w, R.z + R.d) : [[R.x, R.z, R.x + R.w, R.z + R.d]]) {
-      addBox(a, R.y, b, c, R.y + 0.02, d, finishOf(R.t));
+    for (const [a, b, c, d] of minusHoles(R.f, R.x, R.z, R.x + R.w, R.z + R.d)) {
+      addBox(a, R.y, b, c, R.y + 0.02, d, finishOf(R.t, R.f));
     }
   }
 
   // ---- exterior walls (per room, so each room keeps its own paint) + windows
   const win = (R, w, at, y0, wh) => {
-    const ww = 1.3, f = 0.07, i = w.inset, n = [w.nx, w.nz];
+    const ww = type.newar ? 1.0 : 1.3, f = 0.07, i = w.inset, n = [w.nx, w.nz];
     // build in wall-local terms then map: u = along wall, v = into room
     const B = (u0, y1, v0, u1, y2, v1, a) => {
       if (w.axis === "x") addBox(u0, y1, Math.min(w.fixed + n[1] * v0, w.fixed + n[1] * v1), u1, y2, Math.max(w.fixed + n[1] * v0, w.fixed + n[1] * v1), a);
       else addBox(Math.min(w.fixed + n[0] * v0, w.fixed + n[0] * v1), y1, u0, Math.max(w.fixed + n[0] * v0, w.fixed + n[0] * v1), y2, u1, a);
     };
+    if (type.newar) {
+      // carved timber window: light through a diagonal lattice, a heavy frame,
+      // a lintel whose ends run out into the wall, and a deep sill
+      B(at - ww / 2, y0, i, at + ww / 2, y0 + wh, i + 0.006, G.glass);
+      B(at - ww / 2, y0, i + 0.006, at + ww / 2, y0 + wh, i + 0.02, G.lattice);
+      B(at - ww / 2 - 0.1, y0 - 0.1, i, at + ww / 2 + 0.1, y0, i + 0.09, G.timber);
+      B(at - ww / 2 - 0.35, y0 + wh, i, at + ww / 2 + 0.35, y0 + wh + 0.14, i + 0.09, G.timber);
+      B(at - ww / 2 - 0.1, y0, i, at - ww / 2, y0 + wh, i + 0.09, G.timber);
+      B(at + ww / 2, y0, i, at + ww / 2 + 0.1, y0 + wh, i + 0.09, G.timber);
+      B(at - ww / 2 - 0.2, y0 - 0.16, i, at + ww / 2 + 0.2, y0 - 0.1, i + 0.24, G.timber);
+      w.win.push([at - ww / 2 - 0.4, at + ww / 2 + 0.4]);
+      return;
+    }
     B(at - ww / 2, y0, i, at + ww / 2, y0 + wh, i + 0.012, G.glass);
     B(at - ww / 2 - f, y0 - f, i, at + ww / 2 + f, y0, i + 0.06, A.white);
     B(at - ww / 2 - f, y0 + wh, i, at + ww / 2 + f, y0 + wh + f, i + 0.06, A.white);
@@ -344,7 +448,8 @@ function build(home, A, F, accs) {
       if (hasDoor) {
         seg(lo, y0, doorX - 0.6, y1); seg(doorX + 0.6, y0, hi, y1); seg(doorX - 0.6, y0 + 2.4, doorX + 0.6, y1);
         solidBox(doorX - 0.6, y0, -T_EX + 0.02, doorX + 0.6, y0 + 2.4, -0.03, A.door);
-        addBox(doorX - 0.72, y0, -0.03, doorX + 0.72, y0 + 2.52, 0.01, A.doorTrim);
+        addBox(doorX - 0.72, y0, -0.03, doorX + 0.72, y0 + 2.52, 0.01, type.newar ? G.timber : A.doorTrim);
+        if (type.newar) addBox(doorX - 1.0, y0 + 2.52, -0.03, doorX + 1.0, y0 + 2.7, 0.06, G.timber);   // lintel
         addBox(doorX - 0.58, y0, 0.01, doorX + 0.58, y0 + 2.38, 0.03, A.door);
         for (const [a, b] of [[-0.42, -0.06], [0.06, 0.42]]) for (const [c, d] of [[0.25, 1.05], [1.3, 2.2]]) addBox(doorX + a, y0 + c, 0.03, doorX + b, y0 + d, 0.045, A.darkWood);
         addBox(doorX + 0.4, y0 + 1.0, 0.03, doorX + 0.48, y0 + 1.08, 0.1, G.gold);
@@ -353,11 +458,14 @@ function build(home, A, F, accs) {
       // windows (not on party walls, not behind the stairs)
       if (type.party && w.s >= 2) continue;
       if (R.st && w.s === R.st.side) continue;
-      const wh = Math.min(2.6, FH - 1.5);
+      if (R.hole && w.s === R.holeSide) continue;
+      const wh = type.newar ? Math.min(1.35, FH - 1.45) : Math.min(2.6, FH - 1.5);
       const parts = freeParts(w.a0 + 0.7, w.a1 - 0.7, hasDoor ? [[doorX - 1.2, doorX + 1.2]] : []);
+      // the sitting room's street window is the big carved one: windows side by side
+      const spacing = type.newar ? (R.t === "baithak" && w.s === 0 ? 1.25 : 2.2) : 2.7;
       for (const [p0, p1] of parts) {
-        const n = Math.floor((p1 - p0 + 1.3) / 2.7);
-        for (let k = 0; k < n; k++) win(R, w, p0 + (p1 - p0) * (k + 0.5) / n, y0 + 0.95, wh);
+        const n = Math.floor((p1 - p0 + (type.newar ? 1.0 : 1.3)) / spacing);
+        for (let k = 0; k < n; k++) win(R, w, p0 + (p1 - p0) * (k + 0.5) / n, y0 + (type.newar ? 0.75 : 0.95), wh);
       }
     }
   }
@@ -376,9 +484,15 @@ function build(home, A, F, accs) {
       const y0 = a.y, y1 = a.y + FH;
       // doorway: avoid the stair side and the flight's ends, keep off corners
       let forbid = [];
-      for (const R of [a, b]) if (R.st) {
-        if ((R === a && sa === R.st.side) || (R === b && sb === R.st.side)) forbid.push([-1e9, 1e9]);
-        if (axis === "x") forbid.push([R.st.sx0 - 0.1, R.st.sx1 + 0.1]);
+      for (const R of [a, b]) {
+        for (const [S, sd] of [[R.st, R.st && R.st.side], [R.hole, R.holeSide]]) {
+          if (!S) continue;
+          const x0 = S.sx0 ?? S.x0, x1 = S.sx1 ?? S.x1, z0 = S.zs ?? S.z0, z1 = S.ze ?? S.z1;
+          // along the flight's own wall: only where the flight is (a door can
+          // open past its ends); across it: wherever it reaches the wall
+          if ((R === a && sa === sd) || (R === b && sb === sd)) forbid.push([z0 - 0.4, z1 + 0.4]);
+          if (axis === "x") forbid.push([x0 - 0.1, x1 + 0.1]);
+        }
       }
       let door = null;
       if (!open) {
@@ -415,29 +529,32 @@ function build(home, A, F, accs) {
     }
   }
 
-  // ---- stairs (ground floor flight) + guard rails round the hole upstairs
-  for (const R of plans[0]) {
-    if (!R.st || floors.length < 2) continue;
-    const { sx0, sx1, zs, N, tread } = R.st, rise = FH / N;
+  // ---- stairs (a flight up from every floor but the top) + guard rails round
+  // each stairwell hole on the floor above
+  const stepTop = type.newar ? G.timber : G.oak, stepSide = type.newar ? G.timber : A.white, railM = type.newar ? G.timber : A.white;
+  for (let f = 0; f < plans.length - 1; f++) for (const R of plans[f]) {
+    if (!R.st) continue;
+    const { sx0, sx1, zs, N, tread } = R.st, rise = FH / N, y0 = R.y;
+    const hole = holes[f + 1].find((h) => h.st === R.st);
     for (let k = 1; k <= N; k++) {
       const z0 = zs + (k - 1) * tread;
-      solidBox(sx0, 0, z0, sx1, k * rise, z0 + tread, (d) => (d === "+y" ? G.oak : A.white));
-      addBox(sx0, k * rise - 0.02, z0 - 0.02, sx1, k * rise + 0.01, z0 + 0.03, A.darkWood);   // nosing
+      solidBox(sx0, y0, z0, sx1, y0 + k * rise, z0 + tread, (d) => (d === "+y" ? stepTop : stepSide));
+      addBox(sx0, y0 + k * rise - 0.02, z0 - 0.02, sx1, y0 + k * rise + 0.01, z0 + 0.03, A.darkWood);   // nosing
     }
     const open = R.stairs === "L" ? sx1 : sx0, sgn = R.stairs === "L" ? 1 : -1;
     for (let k = 1; k <= N; k += 2) {
-      const z = zs + (k - 0.5) * tread, top = k * rise;
-      addBox(open - 0.025 * sgn - 0.02, top, z - 0.02, open - 0.025 * sgn + 0.02, top + 0.9, z + 0.02, A.white);
+      const z = zs + (k - 0.5) * tread, top = y0 + k * rise;
+      addBox(open - 0.025 * sgn - 0.02, top, z - 0.02, open - 0.025 * sgn + 0.02, top + 0.9, z + 0.02, railM);
     }
     for (let k = 1; k <= N; k++) {
       const z0 = zs + (k - 1) * tread;
-      addBox(open - 0.025 * sgn - 0.035, k * rise + 0.88, z0, open - 0.025 * sgn + 0.035, k * rise + 0.94, z0 + tread + 0.02, A.darkWood);
+      addBox(open - 0.025 * sgn - 0.035, y0 + k * rise + 0.88, z0, open - 0.025 * sgn + 0.035, y0 + k * rise + 0.94, z0 + tread + 0.02, A.darkWood);
     }
-    solidBox(open - 0.025 * sgn - 0.06, 0, zs - 0.12, open - 0.025 * sgn + 0.06, 1.1, zs, A.darkWood);   // newel post
-    const y = FH;
-    solidBox(Math.min(open, open + sgn * 0.05), y, hole.z0, Math.max(open, open + sgn * 0.05), y + 1.0, hole.z1, A.white);
+    solidBox(open - 0.025 * sgn - 0.06, y0, zs - 0.12, open - 0.025 * sgn + 0.06, y0 + 1.1, zs, A.darkWood);   // newel post
+    const y = y0 + FH;
+    solidBox(Math.min(open, open + sgn * 0.05), y, hole.z0, Math.max(open, open + sgn * 0.05), y + 1.0, hole.z1, railM);
     addBox(Math.min(open, open + sgn * 0.07) - 0.01, y + 1.0, hole.z0, Math.max(open, open + sgn * 0.07) + 0.01, y + 1.06, hole.z1, A.darkWood);
-    solidBox(sx0, y, hole.z0 - 0.05, sx1, y + 1.0, hole.z0, A.white);
+    solidBox(sx0, y, hole.z0 - 0.05, sx1, y + 1.0, hole.z0, railM);
   }
 
   // ---------------------------------------------------------------- furniture
@@ -573,6 +690,11 @@ function build(home, A, F, accs) {
     });
   };
   const pendant = (x, z, ceil) => {
+    if (type.newar) {   // low ceilings: a bare bulb on a short flex, under the joists
+      addBox(x - 0.01, ceil - 0.5, z - 0.01, x + 0.01, ceil, z + 0.01, G.black);
+      addBox(x - 0.05, ceil - 0.6, z - 0.05, x + 0.05, ceil - 0.5, z + 0.05, A.light);
+      return;
+    }
     addBox(x - 0.01, ceil - 0.7, z - 0.01, x + 0.01, ceil, z + 0.01, G.black);
     addBox(x - 0.22, ceil - 0.85, z - 0.22, x + 0.22, ceil - 0.68, z + 0.22, A.light);
   };
@@ -777,8 +899,273 @@ function build(home, A, F, accs) {
     if (d) inFrame(d, y, () => F.desk(0, 0, y, 1));
   };
 
+  // ---------------------------------------------------------------- Newar rooms
+  // (all pieces built with their back against the wall, like the ones above)
+  const gagri = (x, z, y, k = 1) => {                  // round-bellied brass water pot
+    addBox(x - 0.16 * k, y, z - 0.16 * k, x + 0.16 * k, y + 0.06 * k, z + 0.16 * k, G.gold);
+    addBox(x - 0.2 * k, y + 0.06 * k, z - 0.2 * k, x + 0.2 * k, y + 0.3 * k, z + 0.2 * k, G.gold);
+    addBox(x - 0.14 * k, y + 0.3 * k, z - 0.14 * k, x + 0.14 * k, y + 0.38 * k, z + 0.14 * k, G.gold);
+    addBox(x - 0.07 * k, y + 0.38 * k, z - 0.07 * k, x + 0.07 * k, y + 0.46 * k, z + 0.07 * k, G.gold);
+    addBox(x - 0.11 * k, y + 0.46 * k, z - 0.11 * k, x + 0.11 * k, y + 0.49 * k, z + 0.11 * k, G.gold);
+  };
+  const jar = (x, z, y, k = 1, m = G.clay) => {         // big clay storage jar
+    addBox(x - 0.2 * k, y, z - 0.2 * k, x + 0.2 * k, y + 0.1 * k, z + 0.2 * k, m);
+    solidBox(x - 0.28 * k, y + 0.1 * k, z - 0.28 * k, x + 0.28 * k, y + 0.55 * k, z + 0.28 * k, m);
+    addBox(x - 0.2 * k, y + 0.55 * k, z - 0.2 * k, x + 0.2 * k, y + 0.68 * k, z + 0.2 * k, m);
+    addBox(x - 0.13 * k, y + 0.68 * k, z - 0.13 * k, x + 0.13 * k, y + 0.76 * k, z + 0.13 * k, m);
+  };
+  const diyo = (x, z, y) => {                          // little oil lamp with a flame
+    addBox(x - 0.05, y, z - 0.05, x + 0.05, y + 0.025, z + 0.05, G.clay);
+    addBox(x - 0.012, y + 0.025, z - 0.012, x + 0.012, y + 0.07, z + 0.012, A.light);
+  };
+  const sukul = (x, z, y, w, d, yaw = 0) => withFrame(x, z, yaw, () => addBox(-w / 2, y + 0.02, -d / 2, w / 2, y + 0.035, d / 2, G.straw));
+  const firewood = (y, w, h) => {
+    for (let r = 0; r * 0.09 < h; r++) for (let x = -w / 2 + (r % 2) * 0.05; x < w / 2 - 0.05; x += 0.1) addBox(x, y + r * 0.09, -0.25, x + 0.08, y + r * 0.09 + 0.08, 0.25, r % 3 ? A.darkWood : G.timber);
+  };
+  const chest = (y, w = 1.1) => {                      // dhukuti: the family's wooden chest
+    solidBox(-w / 2, y, -0.28, w / 2, y + 0.62, 0.28, G.timber);
+    addBox(-w / 2 - 0.02, y + 0.62, -0.3, w / 2 + 0.02, y + 0.67, 0.3, A.darkWood);
+    for (const x of [-w / 2 + 0.06, w / 2 - 0.1]) addBox(x, y + 0.05, 0.28, x + 0.04, y + 0.6, 0.3, G.gold);
+    addBox(-0.06, y + 0.42, 0.28, 0.06, y + 0.52, 0.31, G.gold);
+  };
+  const shelf = (y, w, h, items) => {                  // open timber shelf on the wall, things on it
+    for (const sy of h) {
+      addBox(-w / 2, y + sy, -0.18, w / 2, y + sy + 0.04, 0.12, G.timber);
+      items(sy + 0.04);
+    }
+    for (const x of [-w / 2, w / 2 - 0.05]) addBox(x, y + h[0] - 0.2, -0.18, x + 0.05, y + h[h.length - 1] + 0.05, -0.12, G.timber);
+  };
+  const beams = (R) => {
+    // exposed joists across the room's short span, dark timber
+    const top = R.y + FH - (R.f < floors.length - 1 ? 0.3 : 0), alongX = R.w <= R.d;
+    const L0 = alongX ? R.z : R.x, L1 = alongX ? R.z + R.d : R.x + R.w;
+    const skip = (c) => [R.st, R.hole].some((S) => S && c > (S.zs ?? S.z0) - 0.4 && c < (S.ze ?? S.z1) + 0.4 && alongX);
+    for (let c = L0 + 0.35; c < L1 - 0.2; c += 0.6) {
+      if (skip(c)) continue;
+      if (alongX) addBox(R.x, top - 0.13, c - 0.05, R.x + R.w, top, c + 0.05, G.timber);
+      else addBox(c - 0.05, top - 0.13, R.z, c + 0.05, top, R.z + R.d, G.timber);
+    }
+    // a heavy main beam the joists rest on
+    if (alongX) addBox(R.x + R.w / 2 - 0.09, top - 0.24, R.z, R.x + R.w / 2 + 0.09, top - 0.12, R.z + R.d, G.timber);
+    else addBox(R.x, top - 0.24, R.z + R.d / 2 - 0.09, R.x + R.w, top - 0.12, R.z + R.d / 2 + 0.09, G.timber);
+  };
+  const dado = (R) => {
+    // red-earth band round the bottom of the lime-washed walls
+    for (const w of R.walls) {
+      for (const [p0, p1] of freeParts(w.a0, w.a1, w.doors)) {
+        const v0 = w.fixed + (w.axis === "x" ? w.nz : w.nx) * w.inset, v1 = v0 + (w.axis === "x" ? w.nz : w.nx) * 0.01;
+        if (w.axis === "x") addBox(p0, R.y, Math.min(v0, v1), p1, R.y + 0.95, Math.max(v0, v1), G.ochre);
+        else addBox(Math.min(v0, v1), R.y, p0, Math.max(v0, v1), R.y + 0.95, p1, G.ochre);
+      }
+    }
+  };
+  const paubha = (R, y) => {                           // painted scroll (thangka / paubha) on a wall
+    const fr = tryWalls(R, [0, 1, 2, 3].sort(() => rand() - 0.5), 0.9, 0.04, { tall: true, gap: 0.01 });
+    if (!fr) return;
+    inFrame(fr, y, () => {
+      addBox(-0.32, y + 1.25, -0.02, 0.32, y + 2.15, 0.015, G.wool);
+      addBox(-0.26, y + 1.33, 0.015, 0.26, y + 2.05, 0.02, G.marigold);
+      addBox(-0.16, y + 1.45, 0.02, 0.16, y + 1.9, 0.025, G.vermilion);
+      addBox(-0.07, y + 1.58, 0.025, 0.07, y + 1.78, 0.03, G.gold);
+      for (const yy of [1.2, 2.17]) addBox(-0.38, y + yy, -0.02, 0.38, y + yy + 0.04, 0.03, G.timber);
+    });
+  };
+
+  const nhall = (R) => {
+    const y = R.y;
+    const sr = tryWalls(R, [0, 2, 3, 1], 1.0, 0.32, { at: "start" });       // shoes by the door
+    if (sr) inFrame(sr, y, () => { solidBox(-0.5, y, -0.16, 0.5, y + 0.36, 0.16, G.timber); for (let k = 0; k < 4; k++) addBox(-0.42 + k * 0.22, y + 0.36, -0.1, -0.3 + k * 0.22, y + 0.42, 0.1, k % 2 ? G.soot : G.wool); });
+    const wp = tryWalls(R, [1, 3, 2, 0], 0.9, 0.5);                          // drinking water: brass pots on a stand
+    if (wp) inFrame(wp, y, () => { solidBox(-0.45, y, -0.25, 0.45, y + 0.4, 0.25, G.timber); gagri(-0.2, 0, y + 0.4); gagri(0.22, 0, y + 0.4, 0.85); });
+    sukul(R.x + R.w / 2 + (R.st ? (R.st.side === 2 ? 0.55 : -0.55) : 0), R.z + 0.75, y, 1.0, 0.7);
+    plantAt(R, y, false);
+  };
+  const nlanding = (R) => {
+    const y = R.y;
+    const tb = tryWalls(R, [1, 0, 3, 2], 0.55, 0.55);                        // tulsi (holy basil) on its brick pedestal
+    if (tb) inFrame(tb, y, () => { solidBox(-0.25, y, -0.25, 0.25, y + 0.55, 0.25, G.brick); addBox(-0.27, y + 0.55, -0.27, 0.27, y + 0.6, 0.27, G.vermilion); F.plant(0, 0, y + 0.6, false); });
+    const ch = tryWalls(R, [1, 0, 3, 2], 1.1, 0.56);
+    if (ch) inFrame(ch, y, () => chest(y));
+    paubha(R, y);
+  };
+  const store = (R) => {
+    const y = R.y;
+    for (let k = 0; k < 3; k++) {                                            // grain jars along a wall
+      const fr = tryWalls(R, [1, 2, 3, 0], 0.7, 0.62, { at: k % 2 ? "end" : "start" });
+      if (fr) inFrame(fr, y, () => jar(0, 0, y, rr(0.9, 1.1), rand() < 0.3 ? G.soot : G.clay));
+    }
+    const sk = tryWalls(R, [2, 3, 1, 0], 1.6, 0.7);                          // sacks of rice and lentils
+    if (sk) inFrame(sk, y, () => {
+      for (let k = 0; k < 3; k++) solidBox(-0.75 + k * 0.52, y, -0.3, -0.29 + k * 0.52, y + 0.55, 0.28, G.sack);
+      addBox(-0.5, y + 0.55, -0.25, -0.02, y + 1.0, 0.23, G.sack);
+    });
+    const fw = tryWalls(R, [3, 2, 1, 0], 1.4, 0.5, { tall: true });          // firewood for the kitchen upstairs
+    if (fw) inFrame(fw, y, () => firewood(y, 1.4, 1.2));
+    // dried maize hung from the joists
+    for (let k = 0; k < 4; k++) {
+      const x = R.x + R.w * (0.25 + 0.17 * k), z = R.z + R.d * rr(0.3, 0.7), top = y + FH - 0.43;
+      addBox(x - 0.01, top - 0.35, z - 0.01, x + 0.01, top, z + 0.01, G.straw);
+      addBox(x - 0.07, top - 0.75, z - 0.07, x + 0.07, top - 0.35, z + 0.07, G.marigold);
+    }
+  };
+  const workshop = (R) => {
+    const y = R.y;
+    // hand loom (taan): frame, warp threads, cloth beam, bench
+    const lm = tryWalls(R, [1, 2, 3, 0], 1.6, 1.6, { tall: true });
+    if (lm) inFrame(lm, y, () => {
+      for (const x of [-0.75, 0.7]) for (const z of [-0.7, 0.55]) solidBox(x, y, z, x + 0.06, y + 1.55, z + 0.06, G.timber);
+      for (const z of [-0.7, 0.55]) addBox(-0.75, y + 1.49, z, 0.76, y + 1.55, z + 0.06, G.timber);
+      addBox(-0.75, y + 0.85, -0.7, 0.76, y + 0.92, -0.62, G.timber);
+      addBox(-0.75, y + 0.75, 0.4, 0.76, y + 0.82, 0.48, G.timber);
+      const cols = [G.wool, G.marigold, G.vermilion, A.blue, G.straw];
+      for (let k = 0; k < 24; k++) { const x = -0.66 + k * 0.058; addBox(x, y + 0.86, -0.62, x + 0.012, y + 0.88, 0.42, cols[k % cols.length]); }
+      addBox(-0.6, y + 0.8, 0.12, 0.6, y + 0.83, 0.42, G.wool);                // woven cloth
+      solidBox(-0.5, y, 0.75, 0.5, y + 0.45, 1.05, G.timber);                // bench
+    });
+    // wood-carver's bench with a half-carved window panel
+    const cb = tryWalls(R, [2, 3, 0, 1], 1.4, 0.7, { tall: true });
+    if (cb) inFrame(cb, y, () => {
+      F.table(0, 0, y, 1.4, 0.7, 0.75, G.timber);
+      addBox(-0.45, y + 0.77, -0.25, 0.45, y + 0.8, 0.25, G.lattice);
+      for (let k = 0; k < 4; k++) addBox(-0.6 + k * 0.08, y + 0.77, 0.15, -0.58 + k * 0.08, y + 0.79, 0.3, G.steel);
+      addBox(-0.55, y + 0.75, -0.33, 0.55, y + 1.85, -0.3, G.lattice);       // finished panel leaning on the wall
+    });
+    jar(R.x + R.w - 0.5, R.z + R.d - 0.5, y, 0.8);
+  };
+  const nbed = (R) => {
+    const y = R.y, fab = pick([G.wool, A.blue, A.green, G.marigold]);
+    // low timber bed with a thick cotton mattress and a hand-woven blanket
+    const bf = tryWalls(R, longFirst(R).reverse(), 1.5, 2.1, { tall: true });
+    if (bf) inFrame(bf, y, () => {
+      solidBox(-0.7, y, -1.0, 0.7, y + 0.3, 1.0, G.timber);
+      addBox(-0.66, y + 0.3, -0.96, 0.66, y + 0.45, 0.96, A.white);
+      addBox(-0.68, y + 0.33, -0.3, 0.68, y + 0.5, 0.98, fab);
+      addBox(-0.5, y + 0.45, -0.92, 0.5, y + 0.58, -0.6, A.white);
+    });
+    const ch = tryWalls(R, [0, 1, 2, 3], 1.1, 0.56);
+    if (ch) inFrame(ch, y, () => chest(y));
+    // clothes on a line between two walls
+    const cl = tryWalls(R, [2, 3, 1, 0], 1.6, 0.25, { tall: true });
+    if (cl) inFrame(cl, y, () => {
+      addBox(-0.8, y + 1.75, 0.05, 0.8, y + 1.765, 0.065, G.straw);
+      for (let k = 0; k < 4; k++) addBox(-0.68 + k * 0.38, y + 1.15, 0.03, -0.4 + k * 0.38, y + 1.76, 0.085, pick([G.wool, A.blue, G.marigold, A.green, A.mustard]));
+    });
+    const sh = tryWalls(R, [3, 2, 1, 0], 0.8, 0.3, { tall: true });
+    if (sh) inFrame(sh, y, () => shelf(y, 0.8, [1.2], (hy) => { diyo(-0.2, 0, y + hy); addBox(0.05, y + hy, -0.1, 0.3, y + hy + 0.22, -0.02, G.timber); }));
+    sukul(R.x + R.w / 2, R.z + R.d / 2, y, 1.2, 0.8);
+  };
+  const baithak = (R) => {
+    const y = R.y;
+    // floor seating: thick mattresses (gaddi) along the walls, bolsters, a
+    // red woollen rug (radi) in the middle, a low carved table
+    for (const s of longFirst(R).slice(0, 3)) {
+      const L = Math.min(2.6, (R.walls[s].a1 - R.walls[s].a0) - 1.0);
+      const fr = place(R, s, L, 0.8);
+      if (!fr) continue;
+      inFrame(fr, y, () => {
+        solidBox(-L / 2, y, -0.4, L / 2, y + 0.2, 0.4, G.wool);
+        addBox(-L / 2 + 0.02, y + 0.2, -0.38, L / 2 - 0.02, y + 0.23, 0.38, G.marigold);
+        for (let x = -L / 2 + 0.35; x < L / 2 - 0.2; x += 0.6) addBox(x - 0.22, y + 0.23, -0.38, x + 0.22, y + 0.55, -0.22, rand() < 0.5 ? G.vermilion : A.green);
+      });
+    }
+    withFrame(R.x + R.w / 2, R.z + R.d / 2, 0, () => {
+      addBox(-1.0, y + 0.02, -1.4, 1.0, y + 0.04, 1.4, G.wool);
+      addBox(-0.9, y + 0.04, -1.3, 0.9, y + 0.045, 1.3, G.marigold);
+      solidBox(-0.4, y, -0.3, 0.4, y + 0.32, 0.3, G.timber);
+      addBox(-0.45, y + 0.32, -0.35, 0.45, y + 0.36, 0.35, G.timber);
+      gagri(0.15, 0.05, y + 0.36, 0.45);
+      addBox(-0.3, y + 0.36, -0.15, -0.05, y + 0.38, 0.1, G.copper);              // brass plate
+    });
+    // tall standing brass oil lamp (panas)
+    const pl = tryWalls(R, [2, 3, 1, 0], 0.4, 0.4, { at: "end", tall: true });
+    if (pl) inFrame(pl, y, () => {
+      addBox(-0.18, y, -0.18, 0.18, y + 0.06, 0.18, G.gold);
+      solidBox(-0.03, y, -0.03, 0.03, y + 1.2, 0.03, G.gold);
+      addBox(-0.15, y + 1.2, -0.15, 0.15, y + 1.24, 0.15, G.gold);
+      for (const [dx, dz] of [[-0.09, 0], [0.09, 0], [0, -0.09], [0, 0.09]]) addBox(dx - 0.015, y + 1.24, dz - 0.015, dx + 0.015, y + 1.29, dz + 0.015, A.light);
+    });
+    // display shelf of brass and copper ware
+    const ds = tryWalls(R, [1, 3, 2, 0], 1.3, 0.35, { tall: true });
+    if (ds) inFrame(ds, y, () => shelf(y, 1.3, [0.9, 1.45], (hy) => {
+      for (let k = 0; k < 3; k++) gagri(-0.4 + k * 0.4, 0, y + hy, 0.5 + 0.15 * (k % 2));
+    }));
+    paubha(R, y); paubha(R, y);
+  };
+  const puja = (R) => {
+    const y = R.y;
+    // the family shrine: stepped altar with the gods, lamps, bell, flowers
+    const al = tryWalls(R, [1, 2, 3, 0], 1.5, 0.75, { tall: true });
+    if (al) inFrame(al, y, () => {
+      solidBox(-0.75, y, -0.37, 0.75, y + 0.45, 0.37, G.timber);
+      addBox(-0.6, y + 0.45, -0.37, 0.6, y + 0.8, 0.05, G.timber);
+      addBox(-0.45, y + 0.8, -0.37, 0.45, y + 1.1, -0.15, G.timber);
+      addBox(-0.77, y + 0.42, -0.39, 0.77, y + 0.47, 0.39, G.vermilion);       // red cloth
+      // deities
+      addBox(-0.1, y + 1.1, -0.32, 0.1, y + 1.45, -0.18, G.gold);
+      addBox(-0.13, y + 1.45, -0.32, 0.13, y + 1.62, -0.2, G.gold);
+      for (const x of [-0.38, 0.38]) { addBox(x - 0.07, y + 0.8, -0.3, x + 0.07, y + 1.05, -0.18, G.gold); addBox(x - 0.04, y + 1.05, -0.28, x + 0.04, y + 1.12, -0.2, G.vermilion); }
+      // torana arch behind them
+      addBox(-0.5, y + 1.1, -0.36, -0.44, y + 1.85, -0.33, G.gold);
+      addBox(0.44, y + 1.1, -0.36, 0.5, y + 1.85, -0.33, G.gold);
+      addBox(-0.5, y + 1.8, -0.36, 0.5, y + 1.95, -0.33, G.gold);
+      // lamps, bell, offerings, marigold garland
+      for (const x of [-0.55, -0.25, 0.25, 0.55]) diyo(x, 0.2, y + 0.47);
+      addBox(0.42, y + 0.47, -0.05, 0.52, y + 0.62, 0.05, G.gold);
+      for (let k = 0; k < 9; k++) addBox(-0.58 + k * 0.145, y + 0.78 - Math.sin((k / 8) * Math.PI) * 0.12, 0.04, -0.53 + k * 0.145, y + 0.83 - Math.sin((k / 8) * Math.PI) * 0.12, 0.09, G.marigold);
+      for (const x of [-0.1, 0.1]) addBox(x - 0.06, y + 0.47, 0.15, x + 0.06, y + 0.49, 0.27, G.copper);
+    });
+    sukul(R.x + R.w / 2, R.z + R.d / 2, y, 1.0, 0.7);
+    const bs = tryWalls(R, [2, 3, 0], 0.5, 0.45);
+    if (bs) inFrame(bs, y, () => { solidBox(-0.25, y, -0.2, 0.25, y + 0.4, 0.2, G.timber); gagri(0, 0, y + 0.4, 0.6); });
+    paubha(R, y);
+  };
+  const bhutu = (R) => {
+    const y = R.y;
+    // clay hearth (chulo), the wall above it black with smoke, firewood beside
+    const hf = tryWalls(R, longFirst(R), 1.2, 0.7, { tall: true });
+    if (hf) inFrame(hf, y, () => {
+      solidBox(-0.6, y, -0.35, 0.6, y + 0.35, 0.35, G.mud);
+      for (const x of [-0.3, 0.3]) { addBox(x - 0.15, y + 0.35, -0.15, x + 0.15, y + 0.36, 0.15, G.soot); addBox(x - 0.05, y + 0.05, 0.35, x + 0.05, y + 0.25, 0.355, A.light); }
+      addBox(-0.42, y + 0.36, -0.12, -0.18, y + 0.52, 0.12, G.copper);         // pot on the fire
+      addBox(-0.7, y + 0.35, -0.36, 0.7, y + 1.9, -0.35, G.soot);
+    });
+    const fw = tryWalls(R, hf ? [hf.s, ...sides(hf.s)] : [0, 1, 2, 3], 0.7, 0.5, { tall: true });
+    if (fw) inFrame(fw, y, () => firewood(y, 0.7, 0.8));
+    // water pots on their platform, plates and pans on the shelf
+    const wp = tryWalls(R, [0, 1, 2, 3], 1.1, 0.5);
+    if (wp) inFrame(wp, y, () => { solidBox(-0.55, y, -0.25, 0.55, y + 0.3, 0.25, G.mud); gagri(-0.28, 0, y + 0.3); gagri(0.05, 0, y + 0.3, 0.9); addBox(0.3, y + 0.3, -0.12, 0.5, y + 0.58, 0.12, G.copper); });
+    const sh = tryWalls(R, [1, 0, 2, 3], 1.2, 0.3, { tall: true });
+    if (sh) inFrame(sh, y, () => shelf(y, 1.2, [1.1, 1.55], (hy) => {
+      for (let k = 0; k < 4; k++) addBox(-0.5 + k * 0.27, y + hy, -0.13, -0.28 + k * 0.27, y + hy + 0.22, -0.11, k % 2 ? G.gold : G.copper);   // plates on edge
+    }));
+    // low wooden seats (pirka) and brass plates on mats: meals are on the floor
+    withFrame(R.x + R.w / 2, R.z + R.d / 2 + 0.2, 0, () => {
+      for (const [x, z] of [[-0.6, 0], [0.6, 0], [0, 0.65]]) {
+        addBox(x - 0.25, y, z - 0.15, x + 0.25, y + 0.1, z + 0.15, G.timber);
+        addBox(x - 0.18, y, z + (z > 0 ? -0.5 : 0.25) - 0.0, x + 0.18, y + 0.02, z + (z > 0 ? -0.5 : 0.25) + 0.3, G.gold);
+      }
+    });
+    // grinding stone, and red chillies drying from the beams
+    const gs = tryWalls(R, [3, 2, 0, 1], 0.6, 0.45);
+    if (gs) inFrame(gs, y, () => { addBox(-0.3, y, -0.2, 0.3, y + 0.08, 0.2, A.stoneDark); addBox(-0.22, y + 0.08, -0.04, 0.22, y + 0.15, 0.04, A.stoneDark); });
+    for (let k = 0; k < 5; k++) {
+      const x = R.x + 0.5 + k * ((R.w - 1) / 4), z = R.z + R.d - 0.6, top = y + FH - (R.f < floors.length - 1 ? 0.43 : 0.13);
+      addBox(x - 0.01, top - 0.45, z - 0.01, x + 0.01, top, z + 0.01, G.straw);
+      addBox(x - 0.05, top - 0.85, z - 0.05, x + 0.05, top - 0.45, z + 0.05, G.vermilion);
+    }
+  };
+
   for (const rooms of plans) for (const R of rooms) {
+    if (type.newar) { beams(R); dado(R); }
     switch (R.t) {
+      case "nhall": nhall(R); break;
+      case "nlanding": nlanding(R); break;
+      case "store": store(R); break;
+      case "workshop": workshop(R); break;
+      case "nbed": nbed(R); break;
+      case "baithak": baithak(R); break;
+      case "puja": puja(R); break;
+      case "bhutu": bhutu(R); break;
       case "living": living(R); break;
       case "kitchen": kitchen(R, false); break;
       case "kitchenDining": kitchen(R, true); break;
@@ -799,8 +1186,8 @@ function build(home, A, F, accs) {
       const long = R.w > R.d;
       for (const k of [-1, 1]) pendant(R.x + R.w / 2 + (long ? k * R.w / 4 : 0), R.z + R.d / 2 + (long ? 0 : k * R.d / 4), ceil);
     } else pendant(R.x + R.w / 2, R.z + R.d / 2, ceil);
-    // skirting boards
-    for (const w of R.walls) {
+    // skirting boards (Newar rooms have their red dado instead)
+    if (!type.newar) for (const w of R.walls) {
       for (const [p0, p1] of freeParts(w.a0, w.a1, w.doors)) {
         const v0 = w.fixed + (w.axis === "x" ? w.nz : w.nx) * w.inset, v1 = v0 + (w.axis === "x" ? w.nz : w.nx) * 0.02;
         if (w.axis === "x") addBox(p0, R.y, Math.min(v0, v1), p1, R.y + 0.12, Math.max(v0, v1), A.white);

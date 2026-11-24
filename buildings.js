@@ -8,6 +8,7 @@
 import {
   scene, glow, rand, rr, pick, clamp, hex, C3, litMat, texMat, indoor, canvasTex, makeAcc,
   addBox, solidBox, addSolid, addPoly, setXF, clearXF, currentXF, makeXF, xfp, xfl, mergedTemplate,
+  setLift, getLift, terrainH, staticInstance, landSdf,
 } from "./engine.js";
 import { FAC, tileRoofTex, slateRoofTex, zincRoofTex, dormerTex, railingTex } from "./textures.js";
 import { edges, pathAt, roadDist, districtAt, PARIS, reserved, landmarks, WORLD } from "./roads.js";
@@ -148,12 +149,7 @@ function initTemplates() {
 function instanceAt(tpl, lx, ly, lz, rotY = 0, scale = 1) {
   const xf = currentXF();
   const [wx, wz] = xfp(xf, lx, lz);
-  const m = tpl.createInstance("i");
-  m.position.set(wx, ly, wz);
-  m.rotation.y = xf.yaw + rotY;
-  m.scaling.setAll(scale);
-  m.freezeWorldMatrix();
-  return m;
+  return staticInstance(tpl, wx, ly + getLift(), wz, xf.yaw + rotY, scale);
 }
 
 // ---------------------------------------------------------------- footprint index
@@ -211,6 +207,7 @@ function validFP(fp, district) {
   for (const [x, z] of fpSamples(fp)) {
     if (x < WORLD.x0 + 5 || x > WORLD.x1 - 5 || z < WORLD.z0 + 5 || z > WORLD.z1 - 5) return false;
     if (districtAt(x, z) !== district) return false;
+    if (landSdf(x, z) > -3) return false;                 // nothing stands in (or right at the edge of) the sea
     if (roadDist(x, z) < 0.12) return false;
     for (const r of reserved) if (Math.hypot(x - r.x, z - r.z) < r.r) return false;
   }
@@ -345,10 +342,10 @@ export function planBuildings(START) {
 // About a third of the houses / brownstones / terraces / apartment blocks get
 // a working front door. A hash of the index (not the RNG) picks them, so the
 // rest of the world is unaffected.
-const HOME_KINDS = { brown: "Brownstone", house: "Town house", haus: "Apartment", lterr: "Terrace house", mansion: "Mansion flat" };
+const HOME_KINDS = { brown: "Brownstone", house: "Town house", haus: "Apartment", lterr: "Terrace house", mansion: "Mansion flat", ktm: "Newar house" };
 function chooseHomes() {
   specs.forEach((sp, i) => {
-    if (!HOME_KINDS[sp.cat] || sp.enter || sp.shop) return;
+    if (!HOME_KINDS[sp.cat] || sp.enter || sp.shop || sp.shopKey) return;
     if (((Math.imul(i + 1, 2654435761) >>> 0) % 100) >= 35) return;
     sp.home = true;
   });
@@ -379,11 +376,11 @@ export function pulseHomeMarkers(t) {
 function markDoor(sp, dx) {
   if (!markT) initHomeMarkers();
   const { hd } = sp;
-  const H = { brown: [4.4, 2.8, 1.0], house: [3.4, 2.15, 0.95], lterr: [4.1, 2.3, 0.95], haus: [4.1, 2.5, 1.15], mansion: [4.5, 2.4, 1.5] }[sp.cat];
+  const H = { brown: [4.4, 2.8, 1.0], house: [3.4, 2.15, 0.95], lterr: [4.1, 2.3, 0.95], haus: [4.1, 2.5, 1.15], mansion: [4.5, 2.4, 1.5], ktm: [3.7, 2.35, 0.95] }[sp.cat];
+  const lift = getLift();
   const inst = (t, lx, y, lz) => {
     const [x, z] = xfp(sp.xf, lx, lz);
-    const m = t.createInstance("hm");
-    m.position.set(x, y, z); m.rotation.y = sp.xf.yaw; m.isPickable = false; m.freezeWorldMatrix();
+    staticInstance(t, x, y + lift, z, sp.xf.yaw);
   };
   inst(markT, dx, H[0], -hd - 0.5);
   setXF(sp.xf);
@@ -392,6 +389,7 @@ function markDoor(sp, dx) {
     addBox(dx + sx * H[2] - 0.03, H[1] + 0.12, -hd - 0.22, dx + sx * H[2] + 0.03, H[1] + 0.18, -hd, A.iron);
   }
   if (sp.cat === "house") addBox(-0.55, 0.165, -hd - 0.6, 0.55, 0.185, -hd - 0.05, A.red);
+  else if (sp.cat === "ktm") addBox(-0.6, 0.01, -hd - 0.85, 0.6, 0.035, -hd - 0.1, A.red);
   else if (sp.cat === "haus" || sp.cat === "mansion") addBox(-0.6, 0.01, -hd - 0.85, 0.6, 0.035, -hd - 0.1, A.red);
   clearXF();
 }
@@ -404,9 +402,10 @@ function registerHome(sp) {
   const [ox, oz] = xfp(sp.xf, dx, -hd - stoop - 0.7);
   markDoor(sp, dx);
   homes.push({
-    kind: sp.cat, label: HOME_KINDS[sp.cat], no: homes.length + 1, district: sp.district,
+    kind: sp.cat, label: sp.cat === "ktm" && sp.style !== "newar" ? "Kathmandu house" : HOME_KINDS[sp.cat], no: homes.length + 1, district: sp.district,
     hw, hd, floors: sp.floors ?? 3, doorLX: dx, style: sp.style,
     tx, tz, ox, oz, outYaw: sp.xf.yaw + Math.PI,
+    ty: getLift(), oy: terrainH(ox, oz),   // door sill / street height (hillside)
   });
 }
 
@@ -748,10 +747,7 @@ function buildMansion(sp) {
 function plant(cx, cz, y, big = false) {
   const s = big ? 1.25 : 1;
   solidBox(cx - 0.225 * s, y, cz - 0.225 * s, cx + 0.225 * s, y + 0.45 * s, cz + 0.225 * s, A.pot);
-  const leaf = instanceAt(leafT, cx, y + 0.85 * s, cz);
-  leaf.unfreezeWorldMatrix();
-  leaf.scaling.set(0.75 * s, 0.95 * s, 0.75 * s);
-  leaf.freezeWorldMatrix();
+  instanceAt(leafT, cx, y + 0.85 * s, cz, 0, [0.75 * s, 0.95 * s, 0.75 * s]);
 }
 function item(cx, cz, y, w, d, h, acc, solid = true) {
   (solid ? solidBox : addBox)(cx - w / 2, y, cz - d / 2, cx + w / 2, y + h, cz + d / 2, acc);
@@ -1052,6 +1048,10 @@ function buildBillboards() {
 const MAPC = { tower: "#2c2e36", deco: "#34363f", brown: "#3e2f28", haus: "#4a4236", house: "#5b4a3c", lterr: "#4b3d35", mansion: "#5a3328" };
 export function buildBuildings() {
   for (const sp of specs) {
+    // on a hillside a building stands at the height of the street in front of it
+    const [fx, fz] = xfp(sp.xf, 0, -sp.hd);
+    const lift = terrainH(fx, fz);
+    setLift(lift);
     setXF(sp.xf);
     if (sp.enter) buildEnterable(sp);
     else if (sp.cat === "tower") buildTower(sp);
@@ -1060,10 +1060,11 @@ export function buildBuildings() {
     else if (sp.cat === "haus") buildHaus(sp);
     else if (sp.cat === "lterr") buildLTerrace(sp);
     else if (sp.cat === "mansion") buildMansion(sp);
-    else if (sp.cat === "ktm") { const r = buildKtm(sp); if (r) roofs.push(r); }
+    else if (sp.cat === "ktm") { const r = buildKtm(sp, lift); if (r) { r.top += lift; roofs.push(r); } }
     else buildHouse(sp);
     clearXF();
     if (sp.home) registerHome(sp);
+    setLift(0);
     mapBuildings.push({
       pts: fpCorners(sp),
       color: sp.enter ? "#c4902f" : sp.cat === "ktm" ? KTM_MAPC[sp.style] : MAPC[sp.cat],

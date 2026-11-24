@@ -11,7 +11,7 @@
 //   Kathmandu      : north of Midtown — grown lanes off a few arterials (kathmandu.js).
 import {
   scene, rand, rr, pick, clamp, hex, flatMat, flatTexMat, texMat, litMat, makeAcc, addFlatQuad,
-  addBox, solidBox, setXF, clearXF, makeXF, radialTex, glow,
+  addBox, solidBox, setXF, clearXF, makeXF, radialTex, glow, setLift, terrainH, terrainSlope, staticInstance, onStaticFlush, staticMeshes,
 } from "./engine.js";
 import { noiseTex, slabTex } from "./textures.js";
 import { LONDON, RW, riverDist, inLondon, generateLondonRoads, placeLondonLandmarks } from "./london.js";
@@ -261,7 +261,7 @@ export function nearestEdge(x, z) {
 }
 
 // ---------------------------------------------------------------- meshes
-export let lampPools = [];
+export const lampPools = [];   // the light-pool meshes (shown at night)
 export const bulbMats = [];
 export const lampSpots = [];
 
@@ -295,8 +295,17 @@ export function buildRoadMeshes() {
     const walk = walks[e.district] || walks.park;
     for (let i = 0; i < n - 1; i++) {
       const u0 = e.cum[i] / 8, u1 = e.cum[i + 1] / 8;
-      addFlatQuad(asphalt, P(i, -hw), P(i, hw), P(i + 1, hw), P(i + 1, -hw), 0.07,
-        [[-hw / 8, u0], [hw / 8, u0], [hw / 8, u1], [-hw / 8, u1]]);
+      // on hills / bridge ramps, split the road across into ~3 m lanes so it
+      // follows the ground's curve (a single quad edge-to-edge stays flat
+      // across and the ground pokes up through the middle)
+      const [ax, az] = P(i, 0), [bx, bz] = P(i + 1, 0);
+      const hilly = terrainH(ax, az) > 0.01 || terrainH(bx, bz) > 0.01;
+      const nS = hilly ? Math.max(1, Math.ceil(e.w / 3)) : 1;
+      for (let k = 0; k < nS; k++) {
+        const a = -hw + (2 * hw * k) / nS, b = -hw + (2 * hw * (k + 1)) / nS;
+        addFlatQuad(asphalt, P(i, a), P(i, b), P(i + 1, b), P(i + 1, a), 0.07,
+          [[a / 8, u0], [b / 8, u0], [b / 8, u1], [a / 8, u1]]);
+      }
       const w0 = e.cum[i] / 3, w1 = e.cum[i + 1] / 3;
       for (const sd of [-1, 1]) {
         const a = hw * sd, b = (hw + e.sw) * sd;
@@ -383,33 +392,34 @@ export function buildLamps() {
       if (asphaltDist(x, z) < 0.8) continue;                 // would stand in another road
       if (lampSpots.some((l) => Math.abs(l.x - x) < 6 && Math.abs(l.z - z) < 6)) continue;
       const yaw = Math.atan2(-rx, -rz);                      // local +z faces the road
+      const gy = terrainH(x, z);
+      setLift(gy);
       setXF(makeXF(x, z, yaw));
       if (paris) {
         solidBox(-0.09, 0, -0.09, 0.09, 4.3, 0.09, parisPostM);
         addBox(-0.18, 0, -0.18, 0.18, 0.7, 0.18, parisPostM);
         addBox(-0.28, 4.93, -0.28, 0.28, 5.05, 0.28, parisPostM);
         clearXF();
-        const l = lanternT.createInstance("lantern");
-        l.position.set(x, 4.62, z); l.rotation.y = yaw; l.freezeWorldMatrix();
+        staticInstance(lanternT, x, 4.62 + gy, z, yaw);
         pools.push([x, z, 12]);
       } else {
         solidBox(-0.1, 0, -0.1, 0.1, 6.7, 0.1, postM);
         addBox(-0.05, 6.5, 0, 0.05, 6.62, 1.65, postM);
         clearXF();
         const bx = x - rx * 1.5, bz = z - rz * 1.5;
-        const b = bulbT.createInstance("bulb");
-        b.position.set(bx, 6.42, bz); b.rotation.y = yaw; b.freezeWorldMatrix();
+        staticInstance(bulbT, bx, 6.42 + gy, bz, yaw);
         pools.push([x - rx * 3.2, z - rz * 3.2, 15]);
       }
+      setLift(0);
       lampSpots.push({ x, z });
     }
   }
-  lampPools = pools.map(([x, z, s]) => {
-    const p = poolT.createInstance("pool");
-    p.position.set(x, 0.12, z);
-    p.scaling.set(s, 1, s);
-    p.isVisible = false;
-    p.freezeWorldMatrix();
-    return p;
+  // (lying along the slope on the hillside)
+  for (const [x, z, s] of pools) {
+    staticInstance(poolT, x, 0.12 + terrainH(x, z), z, 0, [s, 1, s],
+      -Math.atan(terrainSlope(x, z, 0, 1)), Math.atan(terrainSlope(x, z, 1, 0)));
+  }
+  onStaticFlush(() => {
+    for (const m of staticMeshes(poolT)) { m.isVisible = false; lampPools.push(m); }
   });
 }

@@ -8,6 +8,10 @@
 // building-local coordinates (local +z = the building's back, -z = its street
 // front) and emit rotated world geometry + rotated colliders.
 
+import { terrainH } from "./terrain.js";
+export { terrainH, terrainSlope, addTerrainFlat, landH, groundAt } from "./terrain.js";
+export { landSdf, seaAt, deckAt, onBridge } from "./water.js";
+
 export const V3 = BABYLON.Vector3;
 export const C3 = BABYLON.Color3;
 export const canvas = document.getElementById("renderCanvas");
@@ -48,11 +52,14 @@ camera.maxZ = 3200;
 camera.inputs.clear();
 
 // Glow only for things that should bloom (lamps, car lights, signs, tracers).
+// (a quarter-size glow buffer: bloom is blurry anyway, and at 512 it was the
+// single biggest GPU cost on laptop GPUs)
 export const glow = new BABYLON.GlowLayer("glow", scene, {
-  mainTextureFixedSize: 512,
-  blurKernelSize: 32,
+  mainTextureFixedSize: 256,
+  blurKernelSize: 16,
+  mainTextureSamples: 1,
 });
-glow.intensity = 0.35;
+glow.intensity = 0.42;
 
 // Mutable cross-module state.
 export const state = { night: false };
@@ -170,6 +177,15 @@ export function makeXF(cx, cz, yaw) {
   return { cx, cz, yaw, c: Math.cos(yaw), s: Math.sin(yaw) };
 }
 let XF = null;
+// Vertical lift added to everything built (geometry + solids) — set to the
+// ground height while a building stands on a hillside, 0 otherwise.
+let LIFT = 0;
+export function setLift(y) {
+  LIFT = y;
+}
+export function getLift() {
+  return LIFT;
+}
 export function setXF(xf) {
   XF = xf;
 }
@@ -259,8 +275,8 @@ export function makeSolid(xf, x0, y0, z0, x1, y1, z1) {
   const s = {
     minX,
     maxX,
-    minY: y0,
-    maxY: y1,
+    minY: y0 + LIFT,
+    maxY: y1 + LIFT,
     minZ,
     maxZ,
     lx0: x0,
@@ -452,6 +468,7 @@ function chunkAcc(acc, x, z) {
 const worldX = (x, z) => (XF ? XF.cx + x * XF.c + z * XF.s : x);
 const worldZ = (x, z) => (XF ? XF.cz - x * XF.s + z * XF.c : z);
 function vert(acc, x, y, z, nx, ny, nz, u, v) {
+  y += LIFT;
   if (XF) {
     acc.pos.push(XF.cx + x * XF.c + z * XF.s, y, XF.cz - x * XF.s + z * XF.c);
     acc.nrm.push(nx * XF.c + nz * XF.s, ny, -nx * XF.s + nz * XF.c);
@@ -552,13 +569,14 @@ export function addPoly(acc0, pts, ref, uvFn) {
   for (let i = 1; i < pts.length - 1; i++)
     acc.idx.push(base, base + i, base + i + 1);
 }
-// Flat world-space quad (no frame), used for road ribbons.
+// Flat world-space quad (no frame), used for road ribbons. Draped over the
+// terrain: each corner sits `y` above the ground there.
 export function addFlatQuad(acc0, a, b, c, d, y, uvs) {
   const acc = chunkAcc(acc0, a[0], a[1]);
   const base = acc.pos.length / 3;
   for (let i = 0; i < 4; i++) {
     const p = [a, b, c, d][i];
-    acc.pos.push(p[0], y, p[1]);
+    acc.pos.push(p[0], y + terrainH(p[0], p[1]), p[1]);
     acc.nrm.push(0, 1, 0);
     acc.uv.push(uvs[i][0], uvs[i][1]);
   }
@@ -583,5 +601,224 @@ export function flushAccs() {
     else a.meshes.push(mesh);
     // compile its shader now, not the first time it comes into view (a hitch)
     if (a.mat.forceCompilation) a.mat.forceCompilation(mesh);
+  }
+}
+
+// ---------------------------------------------------------------- static instances
+// Thousands of things in the world never move (trees, lamp heads, light pools,
+// door markers, street furniture). As ordinary instances each one is a scene
+// mesh Babylon has to walk, cull and sort every frame. While the world is being
+// built they are collected instead, and flushStatic() turns them into thin
+// instances: one mesh per template per map chunk (so chunks still cull), with
+// the instances as a matrix buffer. Outside the build (house interiors) this
+// falls back to a normal frozen instance and returns it.
+// (Babylon 7.5x keeps the glow's include list on its inner "thin" layer)
+const glowIncluded = () => glow._includedOnlyMeshes || (glow._thinEffectLayer && glow._thinEffectLayer._includedOnlyMeshes) || [];
+let staticOn = false;
+const staticBuckets = new Map();
+const staticByTpl = new Map();
+const staticHooks = [];
+export function beginStatic() {
+  staticOn = true;
+}
+export function onStaticFlush(fn) {
+  staticHooks.push(fn);
+}
+export function staticMeshes(tpl) {
+  return staticByTpl.get(tpl) || [];
+}
+// scale: a number or [sx, sy, sz]; rotation: yaw (y), then pitch (x) / roll (z)
+export function staticInstance(tpl, x, y, z, ry = 0, scale = 1, rx = 0, rz = 0) {
+  const [sx, sy, sz] = typeof scale === "number" ? [scale, scale, scale] : scale;
+  if (!staticOn) {
+    const m = tpl.createInstance(tpl.name + "I");
+    m.position.set(x, y, z);
+    m.rotation.set(rx, ry, rz);
+    m.scaling.set(sx, sy, sz);
+    m.isPickable = false;
+    m.freezeWorldMatrix();
+    return m;
+  }
+  const k = tpl.uniqueId * 1e7 + Math.floor(x / CHUNK) * 4096 + Math.floor(z / CHUNK);
+  let b = staticBuckets.get(k);
+  if (!b) staticBuckets.set(k, (b = { tpl, m: [] }));
+  const M = BABYLON.Matrix.Compose(
+    new BABYLON.Vector3(sx, sy, sz),
+    BABYLON.Quaternion.RotationYawPitchRoll(ry, rx, rz),
+    new BABYLON.Vector3(x, y, z),
+  );
+  b.m.push(M);
+  return null;
+}
+export function flushStatic() {
+  staticOn = false;
+  for (const { tpl, m } of staticBuckets.values()) {
+    const mesh = tpl.clone(tpl.name + "_thin", null, true, false);
+    // own geometry: the instance matrices live in vertex buffers on the
+    // geometry, so chunks sharing the template's would overwrite each other
+    mesh.makeGeometryUnique();
+    mesh.setEnabled(true);
+    mesh.position.setAll(0);
+    mesh.rotation.setAll(0);
+    mesh.scaling.setAll(1);
+    const buf = new Float32Array(m.length * 16);
+    m.forEach((M, i) => M.copyToArray(buf, i * 16));
+    mesh.thinInstanceSetBuffer("matrix", buf, 16, true);
+    mesh.thinInstanceRefreshBoundingInfo(false);
+    mesh.isPickable = false;
+    mesh.freezeWorldMatrix();
+    if (glowIncluded().includes(tpl.uniqueId)) glow.addIncludedOnlyMesh(mesh);
+    let list = staticByTpl.get(tpl);
+    if (!list) staticByTpl.set(tpl, (list = []));
+    list.push(mesh);
+    if (mesh.material && mesh.material.forceCompilation) mesh.material.forceCompilation(mesh);
+  }
+  staticBuckets.clear();
+  for (const f of staticHooks) f();
+}
+
+// ---------------------------------------------------------------- vertex-coloured templates
+// Like mergedTemplate, but every part's colour is baked into vertex colours and
+// the whole thing gets ONE shared material: one submesh, so each template is a
+// single instanced draw. (A multi-material template is drawn once per
+// submesh, re-uploading its instance buffer each time — with hundreds of
+// people on screen that stalled the GPU badly.) Emissive parts (a phone
+// screen) are baked in brighter.
+let vcMat = null;
+export function colorTemplate(name, parts) {
+  if (!vcMat) {
+    vcMat = new BABYLON.StandardMaterial("vertexColourM", scene);
+    vcMat.diffuseColor = new C3(1, 1, 1);
+    vcMat.specularColor = new C3(0.08, 0.08, 0.08);
+  }
+  const meshes = parts.map(({ mesh, mat }) => {
+    mesh.bakeCurrentTransformIntoVertices();
+    const n = mesh.getTotalVertices();
+    const c = mat.diffuseColor || new C3(1, 1, 1);
+    const e = mat.emissiveColor || new C3(0, 0, 0);
+    const col = new Float32Array(n * 4);
+    for (let i = 0; i < n; i++) {
+      col[i * 4] = Math.min(1, c.r + e.r);
+      col[i * 4 + 1] = Math.min(1, c.g + e.g);
+      col[i * 4 + 2] = Math.min(1, c.b + e.b);
+      col[i * 4 + 3] = 1;
+    }
+    mesh.setVerticesData(BABYLON.VertexBuffer.ColorKind, col);
+    mesh.material = null;
+    return mesh;
+  });
+  const mesh = meshes.length > 1 ? BABYLON.Mesh.MergeMeshes(meshes, true, true, undefined, false, false) : meshes[0];
+  mesh.name = name;
+  mesh.material = vcMat;
+  mesh.setEnabled(false);
+  return mesh;
+}
+
+// ---------------------------------------------------------------- active-mesh candidates
+// Every frame Babylon walks scene.meshes to pick what to draw — thousands of
+// them are disabled at any moment (people far away, templates, hidden parts)
+// and still cost a few µs each. Instead it gets a cached list of the enabled
+// ones, rebuilt only when something is enabled / disabled / added / removed.
+// Static (frozen) meshes are also pre-culled here against the camera frustum
+// with their bounding sphere, so Babylon only handles what can be on screen.
+{
+  let dirty = true;
+  const dyn = [];                       // moving meshes: always candidates
+  let stat = [], sph = new Float32Array(0);   // frozen meshes + their bounding spheres (x, y, z, r)
+  const cand = { data: [], length: 0 };
+  let sinceBuild = 0, gen = 0;
+  // Things switching on, appearing or going away all update the list in
+  // place (a full rebuild each time — every web shot's puffs, every person
+  // switching detail level as you fly over town — was a steady run of small
+  // hitches). Things switching off just stay listed until the next tidy-up
+  // (Babylon skips disabled meshes itself).
+  const addCand = (m) => {
+    if (dirty || m.__cg === gen) return;
+    m.__cg = gen;
+    dyn.push(m);
+  };
+  const setEnabled = BABYLON.Node.prototype.setEnabled;
+  BABYLON.Node.prototype.setEnabled = function (v) {
+    const was = this.isEnabled(false);
+    const r = setEnabled.call(this, v);
+    if (v && !was && !dirty) {
+      if (this instanceof BABYLON.AbstractMesh) addCand(this);
+      if (this.getChildMeshes) for (const k of this.getChildMeshes(false)) addCand(k);
+    }
+    return r;
+  };
+  scene.onNewMeshAddedObservable.add(addCand);
+  scene.onMeshRemovedObservable.add((m) => {
+    if (dirty || m.__cg !== gen) return;
+    m.__cg = -1;
+    const i = dyn.indexOf(m);
+    if (i >= 0) { dyn[i] = dyn[dyn.length - 1]; dyn.pop(); }
+    else dirty = true;                       // a static one: rebuild
+  });
+  scene.getActiveMeshCandidates = function () {
+    if (++sinceBuild > 600) dirty = true;    // tidy-up every ~10 s (drops what's been switched off)
+    if (dirty) {
+      dirty = false;
+      sinceBuild = 0;
+      gen++;
+      dyn.length = 0;
+      stat = [];
+      for (const m of this.meshes) {
+        if (!m.isEnabled()) continue;
+        m.__cg = gen;
+        // (fog-free things — sky, moon — are never pre-culled by distance)
+        if (m.isWorldMatrixFrozen && !m.parent && !m.alwaysSelectAsActiveMesh && m.applyFog !== false && !(m.material && m.material.fogEnabled === false)) stat.push(m);
+        else dyn.push(m);
+      }
+      sph = new Float32Array(stat.length * 4);
+      stat.forEach((m, i) => {
+        const b = m.getBoundingInfo().boundingSphere;
+        sph[i * 4] = b.centerWorld.x; sph[i * 4 + 1] = b.centerWorld.y; sph[i * 4 + 2] = b.centerWorld.z; sph[i * 4 + 3] = b.radiusWorld;
+      });
+    }
+    const planes = this.frustumPlanes, out = cand.data;
+    // anything wholly past the (linear) fog end is drawn as pure fog colour,
+    // i.e. it can't be seen: skip it
+    const cam = this.activeCamera, fogEnd = this.fogMode === BABYLON.Scene.FOGMODE_LINEAR ? this.fogEnd : Infinity;
+    const cx = cam ? cam.globalPosition.x : 0, cy = cam ? cam.globalPosition.y : 0, cz = cam ? cam.globalPosition.z : 0;
+    out.length = 0;
+    for (let i = 0; i < dyn.length; i++) out.push(dyn[i]);
+    for (let i = 0; i < stat.length; i++) {
+      const m = stat[i];
+      if (!m.isWorldMatrixFrozen) { dirty = true; out.push(m); continue; }   // unfrozen since: re-sort next frame
+      if (planes) {
+        const x = sph[i * 4], y = sph[i * 4 + 1], z = sph[i * 4 + 2], r = sph[i * 4 + 3];
+        const far = fogEnd + r;
+        if ((x - cx) * (x - cx) + (y - cy) * (y - cy) + (z - cz) * (z - cz) > far * far) continue;
+        let inside = true;
+        for (let k = 0; k < 6; k++) {
+          const p = planes[k], n = p.normal;
+          if (n.x * x + n.y * y + n.z * z + p.d <= -r) { inside = false; break; }
+        }
+        if (!inside) continue;
+      }
+      out.push(m);
+    }
+    cand.length = out.length;
+    return cand;
+  };
+}
+
+// ---------------------------------------------------------------- ambient particle effects
+// Fountains etc. simulate every particle on the CPU every frame wherever you
+// are. They only run while the camera is within `range` of them.
+const ambient = [];
+export function ambientParticles(ps, x, z, range = 320) {
+  ambient.push({ ps, x, z, r2: range * range, on: true });
+}
+let ambientT = 0;
+export function updateAmbient(dt, cx, cz) {
+  if ((ambientT -= dt) > 0) return;
+  ambientT = 0.5;
+  for (const a of ambient) {
+    const near = (a.x - cx) ** 2 + (a.z - cz) ** 2 < a.r2;
+    if (near === a.on) continue;
+    a.on = near;
+    if (near) a.ps.start(); else a.ps.stop();
   }
 }

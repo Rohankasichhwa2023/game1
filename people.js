@@ -19,15 +19,20 @@
 // Public API is unchanged: peds[], spawnPeds, updatePeds, knockDown, scare.
 // A ped's state is one of: walk, act, chat, follow, cross, wave, annoyed,
 // dodge, surrender, cower, flee, watch, down, away.
-import { scene, rand, rr, pick, clamp, hex, litMat, mergedTemplate, angDiff, state as world } from "./engine.js";
+import { scene, rand, rr, pick, clamp, hex, litMat, colorTemplate, angDiff, terrainH, state as world } from "./engine.js";
 import { edges, pathAt } from "./roads.js";
 
 export const peds = [];
 const MB = BABYLON.MeshBuilder;
-let torsoTs = [], headTs = [], legTs = [], armTs = {}, phoneT = null;
+let torsoTs = [], headTs = [], legTs = [], armTs = {}, farTs = {}, phoneT = null, templatesMade = false;
 const SHOULDER_Y = 1.47, SHOULDER_X = 0.25;
+// Beyond FAR_LOD metres a person is drawn as one low-poly figure (same shirt
+// and skin) instead of six animated parts; back to full detail when closer.
+const FAR_LOD = 50, NEAR_LOD = 44;
 
 function initTemplates() {
+  if (templatesMade) return;
+  templatesMade = true;
   const skins = ["#e0b08c", "#c08462", "#8d5a3c", "#5c3a26"].map((h, i) => litMat("skin" + i, hex(h), 0.15));
   const hairs = ["#2a1d14", "#5a3a20", "#b08a50", "#111111", "#7a7a7a"].map((h, i) => litMat("hair" + i, hex(h)));
   const shirtHex = ["#c0392b", "#2c3e50", "#ecf0f1", "#27ae60", "#f1c40f", "#8e44ad", "#3d6fa8", "#d35400", "#1d1d1d", "#7f8c8d"];
@@ -35,7 +40,7 @@ function initTemplates() {
   torsoTs = shirts.map((shirt, i) => {
     const t = MB.CreateCapsule("t", { radius: 0.19, height: 0.66, tessellation: 10, subdivisions: 1 }, scene);
     t.position.y = 1.2; t.scaling.set(1.1, 1, 0.72);
-    return { tpl: mergedTemplate("pedTorso" + i, [{ mesh: t, mat: shirt }]), si: i };
+    return { tpl: colorTemplate("pedTorso" + i, [{ mesh: t, mat: shirt }]), si: i };
   });
   // heads pivot at the neck (origin), so they can turn and nod
   skins.forEach((skin, si) => hairs.forEach((hair, hi) => {
@@ -47,7 +52,7 @@ function initTemplates() {
     nose.position.set(0, 0.11, 0.115);
     const neck = MB.CreateCylinder("n", { diameter: 0.1, height: 0.12, tessellation: 6 }, scene);
     neck.position.y = -0.01;
-    headTs.push({ tpl: mergedTemplate(`pedHead${si}_${hi}`, [{ mesh: head, mat: skin }, { mesh: hr, mat: hair }, { mesh: nose, mat: skin }, { mesh: neck, mat: skin }]), si });
+    headTs.push({ tpl: colorTemplate(`pedHead${si}_${hi}`, [{ mesh: head, mat: skin }, { mesh: hr, mat: hair }, { mesh: nose, mat: skin }, { mesh: neck, mat: skin }]), si });
   }));
   // arms pivot at the shoulder and hang down -y
   shirts.forEach((shirt, i) => skins.forEach((skin, si) => {
@@ -55,21 +60,29 @@ function initTemplates() {
     arm.position.y = -0.28;
     const hand = MB.CreateSphere("hd", { diameter: 0.1, segments: 6 }, scene);
     hand.position.y = -0.6;
-    armTs[`${i}_${si}`] = mergedTemplate(`pedArm${i}_${si}`, [{ mesh: arm, mat: shirt }, { mesh: hand, mat: skin }]);
+    armTs[`${i}_${si}`] = colorTemplate(`pedArm${i}_${si}`, [{ mesh: arm, mat: shirt }, { mesh: hand, mat: skin }]);
   }));
   legTs = ["#2b3a55", "#1d1d1d", "#b8a27a", "#4a4a4a"].map((h, i) => {
     const leg = MB.CreateCapsule("leg", { radius: 0.082, height: 0.88, tessellation: 8, subdivisions: 1 }, scene);
     leg.position.y = -0.44;
-    leg.bakeCurrentTransformIntoVertices();
-    leg.material = litMat("pants" + i, hex(h));
-    leg.setEnabled(false);
-    return leg;
+    return colorTemplate("pedLeg" + i, [{ mesh: leg, mat: litMat("pants" + i, hex(h)) }]);
   });
+  // far-away figures: legs, body and head in one mesh per shirt / skin colour
+  const pants = litMat("farPants", hex("#2b3348"));
+  shirts.forEach((shirt, i) => skins.forEach((skin, si) => {
+    const legs = MB.CreateCapsule("fl", { radius: 0.15, height: 0.95, tessellation: 6, capSubdivisions: 2 }, scene);
+    legs.position.y = 0.47; legs.scaling.set(1.35, 1, 0.9);
+    const body = MB.CreateCapsule("fb", { radius: 0.21, height: 0.75, tessellation: 6, capSubdivisions: 2 }, scene);
+    body.position.y = 1.22; body.scaling.set(1.15, 1, 0.75);
+    const head = MB.CreateSphere("fh", { diameter: 0.25, segments: 4 }, scene);
+    head.position.y = 1.67;
+    farTs[`${i}_${si}`] = colorTemplate(`pedFar${i}_${si}`, [{ mesh: legs, mat: pants }, { mesh: body, mat: shirt }, { mesh: head, mat: skin }]);
+  }));
   const ph = MB.CreateBox("phone", { width: 0.075, height: 0.14, depth: 0.015 }, scene);
   const scr = MB.CreateBox("phoneScr", { width: 0.065, height: 0.12, depth: 0.004 }, scene);
   scr.position.z = 0.009;
   const glowM = litMat("phoneScrM", hex("#6fb7ff"), 0.3); glowM.emissiveColor = hex("#3c78b8");
-  phoneT = mergedTemplate("pedPhone", [{ mesh: ph, mat: litMat("phoneM", hex("#151618"), 0.4) }, { mesh: scr, mat: glowM }]);
+  phoneT = colorTemplate("pedPhone", [{ mesh: ph, mat: litMat("phoneM", hex("#151618"), 0.4) }, { mesh: scr, mat: glowM }]);
 }
 
 function pickEdge(district = null) {
@@ -88,21 +101,21 @@ function customLook(id, o) {
   const shirt = litMat(id + "Shirt", hex(o.shirt), 0.05), sleeve = litMat(id + "Sleeve", hex(o.sleeve || o.shirt), 0.05);
   const t = MB.CreateCapsule("t", { radius: 0.19, height: 0.66, tessellation: 10, subdivisions: 1 }, scene);
   t.position.y = 1.2; t.scaling.set(o.build ?? 1.1, 1, 0.72);
-  const torso = { tpl: mergedTemplate(id + "Torso", [{ mesh: t, mat: shirt }]) };
+  const torso = { tpl: colorTemplate(id + "Torso", [{ mesh: t, mat: shirt }]) };
   const head = MB.CreateSphere("h", { diameter: 0.23, segments: 8 }, scene); head.position.y = 0.12;
   const parts = [{ mesh: head, mat: skin }];
   if (!o.bald) { const hr = MB.CreateSphere("hr", { diameter: 0.25, segments: 8, slice: o.longHair ? 0.75 : 0.55 }, scene); hr.position.y = o.longHair ? 0.1 : 0.14; parts.push({ mesh: hr, mat: hair }); }
   const nose = MB.CreateBox("ns", { width: 0.04, height: 0.05, depth: 0.05 }, scene); nose.position.set(0, 0.11, 0.115); parts.push({ mesh: nose, mat: skin });
   const neck = MB.CreateCylinder("n", { diameter: 0.1, height: 0.12, tessellation: 6 }, scene); neck.position.y = -0.01; parts.push({ mesh: neck, mat: skin });
   if (o.beard) { const b = MB.CreateSphere("bd", { diameter: 0.2, segments: 6 }, scene); b.scaling.set(1, 0.7, 0.8); b.position.set(0, 0.04, 0.05); parts.push({ mesh: b, mat: hair }); }
-  const headT = { tpl: mergedTemplate(id + "Head", parts) };
+  const headT = { tpl: colorTemplate(id + "Head", parts) };
   const arm = MB.CreateCapsule("a", { radius: 0.058, height: 0.6, tessellation: 8, subdivisions: 1 }, scene); arm.position.y = -0.28;
   const hand = MB.CreateSphere("hd", { diameter: 0.1, segments: 6 }, scene); hand.position.y = -0.6;
-  const armT = mergedTemplate(id + "Arm", [{ mesh: arm, mat: sleeve }, { mesh: hand, mat: skin }]);
+  const armT = colorTemplate(id + "Arm", [{ mesh: arm, mat: sleeve }, { mesh: hand, mat: skin }]);
   const leg = MB.CreateCapsule("leg", { radius: 0.082, height: 0.88, tessellation: 8, subdivisions: 1 }, scene);
-  leg.position.y = -0.44; leg.bakeCurrentTransformIntoVertices();
-  leg.material = litMat(id + "Pants", hex(o.pants)); leg.setEnabled(false);
-  return { torso, head: headT, armT, legT: leg };
+  leg.position.y = -0.44;
+  const legT = colorTemplate(id + "Leg", [{ mesh: leg, mat: litMat(id + "Pants", hex(o.pants)) }]);
+  return { torso, head: headT, armT, legT };
 }
 
 function makePed(e, look = null) {
@@ -124,6 +137,9 @@ function makePed(e, look = null) {
   const legT = look ? look.legT : pick(legTs);
   const legs = [-0.1, 0.1].map((x) => { const l = legT.createInstance("pl"); l.parent = root; l.position.set(x, 0.9, 0); return l; });
 
+  // far-away stand-in (not for story characters, who always keep full detail)
+  let far = null;
+  if (!look) { far = farTs[`${torso.si}_${head.si}`].createInstance("pf"); far.parent = root; far.setEnabled(false); }
   const persona = {
     brave: rand(), social: rand(), curious: rand(), phoneAddict: rand() < 0.3,
     jogger: rand() < 0.07, elderly: rand() < 0.1, nightOwl: rand() < 0.35,
@@ -131,7 +147,7 @@ function makePed(e, look = null) {
   if (persona.jogger) persona.elderly = false;
   const walk = persona.jogger ? rr(2.7, 3.2) : persona.elderly ? rr(0.75, 1.0) : rr(1.1, 1.6);
   const p = {
-    root, body, headPivot, arms, legs, phone, persona,
+    root, body, headPivot, arms, legs, phone, persona, far, lod: 0,
     e, dir: rand() < 0.5 ? 1 : -1, s: rr(2, e.len - 2), side: 1,
     lat: rr(0.35, 0.65), walk, speed: walk, phase: rand() * 6,
     state: "walk", act: null, timer: 0, cool: rr(3, 20), x: 0, z: 0, heading: 0, vx: 0, vz: 0, push: 0,
@@ -197,6 +213,39 @@ export function spawnCharacter(def, e, s) {
   place(p, 0, true);
   return p;
 }
+// ---------------------------------------------------------------- gunmen
+// Mission enemies: a person with a pistol, driven entirely by the mission's
+// combat code (it sets x / z / heading / speed / state); this module only
+// animates them. Once knocked down (killed) they fall like anyone else.
+let goonGunT = null;
+const goonLooks = {};
+export function spawnGoon(x, z, o = {}) {
+  initTemplates();
+  const key = o.key || "goon";
+  const look = goonLooks[key] || (goonLooks[key] = customLook("goon_" + key, o.look || { shirt: "#1d1f24", sleeve: "#24272d", skin: "#c08462", hair: "#111111", pants: "#22252b", build: 1.15 }));
+  const p = makePed(edges[0], look);
+  p.goon = true; p.char = null;
+  p.state = "aim"; p.speed = 0; p.walk = 0;
+  p.x = x; p.z = z; p.heading = o.heading || 0;
+  Object.assign(p.persona, { jogger: false, elderly: false, nightOwl: true, phoneAddict: false });
+  if (!goonGunT) {
+    const b = MB.CreateBox("gg", { width: 0.06, height: 0.24, depth: 0.12 }, scene);
+    goonGunT = colorTemplate("goonGun", [{ mesh: b, mat: litMat("goonGunM", hex("#111214"), 0.4) }]);
+  }
+  const g = goonGunT.createInstance("goonGunI");
+  g.parent = p.arms[1]; g.position.set(0, -0.68, 0.04);
+  p.gun = g;
+  p.root.position.set(x, terrainH(x, z), z);
+  p.root.setEnabled(true);
+  p.dormant = false;
+  return p;
+}
+export function removeGoon(p) {
+  const i = peds.indexOf(p);
+  if (i >= 0) peds.splice(i, 1);
+  p.root.dispose(false, false);
+}
+
 export function placePed(p) { p.push = 0; place(p, 0, true); p.heading = Math.atan2(p.fx, p.fz); }
 export function fleePed(p, x, z) { p.threat = { x, z }; startFlee(p, rr(4, 7)); }
 export function sideHeading(p, towardRoad) {
@@ -367,29 +416,39 @@ let lastPX = null, lastPZ = 0, playerSpeed = 0;
 let awayCheck = 0;
 
 // ctx: { pos, vehicle, vehicleSpeed, traffic, armed, aimYaw }
-export function updatePeds(dt, ctx) {
+const cellPool = [];
+let frameNo = 0;
+export function updatePeds(dtFrame, ctx) {
   const pos = ctx.pos;
-  if (lastPX !== null && dt > 0) playerSpeed += (Math.hypot(pos.x - lastPX, pos.z - lastPZ) / dt - playerSpeed) * Math.min(1, dt * 8);
+  frameNo++;
+  if (lastPX !== null && dtFrame > 0) playerSpeed += (Math.hypot(pos.x - lastPX, pos.z - lastPZ) / dtFrame - playerSpeed) * Math.min(1, dtFrame * 8);
   lastPX = pos.x; lastPZ = pos.z;
-  const onFoot = !ctx.vehicle && pos.y < 1.5;
+  const pAbove = pos.y - terrainH(pos.x, pos.z);   // player's height above the ground (hills)
+  const onFoot = !ctx.vehicle && pAbove < 1.5;
   const aimX = Math.sin(ctx.aimYaw ?? 0), aimZ = Math.cos(ctx.aimYaw ?? 0);
 
   // spatial hash of standing / walking people (for personal space + chats)
+  // (cell arrays are pooled: a fresh array per cell per frame was steady GC churn)
+  for (const c of cells.values()) { c.length = 0; cellPool.push(c); }
   cells.clear();
   for (const p of peds) {
-    if (p.state === "down" || p.state === "away") continue;
+    if (p.state === "down" || p.state === "away" || p.dormant) continue;
     const k = ck(p.x, p.z);
     let c = cells.get(k);
-    if (!c) { c = []; cells.set(k, c); }
+    if (!c) { c = cellPool.pop() || []; cells.set(k, c); }
     c.push(p);
   }
 
   // night: most people go home (only when out of sight), back in the morning
-  awayCheck -= dt;
+  awayCheck -= dtFrame;
   const checkAway = awayCheck <= 0;
   if (checkAway) awayCheck = 0.5;
 
   for (const p of peds) {
+    if (p.goon && p.state !== "down") {                 // mission gunmen: the mission moves them, we animate
+      animate(p, dtFrame, 0);                           // (places the body at x / z / heading too)
+      continue;
+    }
     const far = Math.abs(p.x - pos.x) > 70 || Math.abs(p.z - pos.z) > 70;
     if (checkAway && !p.char) {
       if (p.state === "away") {
@@ -412,10 +471,27 @@ export function updatePeds(dt, ctx) {
     // far from the player: dormant (hidden, not updated) until you come near —
     // they're specks in the haze out there, and this keeps the crowds cheap.
     // Story characters always stay awake.
+    const qd = Math.max(Math.abs(p.x - pos.x), Math.abs(p.z - pos.z));
     if (!p.char) {
-      const dormant = Math.abs(p.x - pos.x) > 170 || Math.abs(p.z - pos.z) > 170;
-      if (dormant !== !!p.dormant) { p.dormant = dormant; p.root.setEnabled(!dormant); }
+      // a little hysteresis so people right at the edge don't flicker on/off
+      const dormant = p.dormant ? qd > 140 : qd > 150;
+      if (dormant !== !!p.dormant) { p.dormant = dormant; p.root.setEnabled(!dormant); p.acc = 0; }
       if (dormant) continue;
+    }
+    // Level of detail in time: people close to you update every frame; further
+    // out every 2nd / 4th frame with the skipped time added up, so they still
+    // walk at the right speed (at that distance the step is invisible). Each
+    // ped has its own phase so the work is spread evenly over the frames.
+    p.acc = (p.acc || 0) + dtFrame;
+    if (!p.char && p.state !== "down" && qd > 40) {
+      const every = qd > 85 ? 4 : 2;
+      if ((frameNo + (p.slot ??= (rand() * 4) | 0)) % every) continue;
+    }
+    const dt = Math.min(p.acc, 0.2);
+    p.acc = 0;
+    if (p.far) {
+      const lod = p.lod ? (qd > NEAR_LOD ? 1 : 0) : (qd > FAR_LOD ? 1 : 0);
+      if (lod !== p.lod) setLod(p, lod);
     }
 
     // ---- knocked down
@@ -423,7 +499,7 @@ export function updatePeds(dt, ctx) {
       p.timer -= dt;
       p.x += p.vx * dt; p.z += p.vz * dt;
       const k = Math.exp(-5 * dt); p.vx *= k; p.vz *= k;
-      p.root.position.set(p.x, 0.1, p.z);
+      p.root.position.set(p.x, terrainH(p.x, p.z) + 0.1, p.z);
       p.root.rotation.x += (-Math.PI / 2 + 0.08 - p.root.rotation.x) * Math.min(1, dt * 10);
       p.root.rotation.y = p.heading;
       poseArms(p, dt, -0.4, -0.4, 1.2, 1.2);
@@ -449,7 +525,7 @@ export function updatePeds(dt, ctx) {
     }
 
     // ---- run over by the player's vehicle
-    if (ctx.vehicle && near && Math.abs(ctx.vehicleSpeed) > 3.5 && pos.y < 2 && underVehicle(ctx.vehicle, p)) {
+    if (ctx.vehicle && near && Math.abs(ctx.vehicleSpeed) > 3.5 && pAbove < 2 && underVehicle(ctx.vehicle, p)) {
       const h = ctx.vehicle.heading, sp = ctx.vehicleSpeed;
       knockDown(p, Math.sin(h) * sp * 0.6 - (dx / (d || 1)) * 3, Math.cos(h) * sp * 0.6 - (dz / (d || 1)) * 3);
       scare(p.x, p.z, 25);
@@ -648,7 +724,7 @@ export function updatePeds(dt, ctx) {
       }
     }
     // side-step the player standing in the way
-    if (!ctx.vehicle && d < 1.1 && pos.y < 1.5 && p.state !== "dodge") p.push = clamp(p.push + dt * 2.5 * (p.lat > 0.5 ? -1 : 1), -1.4, 1.4);
+    if (!ctx.vehicle && d < 1.1 && pAbove < 1.5 && p.state !== "dodge") p.push = clamp(p.push + dt * 2.5 * (p.lat > 0.5 ? -1 : 1), -1.4, 1.4);
     else if (p.state !== "dodge") p.push *= Math.exp(-dt * 0.6);
 
     if (p.state !== "follow") advance(p, p.speed * dt);
@@ -683,6 +759,15 @@ export function updatePeds(dt, ctx) {
   }
 }
 
+function setLod(p, lod) {
+  p.lod = lod;
+  const near = !lod;
+  p.body.setEnabled(near); p.headPivot.setEnabled(near);
+  for (const a of p.arms) a.setEnabled(near);      // (the phone hangs off an arm)
+  for (const l of p.legs) l.setEnabled(near);
+  p.far.setEnabled(!near);
+}
+
 // ---------------------------------------------------------------- animation
 // Arm targets: ax = forward raise (+ = forward/up, PI = straight up),
 // az = outward spread. L/R = the ped's left/right arm.
@@ -706,6 +791,8 @@ function animate(p, dt, d) {
 
   switch (p.state) {
     case "surrender": L = [2.9, 2.9, 0.35, 0.35]; lean = -0.05; break;
+    case "aim": L = [1.42, 1.58, -0.14, 0.06]; lean = moving ? 0.06 : -0.02; break;          // pistol up, two hands
+    case "stagger": L = [0.7, 0.5, 0.6, 0.5]; lean = -0.28; legSw = 0; break;
     case "cower": L = [2.5, 2.5, -0.9, -0.9]; crouch = 0.45; lean = 0.35; legSw = 0; break;
     case "flee": L = [sw * 1.2 + 0.4, -sw * 1.2 + 0.4, 0.5 + Math.sin(t * 9) * 0.2, 0.5 + Math.cos(t * 9) * 0.2]; break;
     case "dodge": L = [1.8, 1.8, 0.8, 0.8]; lean = -0.25; break;
@@ -783,7 +870,8 @@ function animate(p, dt, d) {
   if (p.crouch > 0.2) { p.legs[0].rotation.x = -1.3 * p.crouch / 0.55; p.legs[1].rotation.x = 0.5; }
   else { p.legs[0].rotation.x = legSw; p.legs[1].rotation.x = -legSw; }
   const bob = moving ? Math.abs(Math.cos(p.phase)) * (run ? 0.07 : 0.04) : 0;
-  p.root.position.set(p.x, bob - p.crouch * 0.6, p.z);
+  // (yOff: standing on something that isn't the ground — a boat's deck)
+  p.root.position.set(p.x, (p.yOff ?? terrainH(p.x, p.z)) + bob - p.crouch * 0.6, p.z);
   p.root.rotation.y = p.heading;
   p.root.rotation.x = p.lean;
 }

@@ -682,6 +682,9 @@ export function updatePeds(dtFrame, ctx) {
     else if (p.state === "flee") target = p.persona.elderly ? 2.2 : 3.6 + p.persona.brave * 0.6;   // a real sprint, ~3.6–4.2 m/s
     else if (p.state === "dodge") target = 0.6;
 
+    // (something interrupted a crossing without ending it — a punch, a scare:
+    // just carry on walking rather than reading a crossing that isn't there)
+    if (p.state === "cross" && !p.cross) toWalk(p);
     if (p.state === "cross") {
       const C = p.cross;
       C.timer -= dt;

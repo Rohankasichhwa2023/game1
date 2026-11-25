@@ -339,7 +339,23 @@ console.log(
 const MB = BABYLON.MeshBuilder;
 const skinMat = litMat("playerSkin", hex("#c08462"), 0.18);
 skinMat.specularPower = 24;
-const shortsMat = litMat("shorts", hex("#2c2f33"), 0.05);
+// Outfit: teal hooded street jacket with burnt-orange trim, charcoal cargo
+// joggers, orange high-tops on white soles, black fingerless gloves, dark
+// swept-up hair and amber wraparound shades.
+const jacketMat = litMat("pJacket", hex("#1d5560"), 0.12);
+jacketMat.specularPower = 18;
+const jacketDarkMat = litMat("pJacketDk", hex("#143c44"), 0.08);
+const trimMat = litMat("pTrim", hex("#e2672b"), 0.15);
+const pantsMat = litMat("pPants", hex("#2e3036"), 0.04);
+const pocketMat = litMat("pPocket", hex("#24262b"), 0.04);
+const shoeMat = litMat("pShoe", hex("#e2672b"), 0.2);
+const soleMat = litMat("pSole", hex("#eeeae2"), 0.1);
+const gloveMat = litMat("pGlove", hex("#18191c"), 0.25);
+const hairMat = litMat("pHair", hex("#1b1512"), 0.22);
+hairMat.specularPower = 40;
+const shadesMat = litMat("pShades", hex("#2a1a0a"), 0.9);
+shadesMat.specularPower = 96;
+shadesMat.emissiveColor = hex("#3a1e05"); // faint amber tint so they read at night
 const player = new BABYLON.TransformNode("player", scene);
 const cap = (r, h, mat, parent, x, y, z, sx = 1, sy = 1, sz = 1) => {
   const m = MB.CreateCapsule(
@@ -372,41 +388,80 @@ const pivot = (parent, x, y, z) => {
 const stuntPivot = pivot(player, 0, 1.0, 0);
 const stuntOff = pivot(stuntPivot, 0, -1.0, 0);
 const body = pivot(stuntOff, 0, 0, 0);
-cap(0.17, 0.34, shortsMat, body, 0, 0.98, 0, 1.3, 1, 0.95);
-cap(0.17, 0.42, skinMat, body, 0, 1.2, 0, 1.15, 1, 0.85);
-sph(0.46, skinMat, body, 0, 1.4, 0, 1.45, 0.75, 0.82);
-sph(0.4, skinMat, body, 0, 1.3, -0.02, 1.5, 0.85, 0.7);
-sph(0.16, skinMat, body, -0.12, 1.52, -0.02, 1.2, 0.8, 1);
-sph(0.16, skinMat, body, 0.12, 1.52, -0.02, 1.2, 0.8, 1);
-cap(0.06, 0.16, skinMat, body, 0, 1.58, 0);
-sph(0.24, skinMat, body, 0, 1.72, 0.01, 0.9, 1.05, 1);
-sph(0.19, skinMat, body, -0.31, 1.47, 0);
-sph(0.19, skinMat, body, 0.31, 1.47, 0);
+cap(0.17, 0.34, pantsMat, body, 0, 0.98, 0, 1.3, 1, 0.95); // hips
+cap(0.17, 0.42, jacketMat, body, 0, 1.2, 0, 1.15, 1, 0.85); // waist
+sph(0.46, jacketMat, body, 0, 1.4, 0, 1.45, 0.75, 0.82); // chest
+sph(0.4, jacketMat, body, 0, 1.3, -0.02, 1.5, 0.85, 0.7); // back
+sph(0.16, jacketMat, body, -0.12, 1.52, -0.02, 1.2, 0.8, 1);
+sph(0.16, jacketMat, body, 0.12, 1.52, -0.02, 1.2, 0.8, 1);
+cap(0.06, 0.16, skinMat, body, 0, 1.58, 0); // neck
+sph(0.24, skinMat, body, 0, 1.72, 0.01, 0.9, 1.05, 1); // head
+sph(0.19, jacketMat, body, -0.31, 1.47, 0); // shoulders
+sph(0.19, jacketMat, body, 0.31, 1.47, 0);
+// jacket details: orange chest band, high collar, hood bunched at the back,
+// dark hem and a belt showing under it
+sph(0.46, trimMat, body, 0, 1.355, 0, 1.47, 0.1, 0.845);
+{
+  const collar = MB.CreateTorus("collar", { diameter: 0.17, thickness: 0.06, tessellation: 18 }, scene);
+  collar.material = trimMat;
+  collar.parent = body;
+  collar.position.set(0, 1.55, -0.005);
+  collar.rotation.x = -0.12;
+  const belt = MB.CreateTorus("belt", { diameter: 0.33, thickness: 0.045, tessellation: 20 }, scene);
+  belt.material = gloveMat;
+  belt.parent = body;
+  belt.position.set(0, 1.065, 0);
+  belt.scaling.set(1.14, 1, 0.86);
+}
+sph(0.3, jacketDarkMat, body, 0, 1.53, -0.14, 1.15, 0.55, 0.7); // hood
+cap(0.172, 0.36, jacketDarkMat, body, 0, 1.13, 0, 1.17, 0.35, 0.87); // hem
+sph(0.04, trimMat, body, 0, 1.065, 0.15, 1.3, 1, 0.5); // buckle
+// head: swept-up hair with a quiff, wraparound amber shades
+sph(0.25, hairMat, body, 0, 1.765, -0.02, 0.96, 0.86, 1.0);
+sph(0.13, hairMat, body, 0.015, 1.825, 0.06, 1.3, 0.75, 1.1);
+sph(0.24, shadesMat, body, 0, 1.735, 0.014, 0.955, 0.19, 1.02);
 function makeArm(side) {
   const sh = pivot(body, side * 0.33, 1.46, 0);
   sh.rotation.z = side * 0.16;
-  cap(0.075, 0.34, skinMat, sh, 0, -0.16, 0);
+  cap(0.08, 0.34, jacketMat, sh, 0, -0.16, 0); // sleeve
   const el = pivot(sh, 0, -0.3, 0);
   el.rotation.x = -0.3;
-  cap(0.06, 0.3, skinMat, el, 0, -0.14, 0);
-  sph(0.1, skinMat, el, 0, -0.31, 0.01);
+  cap(0.066, 0.3, jacketMat, el, 0, -0.14, 0);
+  const cuff = MB.CreateCylinder("cuff", { diameter: 0.14, height: 0.05, tessellation: 14 }, scene);
+  cuff.material = trimMat;
+  cuff.parent = el;
+  cuff.position.set(0, -0.255, 0);
+  sph(0.1, gloveMat, el, 0, -0.31, 0.01); // gloved fist
   const hand = pivot(el, 0, -0.33, 0.02); // where a web leaves the wrist
   return { sh, el, hand };
 }
 function makeLeg(side) {
   const hip = pivot(body, side * 0.11, 0.93, 0);
-  cap(0.105, 0.24, shortsMat, hip, 0, -0.07, 0);
-  cap(0.095, 0.46, skinMat, hip, 0, -0.22, 0);
+  cap(0.105, 0.24, pantsMat, hip, 0, -0.07, 0);
+  cap(0.1, 0.46, pantsMat, hip, 0, -0.22, 0); // thigh
+  // cargo pocket on the outside of the thigh
+  const pocket = MB.CreateBox("pocket", { width: 0.045, height: 0.13, depth: 0.11 }, scene);
+  pocket.material = pocketMat;
+  pocket.parent = hip;
+  pocket.position.set(side * 0.092, -0.27, 0);
   const knee = pivot(hip, 0, -0.45, 0);
-  cap(0.072, 0.44, skinMat, knee, 0, -0.21, 0);
-  const foot = MB.CreateBox(
-    "foot",
-    { width: 0.1, height: 0.06, depth: 0.24 },
-    scene,
-  );
-  foot.material = skinMat;
-  foot.parent = knee;
-  foot.position.set(0, -0.44, 0.05);
+  cap(0.08, 0.44, pantsMat, knee, 0, -0.2, 0); // shin
+  // jogger cuff at the ankle
+  const ankle = MB.CreateCylinder("ankle", { diameter: 0.15, height: 0.05, tessellation: 14 }, scene);
+  ankle.material = pocketMat;
+  ankle.parent = knee;
+  ankle.position.set(0, -0.37, 0);
+  // high-top sneaker: orange upper, white sole, white toe cap
+  for (const [w, h, d, y, z, mat] of [
+    [0.12, 0.09, 0.25, -0.41, 0.045, shoeMat],
+    [0.13, 0.035, 0.28, -0.46, 0.05, soleMat],
+    [0.115, 0.05, 0.06, -0.43, 0.165, soleMat],
+  ]) {
+    const b = MB.CreateBox("shoe", { width: w, height: h, depth: d }, scene);
+    b.material = mat;
+    b.parent = knee;
+    b.position.set(0, y, z);
+  }
   return { hip, knee };
 }
 const armL = makeArm(-1),
@@ -2574,6 +2629,11 @@ function updatePlayer(dt) {
     facing += angDiff(Math.atan2(mx, mz), facing) * Math.min(1, dt * 12);
   moveAmt +=
     ((len > 0 ? (running ? 1 : 0.6) : 0) - moveAmt) * Math.min(1, dt * 10);
+  updateSprintTip(
+    dt,
+    onGround && len > 0 && !running && !swimming && !aiming && !downed,
+    onGround && len > 0 && running && !swimming,
+  );
 
   if (onGround && keys.Space && !downed) {
     vy = swimming ? 6.8 : 7.2;
@@ -3481,12 +3541,19 @@ function camProbe(dx, dy, dz, dist, m, big, step = 0.25) {
 }
 let camSide = 0.6,
   camPivotY = pos.y,
+  camPrevY = pos.y,
+  camVyS = 0, // smoothed vertical speed of the body (camera pivot feed-forward)
   camExtra = 0,
   camOcc = camDist,
   swingCam = 0,
   camRaise = 0,
   camSlope = 0, // smoothed slope of the road ahead (hills / bridge ramps)
-  camLift = 0; // smoothed lift to keep the camera off rising ground behind you
+  camLift = 0, // smoothed lift to keep the camera off rising ground behind you
+  raiseHold = 0,
+  raiseHoldT = 0;
+const camOff = new V3(), // camera offset from the pivot (smoothed in the air)
+  camBase = new V3(); // camera position before shake
+let camInit = false;
 const SWING_EXTRA_DIST = 4; // how much further back the camera sits while swinging
 const camLook = { x: 0, z: 0 },
   camWant = new V3(),
@@ -3495,6 +3562,10 @@ const ORBIT_MIN = -0.45; // lowest the camera orbits (looking up past this tilts
 const SWING_ORBIT = 0.2; // while web-swinging the camera rides a little above, looking along the street
 let lookUp = 0;
 function updateCamera(dt) {
+  if (!camInit) {
+    camInit = true;
+    camBase.copyFrom(camera.position);
+  }
   // On foot the camera sits over the right shoulder so the crosshair (screen
   // centre) is never hidden behind the player; aiming pulls it in tighter.
   let dist = camDist,
@@ -3547,11 +3618,23 @@ function updateCamera(dt) {
   // swing doesn't jerk the view up and down
   // (it catches up faster the further it falls behind, instead of hitting a
   // hard limit — that limit was a jerk at the top and bottom of big arcs)
+  // (the old catch-up got faster the further behind it was; at laptop frame
+  // rates that flipped between a full snap one frame and a lag the next — the
+  // camera bounced up and down every frame while falling. Now the pivot moves
+  // with the body's smoothed vertical speed and eases out the rest, so a steady
+  // fall is followed exactly and only changes of speed are softened.)
+  const fdy = dt > 0 ? (pos.y - camPrevY) / dt : 0;
+  camPrevY = pos.y;
+  if (Math.abs(fdy) > 80) camVyS = 0; // teleported / respawned
+  else camVyS += (fdy - camVyS) * (1 - Math.exp(-dt * 10));
   if (airborne) {
-    const lag = pos.y - camPivotY;
-    camPivotY += lag * Math.min(1, dt * (7 + Math.max(0, Math.abs(lag) - 0.8) * 9));
-    camPivotY = clamp(camPivotY, pos.y - 3, pos.y + 3);
-  } else camPivotY += (pos.y - camPivotY) * Math.min(1, dt * 20);
+    // feed forward only the part of the speed the body really has this frame
+    // (a sudden stop / reversal must not carry the pivot past the body)
+    const ff = camVyS * fdy > 0 ? (Math.abs(camVyS) < Math.abs(fdy) ? camVyS : fdy) : 0;
+    camPivotY += ff * dt;
+    camPivotY += (pos.y - camPivotY) * (1 - Math.exp(-dt * 5));
+    camPivotY = clamp(camPivotY, pos.y - 2.5, pos.y + 2.5);
+  } else camPivotY += (pos.y - camPivotY) * (1 - Math.exp(-dt * 20));
   if (Math.abs(camPivotY - pos.y) > 6) camPivotY = pos.y; // teleported
   const py = camPivotY;
   // don't push the pivot into a wall the player is hugging on the right
@@ -3579,10 +3662,13 @@ function updateCamera(dt) {
   }
   // The camera only orbits a little below the shoulder (any lower and it hits the
   // street); looking up further than that tilts the view up from where it sits.
-  const p0 = Math.max(
-    pitch,
-    vehicle ? 0.05 : ORBIT_MIN + (SWING_ORBIT - ORBIT_MIN) * swingCam,
-  );
+  // (blended linearly between the on-foot and swinging orbits: blending the
+  // floor inside the max() did the whole change in the first few % of the
+  // blend — a ~1 m camera drop in a single frame on landing)
+  const p0 = vehicle
+    ? Math.max(pitch, 0.05)
+    : Math.max(pitch, ORBIT_MIN) +
+      (Math.max(pitch, SWING_ORBIT) - Math.max(pitch, ORBIT_MIN)) * swingCam;
   // occlusion: walk out from the pivot; a fatter probe while swinging keeps the
   // near plane from clipping into walls the camera brushes past
   const m = 0.18 + 0.22 * swingCam,
@@ -3622,8 +3708,14 @@ function updateCamera(dt) {
       }
     }
   }
+  // hold a raise for a moment once chosen: the probes flip between raise levels
+  // frame to frame as buildings pass, which made the view wobble up and down
+  if (raiseT >= raiseHold) {
+    raiseHold = raiseT;
+    raiseHoldT = 0.6;
+  } else if ((raiseHoldT -= dt) <= 0) raiseHold = raiseT;
   camRaise +=
-    (raiseT - camRaise) * Math.min(1, dt * (raiseT > camRaise ? 5 : 1.5));
+    (raiseHold - camRaise) * Math.min(1, dt * (raiseHold > camRaise ? 3 : 1.2));
   // On hills and bridge ramps the view tips with the road, like a driving
   // game: downhill the camera rises behind you and looks down the slope,
   // uphill it settles lower. The slope is smoothed so bumps don't jolt it.
@@ -3677,12 +3769,26 @@ function updateCamera(dt) {
   const liftT = Math.max(0, gnd + 0.9 - want);
   camLift += (liftT - camLift) * Math.min(1, dt * (liftT > camLift ? 9 : 3));
   camWant.set(cwx, want + camLift, cwz);
-  const cur = V3.Distance(camera.position, camTarget);
-  // snap in front of a wall; otherwise follow smoothly. In the air the camera is
-  // rigid (its smoothing comes from the pivot / zoom above), so it can't lag into a wall
-  const snap = d < cur - 0.05 || (airborne && swingCam > 0.5);
-  const k = snap ? 1 : Math.min(1, dt * (vehicle ? 8 : 12));
-  V3.LerpToRef(camera.position, camWant, k, camera.position);
+  // distance from where the camera is now to where the pivot is now (the
+  // player has already moved this frame) — measured from the last offset
+  // instead, it snapped only every other frame: a fast/slow camera zig-zag
+  const cur = V3.Distance(camBase, camTarget);
+  if (airborne && swingCam > 0.5) {
+    // In the air the camera rides with the body (its offset from the pivot is
+    // what's smoothed, so it never trails behind at speed), but the offset is
+    // filtered: the occlusion / raise probes are noisy frame to frame and fed
+    // straight in they made the whole view judder up and down. Only a wall
+    // cutting well in snaps it (being inside one is caught just below).
+    const k = d < cur - 1.5 ? 1 : 1 - Math.exp(-dt * 8);
+    camOff.x += (camWant.x - camTarget.x - camOff.x) * k;
+    camOff.y += (camWant.y - camTarget.y - camOff.y) * k;
+    camOff.z += (camWant.z - camTarget.z - camOff.z) * k;
+    camera.position.set(camTarget.x + camOff.x, camTarget.y + camOff.y, camTarget.z + camOff.z);
+  } else {
+    // snap in front of a wall; otherwise follow smoothly
+    const k = d < cur - 0.05 ? 1 : Math.min(1, dt * (vehicle ? 8 : 12));
+    V3.LerpToRef(camBase, camWant, k, camera.position);
+  }
   // last line of defence: never leave the camera inside a building — pull it
   // in along the view line to the probed free distance
   if (!home && pointBlocked(camera.position.x, camera.position.y, camera.position.z, 0.12, big)) {
@@ -3695,6 +3801,10 @@ function updateCamera(dt) {
     const gy = landH(camera.position.x, camera.position.z) + 0.15; // last-resort only
     if (camera.position.y < gy) camera.position.y = gy;
   }
+  // remember where the camera sits before the shake is added, so next frame
+  // follows on from there (not from a shaken position)
+  camBase.copyFrom(camera.position);
+  camOff.copyFrom(camera.position).subtractInPlace(camTarget);
   if (shake > 0.001) {
     // crash shake
     const s = shake * shake * 0.45;
@@ -3763,11 +3873,39 @@ let curDistrict = null,
   districtTimer = null,
   hudTimer = 0;
 // Brief message in the district banner (e.g. "SOUND OFF").
-function toast(html) {
+function toast(html, ms = 1600) {
   distEl.innerHTML = html;
   distEl.classList.add("show");
   clearTimeout(districtTimer);
-  districtTimer = setTimeout(() => distEl.classList.remove("show"), 1600);
+  districtTimer = setTimeout(() => distEl.classList.remove("show"), ms);
+}
+
+// One-time tip: after walking non-stop for 3 s, tell the player Shift sprints.
+// Shown once ever (saved), and skipped if they've already found it themselves.
+const SPRINT_TIP_KEY = "sprintTipShown";
+let sprintTipDone = false,
+  walkStreak = 0;
+try {
+  sprintTipDone = localStorage.getItem(SPRINT_TIP_KEY) === "1";
+} catch {
+  /* private mode */
+}
+function markSprintTip() {
+  sprintTipDone = true;
+  try {
+    localStorage.setItem(SPRINT_TIP_KEY, "1");
+  } catch {
+    /* ignore */
+  }
+}
+function updateSprintTip(dt, walking, running) {
+  if (sprintTipDone) return;
+  if (running) return markSprintTip(); // already knows how to sprint
+  walkStreak = walking ? walkStreak + dt : 0;
+  if (walkStreak >= 3) {
+    markSprintTip();
+    toast("HOLD SHIFT TO SPRINT<small>Keep Shift held while walking to run faster</small>", 5000);
+  }
 }
 
 // ---------------------------------------------------------------- sound state
@@ -4594,8 +4732,32 @@ function poseStrike(dt) {
 
 // ---------------------------------------------------------------- loop
 let mapTimer = 0;
+// Frame time from the browser's vsync timestamps (the time each frame is
+// actually presented for), not from when our callback happened to start:
+// that wobbles by a few ms frame to frame and made fast motion judder.
+// A side rAF loop records the timestamp; every rAF callback in one frame gets
+// the same value, so this is exact and steady but still follows real frame
+// times (hitches, 30 / 60 / 144 Hz).
+let rafNow = 0,
+  rafPrev = 0;
+const rafTick = (t) => {
+  rafNow = t;
+  requestAnimationFrame(rafTick);
+};
+requestAnimationFrame(rafTick);
+function frameDt() {
+  let d;
+  if (rafNow && rafPrev && rafNow > rafPrev) d = (rafNow - rafPrev) / 1000;
+  else d = engine.getDeltaTime() / 1000; // first frame / same-frame fallback
+  rafPrev = rafNow;
+  // capped at 0.1 s (not 0.05): on laptop GPUs the city often runs 15-20 fps,
+  // and a 0.05 cap then ran the game slower than real time by a different
+  // amount every frame — a constant stutter walking, driving and swinging.
+  // Every mover sub-steps its collisions, so the bigger step is safe.
+  return Math.min(Math.max(d, 0), 0.1);
+}
 engine.runRenderLoop(() => {
-  const dt = Math.min(engine.getDeltaTime() / 1000, 0.05) * missionTimeScale();
+  const dt = frameDt() * missionTimeScale();
   const now = performance.now();
   if (interactQueued) {
     interactQueued = false;

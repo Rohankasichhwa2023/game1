@@ -355,6 +355,16 @@ export function enemyShot(dist = 20, pan = 0) {
   burst({ type: "lowpass", f: 1500 + 3500 * k, peak: 0.75 * k, attack: 0.001, decay: 0.1, pan });
   burst({ type: "bandpass", f: 260, q: 1.2, peak: 0.45 * k, attack: 0.002, decay: 0.22, pan });
 }
+// An animal's growl (rate: lower = bigger beast) — a rough, pulsing rumble.
+export function growl(dist = 20, pan = 0, rate = 1, loud = 1) {
+  if (!live()) return;
+  const k = clamp(1 - dist / 120, 0.05, 1) * loud;
+  const f = 95 * rate;
+  for (let i = 0; i < 5; i++) {
+    burst({ type: "bandpass", f: f * (1.6 + Math.random() * 0.6), q: 2.5, peak: 0.45 * k, attack: 0.02, decay: 0.12, pan, at: i * 0.11 });
+    tone({ type: "sawtooth", f: f * (0.95 + Math.random() * 0.1), to: f * 0.8, peak: 0.12 * k, attack: 0.02, decay: 0.12, pan, at: i * 0.11 });
+  }
+}
 // You've been hit.
 export function hurt() {
   if (!live()) return;

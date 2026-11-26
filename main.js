@@ -106,6 +106,8 @@ import {
   updateLondon,
 } from "./londonWorld.js";
 import { KTM, KTM_CORE } from "./kathmandu.js";
+import { buildSwayambhu } from "./swayambhu.js";
+import { initWildlife, updateWildlife, wildlifeShootables, wildlifeRespawn, wildlifeOnRespawn } from "./wildlife.js";
 import { TERRAIN_BOX } from "./terrain.js";
 import { buildBridges, seaAt, deckAt, landSdf, onBridge } from "./water.js";
 import { buildCoast, buildBridgeStructures, buildDocks, animateSea } from "./coast.js";
@@ -153,8 +155,28 @@ import {
 } from "./characters.js";
 
 // ---------------------------------------------------------------- build the world
+// The build is one long piece of work, so it's done in stages with a short
+// pause between them: the loading screen's progress bar gets to repaint.
+async function loadStep(pct, label) {
+  const el = document.getElementById("loading");
+  if (el) {
+    const bar = el.querySelector(".lbar i"), lab = el.querySelector(".lstep");
+    if (bar) bar.style.width = pct + "%";
+    if (lab) lab.textContent = label;
+  }
+  // let the browser paint it (a frame, then out of the frame callback); in a
+  // background tab frames don't come, so carry on after a moment anyway
+  await new Promise((r) => {
+    let done = false;
+    const go = () => { if (!done) { done = true; setTimeout(r, 0); } };
+    requestAnimationFrame(go);
+    setTimeout(go, 80);
+  });
+}
 const t0 = performance.now();
+await loadStep(6, "Painting the streets");
 createFacades();
+await loadStep(12, "Laying out the roads");
 generateRoads();
 // the districts are islands: roads over the sea become bridges (water.js)
 buildBridges(edges, pathAt);
@@ -283,22 +305,31 @@ function startRoadside() {
     ],
   };
 }
+await loadStep(20, "Paving the roads");
 beginStatic(); // static props are batched into thin instances (see engine.js)
 buildRoadMeshes();
 buildGround();
 buildLondonGround();
+await loadStep(28, "Raising the buildings");
 planBuildings(PARIS_START);
 buildBuildings();
+await loadStep(46, "Street lamps and trees");
 buildLamps();
 buildNature(PARIS_START);
+await loadStep(52, "London");
 buildLondonWorld();
+await loadStep(58, "Kathmandu");
 {
   // Kathmandu: ground, squares + temples, Durbar Square palace
   const k = buildKathmanduWorld(landmarks);
   mapBuildings.push(...k.map);
   roofs.push(...k.roofs);
 }
+// Swayambhu: the forested hill north of the town, its stairway and the great stupa
+await loadStep(65, "Swayambhu hill and the great stupa");
+mapBuildings.push(...buildSwayambhu().map);
 // islands: sea, beaches, bridges, and jetties with boats round the bay
+await loadStep(73, "The sea and the islands");
 buildCoast();
 buildBridgeStructures();
 const MOORINGS = buildDocks([
@@ -306,17 +337,28 @@ const MOORINGS = buildDocks([
   { x: PARIS.x, z: PARIS.z + 368 }, // Saint-Clair's north shore
   { x: -150, z: 470 },           // Midtown's north-west corner
 ]);
+await loadStep(80, "Putting it all together");
 flushAccs();
 flushStatic();
 initKathmanduCulling();
 for (const f of postFlush) f();
+await loadStep(86, "Cars and traffic");
 initVehicleTemplates();
 spawnParked(START);
 spawnBoats(MOORINGS);
 spawnTraffic();
+await loadStep(91, "People");
 spawnPeds(300);
 spawnDistrictPeds("kathmandu", 300); // Kathmandu's busy lanes (dormant while you're elsewhere)
+await loadStep(95, "The story");
 spawnCharacters();
+initWildlife({
+  hurtPlayer: (n, fx, fz) => hurtPlayer(n, fx, fz),
+  playerDead: () => playerDead,
+  toast: (html, ms) => toast(html, ms),
+  dist: (x, z) => Math.hypot(x - pos.x, z - pos.z),
+  pan: (x, z) => panOf(x, z),
+});
 initMission({
   moorings: MOORINGS,
   combat: {
@@ -958,6 +1000,9 @@ let vy = 0,
   onGround = true,
   facing = 0,
   walkPhase = 0,
+  visY = null, // the body's displayed height (steps smoothed)
+  visOff = null,
+  climbS = 0, // -1 going down steps … +1 going up
   moveAmt = 0;
 let pushX = 0,
   pushZ = 0,
@@ -991,6 +1036,7 @@ function collideHoriz(p) {
     p.z + RADIUS + 0.1,
   ).slice();
   for (const b of list) {
+    if (b.walkOver) continue;                 // stair treads: stood on, never walked into
     if (b.maxY <= p.y + STEP || b.minY >= p.y + HEIGHT - 0.05) continue;
     pushOut(b, p, RADIUS);
   }
@@ -2683,7 +2729,22 @@ function updatePlayer(dt) {
     }
   }
 
+  // Stairs and kerbs: the body glides up and down each step instead of popping
+  // (physics stays exactly on the tread; only what you see is smoothed). It's
+  // smoothed relative to the ground, so plain slopes are followed exactly.
+  {
+    const gref = terrainH(pos.x, pos.z), off = pos.y - gref;
+    if (visOff === null || !onGround || swimming || Math.abs(off - visOff) > 0.9) visOff = off;
+    else visOff += (off - visOff) * (1 - Math.exp(-dt * 11));
+    const vy0 = visY;
+    visY = gref + visOff;
+    // how much we're climbing (+) or descending (−) per metre walked
+    const hv = len > 0 ? speed : 0;
+    const want = onGround && hv > 0.5 && vy0 !== null && dt > 0 ? clamp(((visY - vy0) / dt / hv) / 0.45, -1, 1) : 0;
+    climbS += (want - climbS) * (1 - Math.exp(-dt * 7));
+  }
   player.position.copyFrom(pos);
+  player.position.y = visY;
   player.rotation.y = facing;
   const shadowY = supportHeight(pos.x, pos.z, pos.y + 0.01);
   blob.position.set(pos.x, shadowY + 0.1, pos.z);
@@ -2711,6 +2772,7 @@ function updatePlayer(dt) {
   // and arms out falling), plus a landing crouch; every joint eases toward it.
   airT += ((onGround ? 0 : 1) - airT) * Math.min(1, dt * (onGround ? 16 : 8));
   landT = Math.max(0, landT - dt * 3);
+  const cUp = Math.max(0, climbS), cDn = Math.max(0, -climbS);   // climbing / descending steps
   const a = moveAmt * 0.75,
     sw = Math.sin(walkPhase),
     g = 1 - airT,
@@ -2722,13 +2784,13 @@ function updatePlayer(dt) {
   easeRot(
     legL.hip,
     "x",
-    -sw * a * g + au * (-0.75 * up - 0.15 * (1 - up)) - L * 0.75,
+    -sw * a * g + au * (-0.75 * up - 0.15 * (1 - up)) - L * 0.75 - Math.max(0, sw) * g * (cUp * 0.6 + cDn * 0.15),
     k,
   );
   easeRot(
     legR.hip,
     "x",
-    sw * a * g + au * (-0.15 * up + 0.2 * (1 - up)) - L * 0.55,
+    sw * a * g + au * (-0.15 * up + 0.2 * (1 - up)) - L * 0.55 - Math.max(0, -sw) * g * (cUp * 0.6 + cDn * 0.15),
     k,
   );
   easeRot(
@@ -2736,7 +2798,7 @@ function updatePlayer(dt) {
     "x",
     Math.max(0, Math.sin(walkPhase + 1.2)) * a * 1.3 * g +
       au * (1.15 * up + 0.35 * (1 - up)) +
-      L * 1.3,
+      L * 1.3 + (Math.max(0, sw) * (cUp * 0.9 + cDn * 0.35) + cDn * 0.18) * g,
     k,
   );
   easeRot(
@@ -2744,7 +2806,7 @@ function updatePlayer(dt) {
     "x",
     Math.max(0, -Math.sin(walkPhase + 1.2)) * a * 1.3 * g +
       au * (0.55 * up + 0.25 * (1 - up)) +
-      L * 1.1,
+      L * 1.1 + (Math.max(0, -sw) * (cUp * 0.9 + cDn * 0.35) + cDn * 0.18) * g,
     k,
   );
   easeRot(armL.sh, "x", sw * a * 0.9 * g - au * (0.45 + 0.9 * (1 - up)), k);
@@ -2766,7 +2828,7 @@ function updatePlayer(dt) {
       g -
     L * 0.24;
   // thrown: tumble flat onto the back, then get up again
-  const lean = downed ? -1.5 : L * 0.35 + fall * 0.12;
+  const lean = downed ? -1.5 : L * 0.35 + fall * 0.12 + cUp * 0.13 * g - cDn * 0.04 * g;
   body.rotation.x +=
     (lean - body.rotation.x) * Math.min(1, dt * (downed ? 7 : 5));
   if (downed) {
@@ -3077,6 +3139,14 @@ function raycast(o, d, tmin, tmax) {
     }
   }
   for (const m of missionShootables()) {
+    const th = rayBox(o, d, m.box, tmin, best);
+    if (th !== null && th < best) {
+      best = th;
+      hit = { mission: m };
+    }
+  }
+  // (Swayambhu's wolves, tigers and bears)
+  for (const m of wildlifeShootables()) {
     const th = rayBox(o, d, m.box, tmin, best);
     if (th !== null && th < best) {
       best = th;
@@ -3661,7 +3731,11 @@ function updateCamera(dt) {
     camPivotY += ff * dt;
     camPivotY += (pos.y - camPivotY) * (1 - Math.exp(-dt * 5));
     camPivotY = clamp(camPivotY, pos.y - 2.5, pos.y + 2.5);
-  } else camPivotY += (pos.y - camPivotY) * (1 - Math.exp(-dt * 20));
+  } else {
+    // on foot, follow the step-smoothed height (never a stale one: in a car, or far off)
+    const footY = !vehicle && visY !== null && Math.abs(visY - pos.y) < 1 ? visY : pos.y;
+    camPivotY += (footY - camPivotY) * (1 - Math.exp(-dt * 20));
+  }
   if (Math.abs(camPivotY - pos.y) > 6) camPivotY = pos.y; // teleported
   const py = camPivotY;
   // don't push the pivot into a wall the player is hugging on the right
@@ -3894,6 +3968,7 @@ const DISTRICTS = {
   bridge: ["THE BRIDGE", "Over the bay"],
   london: ["LONDON", "Mind the maze of streets"],
   kathmandu: ["KATHMANDU", "Alleys, temples and the old Palace Square"],
+  swayambhu: ["SWAYAMBHU", "The great stupa on the forest hill — keep to the stairs"],
   river: ["THE THAMES", "Crossing the river"],
 };
 let curDistrict = null,
@@ -4315,6 +4390,7 @@ const MAP_LABELS = [
   { x: 1000, z: 120, t: "LONDON", s: "Old town" },
   { x: 1470, z: -260, t: "THE THAMES", s: "" },
   { x: KTM_CORE.x, z: KTM.z1 - 40, t: "KATHMANDU", s: "Old Newar town" },
+  { x: 190, z: 1430, t: "SWAYAMBHU", s: "The great stupa" },
 ];
 function bigToScreen(x, z) {
   const [mx, mz] = toMap(x, z);
@@ -4655,7 +4731,7 @@ function die() {
   if (span) span.textContent = "YOU WERE TAKEN DOWN";
   fadeEl.classList.add("on");
   setTimeout(() => {
-    const r = missionRespawn() || { x: pos.x, z: pos.z, yaw };
+    const r = missionRespawn() || wildlifeRespawn(pos) || { x: pos.x, z: pos.z, yaw };
     pos.set(r.x, terrainH(r.x, r.z) + 0.05, r.z);
     if (r.yaw !== undefined) yaw = facing = r.yaw;
     vy = 0;
@@ -4669,6 +4745,7 @@ function die() {
     camera.position.set(pos.x, pos.y + 2, pos.z);
     updateCamera(1);
     missionOnRespawn();
+    wildlifeOnRespawn();
     setTimeout(() => {
       fadeEl.classList.remove("on");
       homeBusy = false;
@@ -4857,6 +4934,7 @@ engine.runRenderLoop(() => {
     });
   else hideCharacterUI();
   updateMission(dt, { pos, vehicle, inside: !!home });
+  if (!home) updateWildlife(dt, { pos, vehicle });
   if (!homeBusy) trackVelocity(dt);
   updateCamera(dt);
   updateWebTargets(dt);
@@ -4926,10 +5004,17 @@ window.addEventListener("resize", () => engine.resize());
   // poll readiness ourselves (a bounded number of times: Babylon's own
   // whenReady keeps polling forever if anything never becomes ready)
   const t0 = performance.now();
+  const bar = el && el.querySelector(".lbar i"), lab = el && el.querySelector(".lstep");
+  if (lab) lab.textContent = "Warming up the graphics";
   const check = () => {
     if (revealed) return;
-    if (scene.isReady() || performance.now() - t0 > 10000) reveal();
-    else setTimeout(check, 250);
+    const k = Math.min(1, (performance.now() - t0) / 10000);
+    if (bar) bar.style.width = (96 + 3.5 * Math.sqrt(k)).toFixed(1) + "%";
+    if (scene.isReady() || performance.now() - t0 > 10000) {
+      if (bar) bar.style.width = "100%";
+      if (lab) lab.textContent = "Ready";
+      reveal();
+    } else setTimeout(check, 250);
   };
   setTimeout(check, 100);
 }

@@ -17,7 +17,7 @@ const PARIS = { x: -560, z: 0, R: 368 };
 const ISLANDS = [
   { kind: "box", x0: -150, x1: 722, z0: -566, z1: 566, r: 26 },                      // Midtown
   { kind: "box", x0: 758, x1: 1600, z0: -600, z1: 600, r: 30 },                      // London
-  { kind: "box", x0: KTM.x0 - 70, x1: KTM.x1 + 70, z0: KTM.z0, z1: KTM.z1 + 150, r: 60 }, // Kathmandu + its hillside
+  { kind: "box", x0: KTM.x0 - 70, x1: KTM.x1 + 70, z0: KTM.z0, z1: KTM.z1 + 640, r: 60 }, // Kathmandu + its hillside + Swayambhu
 ];
 function sdBox(x, z, b) {
   // rounded rectangle
@@ -40,7 +40,7 @@ export function landSdfSmooth(x, z) {
 }
 export const seaAt = (x, z) => landSdf(x, z) > 0;
 // the area the coastline meshes cover (the world plus a margin of sea)
-export const SEA_BOX = { x0: -1100, x1: 1700, z0: -700, z1: 1440 };
+export const SEA_BOX = { x0: -1100, x1: 1700, z0: -700, z1: 1960 };
 
 // ---------------------------------------------------------------- bridges
 // Every road is walked in 2 m steps; runs of samples over the sea become a

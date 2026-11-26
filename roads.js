@@ -11,7 +11,7 @@
 //   Kathmandu      : north of Midtown — grown lanes off a few arterials (kathmandu.js).
 import {
   scene, rand, rr, pick, clamp, hex, flatMat, flatTexMat, texMat, litMat, makeAcc, addFlatQuad,
-  addBox, solidBox, setXF, clearXF, makeXF, radialTex, glow, setLift, terrainH, terrainSlope, staticInstance, onStaticFlush, staticMeshes,
+  addBox, solidBox, setXF, clearXF, makeXF, radialTex, glow, setLift, terrainH, terrainSlope, staticInstance, onStaticFlush, staticMeshes, SWAY,
 } from "./engine.js";
 import { noiseTex, slabTex } from "./textures.js";
 import { LONDON, RW, riverDist, inLondon, generateLondonRoads, placeLondonLandmarks } from "./london.js";
@@ -20,9 +20,10 @@ import { inKathmandu, generateKathmanduRoads } from "./kathmandu.js";
 export const PARIS = { x: -560, z: 0, R: 340 };
 export const CITY = { x0: -114, x1: 720, z0: -560, z1: 560 };
 export const SHORE_X = -960;
-export const WORLD = { x0: -1000, x1: 1600, z0: -600, z1: 1340 };
+export const WORLD = { x0: -1000, x1: 1600, z0: -600, z1: 1880 };
 
 export function districtAt(x, z) {
+  if (Math.hypot(x - SWAY.x, z - SWAY.z) < SWAY.RW + 2) return "swayambhu";
   if (inKathmandu(x, z)) return "kathmandu";
   if (Math.hypot(x - PARIS.x, z - PARIS.z) <= PARIS.R + 6) return "paris";
   if (x >= LONDON.x0 - 10 && inLondon(x, z)) return riverDist(x, z) < RW + 3 ? "river" : "london";

@@ -9,7 +9,7 @@
 // front) and emit rotated world geometry + rotated colliders.
 
 import { terrainH } from "./terrain.js";
-export { terrainH, terrainSlope, addTerrainFlat, landH, groundAt } from "./terrain.js";
+export { terrainH, terrainSlope, addTerrainFlat, landH, groundAt, SWAY, SWAY_ROUTES, SWAY_SEGS, swayPath } from "./terrain.js";
 export { landSdf, seaAt, deckAt, onBridge } from "./water.js";
 
 export const V3 = BABYLON.Vector3;

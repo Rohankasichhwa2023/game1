@@ -453,6 +453,28 @@ export function blip() {
   if (!live()) return;
   tone({ type: "sine", f: 880, to: 1320, peak: 0.05, decay: 0.08 });
 }
+// A big bronze bell: a low strike with a few inharmonic partials ringing out.
+export function bell(dist = 0, pan = 0) {
+  if (!live()) return;
+  const k = clamp(1 - dist / 400, 0.15, 1);
+  const f0 = 146;
+  for (const [m, a, d] of [[1, 0.32, 4.5], [2.0, 0.16, 3.2], [2.76, 0.1, 2.4], [5.4, 0.05, 1.2], [0.5, 0.14, 5.5]])
+    tone({ type: "sine", f: f0 * m, peak: a * k, attack: 0.004, decay: d, pan });
+  burst({ type: "bandpass", f: 900, q: 2, peak: 0.12 * k, attack: 0.001, decay: 0.06, pan });
+}
+// Your phone buzzing with a message / call.
+export function phoneBuzz() {
+  if (!live()) return;
+  for (let i = 0; i < 2; i++) {
+    tone({ type: "square", f: 180, peak: 0.035, attack: 0.01, decay: 0.16, at: i * 0.28 });
+    tone({ type: "sine", f: 1320, peak: 0.04, attack: 0.005, decay: 0.09, at: i * 0.28 });
+  }
+}
+// One tick of a countdown (higher and sharper in the last seconds).
+export function tick(urgent = false) {
+  if (!live()) return;
+  tone({ type: "triangle", f: urgent ? 1560 : 1040, peak: urgent ? 0.07 : 0.04, attack: 0.002, decay: 0.05 });
+}
 
 // ---------------------------------------------------------------- engine
 // pitch range (Hz at idle / redline), gears, waveform and how gritty it is

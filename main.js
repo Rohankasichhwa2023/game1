@@ -98,6 +98,7 @@ import {
   missionRespawn,
   missionOnRespawn,
   missionTimeScale,
+  missionJumpSpot,
 } from "./mission.js";
 import {
   buildLondonGround,
@@ -218,7 +219,7 @@ const PARIS_START = (() => {
 // You start in the middle of Durbar Square's stone courtyard, looking up at
 // the palace and its five-tier pagoda tower — temples, crowds and the hill
 // town all round, the bikes and a supercar parked at the courtyard's edge,
-// and Laxmi Didi (Mission 1) a few steps away by the road.
+// and Martha (Mission 1) a few steps away by the road.
 const START = (() => {
   const d = landmarks.ktmDurbar;
   if (!d) return startRoadside();
@@ -329,6 +330,11 @@ initMission({
     playerDead: () => playerDead,
     flushAccs: () => flushAccs(),
     setTime: (h) => setTime(h),
+    explode: (at, scale) => explode(at, scale),
+    smokeOn: (mesh) => { try { return missionSmoke(mesh); } catch { return null; } },   // (null while the world is still being built)
+    shake: (k) => { shake = Math.max(shake, k); },
+    roofs,
+    bellAt: (x, z) => sfx.bell(Math.hypot(x - pos.x, z - pos.z), panOf(x, z)),
   },
 });
 console.log(
@@ -3342,6 +3348,27 @@ function updateDamageSmoke(v) {
     ? new BABYLON.Color4(0.15, 0.13, 0.12, 0.6)
     : new BABYLON.Color4(0.45, 0.45, 0.45, 0.35);
 }
+// Black smoke pouring off a mission vehicle that's been shot up / rammed.
+function missionSmoke(mesh) {
+  const ps = new BABYLON.ParticleSystem("missionSmoke", 120, scene);
+  ps.particleTexture = smokeTex;
+  ps.emitter = mesh;
+  ps.minEmitBox = new V3(-0.4, 1.0, 1.0);
+  ps.maxEmitBox = new V3(0.4, 1.3, 1.8);
+  ps.minSize = 0.5;
+  ps.maxSize = 1.5;
+  ps.minLifeTime = 1;
+  ps.maxLifeTime = 2.4;
+  ps.direction1 = new V3(-0.4, 1.5, -0.4);
+  ps.direction2 = new V3(0.4, 2.6, 0.4);
+  ps.color1 = new BABYLON.Color4(0.08, 0.08, 0.08, 0.7);
+  ps.color2 = new BABYLON.Color4(0.16, 0.14, 0.13, 0.6);
+  ps.colorDead = new BABYLON.Color4(0, 0, 0, 0);
+  ps.emitRate = 34;
+  ps.blendMode = BABYLON.ParticleSystem.BLENDMODE_STANDARD;
+  ps.start();
+  return ps;
+}
 // Throw the player off a bike / out of a totalled car.
 function throwPlayer(v, impact, dirSign) {
   const h = v.heading;
@@ -3866,7 +3893,7 @@ const DISTRICTS = {
   sea: ["THE BAY", "Open water between the islands"],
   bridge: ["THE BRIDGE", "Over the bay"],
   london: ["LONDON", "Mind the maze of streets"],
-  kathmandu: ["KATHMANDU", "Alleys, temples and Basantapur Durbar Square"],
+  kathmandu: ["KATHMANDU", "Alleys, temples and the old Palace Square"],
   river: ["THE THAMES", "Crossing the river"],
 };
 let curDistrict = null,
@@ -4501,6 +4528,12 @@ yaw = START.yaw; // look into the junction
     const [x, z, y2] = q.get("at").split(",").map(Number);
     pos.set(x, terrainH(x, z), z);
     if (!isNaN(y2)) yaw = y2;
+  }
+  // ?m=<mission>.<stage>: start where that part of the story begins
+  const js = missionJumpSpot();
+  if (js) {
+    pos.set(js.x, terrainH(js.x, js.z), js.z);
+    if (js.yaw !== undefined) yaw = js.yaw;
   }
   if (q.get("pitch") !== null) pitch = +q.get("pitch");
   if (q.get("dist") !== null) camDist = +q.get("dist");

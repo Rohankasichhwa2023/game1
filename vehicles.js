@@ -32,7 +32,7 @@ import {
 import { riverDist, RW } from "./london.js";
 const SEA_Y = 0.045; // the water surface (coast.js)
 // nose-up pitch for a vehicle heading h on the hillside (Babylon: -x tips the nose up)
-const slopePitch = (x, z, h, half = 2) =>
+export const slopePitch = (x, z, h, half = 2) =>
   -Math.atan(terrainSlope(x, z, Math.sin(h) * half, Math.cos(h) * half) / half);
 import { edges, pathAt, asphaltDist, roadDist, WORLD } from "./roads.js";
 
@@ -236,6 +236,8 @@ export const SPECS = {
   },
 };
 export const VEH = SPECS; // back-compat alias
+// A template for a mission vehicle: sedan, grey, suv, van, truck, supercar.
+export const missionTemplate = (key) => T.mission[key] || T.mission.sedan;
 export const specOf = (v) => v.spec || SPECS[v.kind];
 
 export const vehicles = []; // parked / usable (and wrecks)
@@ -1605,6 +1607,11 @@ export function initVehicleTemplates() {
     decker,
   ];
   T.bikes = [...bikes, ...bikes, ...superbikes];
+  // the story's own vehicles (missions drive these along the roads)
+  T.mission = {
+    sedan: sedans[0], grey: sedans[3], suv: suvs[0], van: vans[1],
+    truck: trucks[1], supercar: supers[3],
+  };
   T.start = {
     supercar: supers[0],
     superbike: superbikes[1],

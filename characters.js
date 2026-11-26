@@ -551,6 +551,7 @@ const CAST = [
       { t: "Had a wife in Lisbon. Or she had me. Forty years ago now.", need: 2 },
       { t: "Got a medal for pulling five men out of the North Sea. Pawned it. Wish I hadn't.", need: 4 },
       { t: "Some nights I forget which port I'm in. This one's alright though.", need: 6 },
+      { t: "There's a night at sea I don't talk about. A storm, and a lad, and a line I threw too short.", need: 8 },
     ],
     deflect: ["Long story, sailor. Longer than your patience.", "Ask me another day. A better day."],
     opinions: {
@@ -558,6 +559,7 @@ const CAST = [
       amelie: "The girl draws me like I'm somebody. Nice feeling, that.",
       priya: "The architect listens. Rare thing.",
       grant: "Holloway had me 'moved on' twice. River moved me back.",
+      laxmi: "The lady from the temple square? She sends me word now and then. I never know what to say back.",
       jay: "The lad sings my old shanties wrong. Wrong and lovely.",
     },
     needs: { hungry: ["Ain't eaten since yesterday. Or the day before. Days are slippery."], tired: ["These bones have been cold a long time."], broke: ["Broke? I'm beyond broke, sailor. I'm out the other side of it."] },
@@ -630,15 +632,15 @@ const CAST = [
     vs: { claude: "Thought about my offer, Moreau?", priya: "Ms. Shah. Always a pleasure. Never a profit." },
   },
   {
-    id: "laxmi", name: "Laxmi Shrestha", short: "Laxmi Didi", age: 61, role: "Temple caretaker", offset: -1.5,
+    id: "laxmi", name: "Martha Bell", short: "Martha", age: 61, role: "Temple caretaker", offset: -1.5,
     look: { shirt: "#a8232e", sleeve: "#c9a227", skin: "#a8724e", hair: "#1a1410", pants: "#5a1a22", longHair: true },
     persona: { brave: 0.7, temper: 0.35, warmth: 0.85 }, walkSpeed: 1.0,
-    addr: { hostile: "you", neutral: "babu", friend: "my child" },
-    quirk: { pre: ["Hai, ", "Listen, ", "Aama says — ", "Babu, "], post: [". Ke garne.", ", hai?", ". The gods are watching.", ""] },
-    schedule: [[0, "home"], [5, "durbar", "sweep", "sweeping the temple steps"], [9, "durbar", "inspect", "looking after the shrines"], [13, "durbar", "eat", "eating chiura in the shade"], [15, "durbar", "inspect", "lighting the evening lamps"], [20, "home"]],
+    addr: { hostile: "you", neutral: "dear", friend: "my child" },
+    quirk: { pre: ["Listen, ", "Dear, ", "My mother used to say — ", "Child, "], post: [". What can you do.", ", hm?", ". The gods are watching.", ""] },
+    schedule: [[0, "home"], [5, "durbar", "sweep", "sweeping the temple steps"], [9, "durbar", "inspect", "looking after the shrines"], [13, "durbar", "eat", "eating rice in the shade"], [15, "durbar", "inspect", "lighting the evening lamps"], [20, "home"]],
     greet: {
-      first: ["Namaste, babu. You're new to Kathmandu — I can tell, you're looking up at everything.", "Namaste. Mind the pigeons, they think they own the square."],
-      again: ["Namaste again, babu."],
+      first: ["Hello, dear. You're new to Kathmandu — I can tell, you're looking up at everything.", "Good day. Mind the pigeons, they think they own the square."],
+      again: ["Hello again, dear."],
       friend: ["Ah, my child! Come, sit. Have you eaten?"],
       hostile: ["Leave the square. The gods don't need your kind of trouble."],
       busy: ["One moment — the lamps don't light themselves."],
@@ -646,7 +648,7 @@ const CAST = [
     small: {
       sweep: ["Two hundred years these steps have been swept every morning. Not one day missed."],
       inspect: ["The struts on the pagoda — every one carved by hand. Gods, dancers, demons. Look closely."],
-      eat: ["Chiura and a little achar. Simple food for a long life."],
+      eat: ["Rice and a little pickle. Simple food for a long life."],
       any: ["The hills hold the city like two hands.", "Everything here is older than it looks, and stronger."],
     },
     rumors: [
@@ -655,11 +657,11 @@ const CAST = [
       { t: "A rich man from London has been buying 'antiques'. Nothing he buys is antique to us — it's family.", need: 2 },
     ],
     bio: [
-      { t: "Laxmi Shrestha. My mother kept this square, and her mother before her.", need: -3 },
+      { t: "Martha Bell. My mother kept this square, and her mother before her.", need: -3 },
       { t: "I was born in the lane behind the palace. I've never slept a night outside the valley.", need: 1 },
       { t: "My son went to sea. He sends letters. I read them to the goddess, she likes to hear about the world.", need: 4 },
     ],
-    deflect: ["That is my business, babu.", "Ask me again when you've had tea with me."],
+    deflect: ["That is my business, dear.", "Ask me again when you've had tea with me."],
     opinions: {
       tom: "The sailor? A good man who drinks a little. The sea does that.",
       grant: "Holloway. I've heard that name, and not kindly.",
@@ -668,8 +670,8 @@ const CAST = [
     needs: { hungry: ["Have you eaten? I haven't. Too much to do."], tired: ["My knees are older than the pagoda today."], broke: [] },
     gift: { takes: true, att: 2, accept: ["For the temple? The goddess thanks you. So do I."] },
     threat: { action: "none", lines: ["You'd threaten an old woman in front of the gods? Shame.", "Go on, then. I've seen worse than you."] },
-    bye: { hostile: ["Go."], neutral: ["Jaau, babu. Go well."], friend: ["Come back for tea, my child."] },
-    barks: { work: ["Om mani padme hum...", "Shoo, pigeons, shoo!"], friendly: ["My child!"], hostile: ["Not you again."], night: ["The lamps are lit. Go home, babu."] },
+    bye: { hostile: ["Go."], neutral: ["Go well, dear."], friend: ["Come back for tea, my child."] },
+    barks: { work: ["Hmm, hmm, hmm...", "Shoo, pigeons, shoo!"], friendly: ["My child!"], hostile: ["Not you again."], night: ["The lamps are lit. Go home, dear."] },
     friends: ["tom"],
     favor: {
       need: 1, target: "tom",
@@ -762,7 +764,7 @@ const SPOT_INFO = {
   clock: ["the clock tower", "London"], wheel: ["the big wheel", "London"], square: ["the garden square", "London"],
   circus: ["the circus", "London"], highSt: ["the high street", "London"], londonPub: ["the Red Lion", "London"],
   bridge: ["the bridge", "London"], embank: ["the embankment", "London"],
-  durbar: ["Durbar Square", "Kathmandu"],
+  durbar: ["Palace Square", "Kathmandu"],
 };
 const SPOTS = {};
 function nearestRoad(x, z, filter) {
@@ -969,12 +971,17 @@ let convo = null, candidate = null, lastCtx = null;
 let curHour = 9.5, lastHour = null;
 const hourNow = () => curHour;
 
+// Only the people the missions need are in the world (the rest of the cast
+// stays defined here but isn't spawned), and they only talk about the mission.
+const MISSION_CAST = new Set(["laxmi"]);
+const storyLines = (c) => (storyHooks.choices ? storyHooks.choices(c) : []);
 export function spawnCharacters() {
   resolveSpots();
   buildProps();
   injectUI();
   const any = edges[0];
   for (const def of CAST) {
+    if (!MISSION_CAST.has(def.id)) continue;
     const p = spawnCharacter(def, any, 5);
     const c = { def, p, mem: memOf(def.id), need: { hunger: 0.3, energy: 0.85 }, fear: 0, sulk: 0, hold: 0, barkCool: 4 + R() * 10, slotKey: null, bubble: null, tag: null };
     p.state = "away"; p.root.setEnabled(false); p.x = p.z = 1e6;
@@ -1301,7 +1308,9 @@ function apply(c, r) {
 }
 function choices(c) {
   const d = c.def, m = c.mem;
-  if (convo.sub === "story") return storyHooks.choices ? storyHooks.choices(c) : [];
+  if (convo.sub === "story") return storyLines(c);
+  // mission characters: the mission, and goodbye — nothing else
+  if (MISSION_CAST.has(d.id)) return [...storyLines(c), { label: "Goodbye.", go: () => say(c, "bye", null, "Goodbye.") }];
   if (convo.sub === "people") {
     const known = Object.keys(d.opinions).filter((id) => byId[id]);
     return [
@@ -1371,6 +1380,8 @@ export function speakAs(c, dialogue, emotion = "neutral", playerLine = "", actio
 export function addCash(n) { save.wallet += n; persist(); }
 export const wallet = () => save.wallet;
 export function setGone(id) { const c = byId[id]; if (c) { c.gone = true; c.scripted = false; } }
+// ...and back into the world (the story is done with them)
+export function setBack(id) { const c = byId[id]; if (c) c.gone = false; }
 export function endConversation() { if (convo) endConvo(); }
 // For the maps: where the story characters are right now (not those at home).
 export function characterMarkers() {
@@ -1490,7 +1501,7 @@ export function updateCharacters(dt, hour, ctx) {
 
     const pd = dist2(p.x, p.z, ctx.pos.x, ctx.pos.z);
     // who can we talk to? (not someone running, hurt, or fast asleep)
-    if (onFoot && !convo && !c.scripted && !p.dead && pd < bestD && !["down", "flee", "cower", "surrender", "dodge", "away"].includes(p.state) && !(p.state === "work" && p.pose === "sleep")) { bestD = pd; candidate = c; }
+    if (onFoot && !convo && !c.scripted && !p.dead && pd < bestD && storyLines(c).length && !["down", "flee", "cower", "surrender", "dodge", "away"].includes(p.state) && !(p.state === "work" && p.pose === "sleep")) { bestD = pd; candidate = c; }
     // barks as you pass
     if (onFoot && !convo && pd < 7 && c.barkCool <= 0 && (p.state === "work" || p.state === "walk")) {
       c.barkCool = 22 + R() * 18;

@@ -1,246 +1,126 @@
-// mission.js — the mission card / banner / waypoint, and Mission 2:
-// "The Holloway Job" (Mission 1, "The Golden Torana", lives in torana.js and
-// runs first; the Holloway job opens once the torana is home).
+// mission.js — the story: runs the missions in order and owns their UI
+// (the mission card, banners, subtitles, choices, phone messages, the
+// countdown, and the on-screen waypoint).
 //
-//   0  Get to London                    (you start in Saint-Clair)
-//   1  Meet Grant Holloway              (the developer, at the garden square;
-//                                        talk to him — he hires you)
-//   2  Find Vinnie Sour in Midtown      (the loan shark Grant owes; he spots
-//                                        you if you get close, and runs)
-//   3  The chase                        (he picks escape routes away from you,
-//                                        sprints in bursts and tires, so he's
-//                                        catchable; lose him and he stops to
-//                                        catch his breath. 3 bullets, or one hit
-//                                        from a car / an explosion)
-//   4  Done                             ($500 from Holloway)
+//   Mission 1  "The Golden Arch"   (arch.js)      Kathmandu → Saint-Clair → Midtown → London → home
+//   Mission 2  "Midnight Bells"    (midnight.js)  begins with a phone call soon after Mission 1 ends
 //
-// Progress is saved; once Vinnie is dead he stays out of the game.
+// Shared pieces: combat.js (gunmen) and roadcar.js (chase / hunter vehicles).
+//
+// Testing shortcut: add ?m=1.13 to the URL to jump to Mission 1 stage 13,
+// ?m=2.5 for Mission 2 stage 5, ?m=reset to start the story over.
 import { scene, camera, engine, canvas, clamp, terrainH } from "./engine.js";
-import { districtAt, landmarks } from "./roads.js";
-import { charById, storyHooks, speakAs, addCash, setGone } from "./characters.js";
+import { storyHooks } from "./characters.js";
+import { initCombat, updateGoons, trackPlayer, goons } from "./combat.js";
+import { updateCars, shootables as carShootables } from "./roadcar.js";
 import {
-  initTorana, updateTorana, toranaDone, toranaChoices, toranaObjective, toranaCard, toranaShootables,
-  toranaHitGoon, toranaRespawn, toranaOnRespawn, toranaTimeScale,
-} from "./torana.js";
+  initArch, updateArch, archDone, archChoices, archObjective, archCard, archShootables, archHitGoon, archRespawn, archOnRespawn,
+  archTimeScale, archJump,
+} from "./arch.js";
+import {
+  initMidnight, beginMidnight, updateMidnight, midnightStarted, midnightDone, midnightObjective, midnightCard, midnightHitGoon,
+  midnightRespawn, midnightOnRespawn, midnightTimeScale, midnightJump,
+} from "./midnight.js";
+import * as sfx from "./sound.js";
 
-const SAVE_KEY = "babylon.mission.v1";
-let M = { stage: 0 };
-try { const s = JSON.parse(localStorage.getItem(SAVE_KEY) || "null"); if (s) M = { ...M, ...s }; } catch { /* private mode */ }
-if (M.stage === 3) M.stage = 2;                   // a chase doesn't survive a reload
-const persist = () => { try { localStorage.setItem(SAVE_KEY, JSON.stringify(M)); } catch { /* ignore */ } };
-
-const GIVER = "grant", TARGET = "vinnie";
-const STAGES = [
-  { title: "Get to London", hint: "Cross the bridge south into Midtown, then over the bridges east to London." },
-  { title: "Meet Grant Holloway", hint: "He's at the garden square in London. Walk up and press T to talk." },
-  { title: "Find Vinnie Sour in Midtown", hint: "Flat cap, dark coat. Usually around Times plaza or Broadway." },
-  { title: "Kill Vinnie Sour", hint: "He's running — chase him down." },
-  { title: "Mission complete", hint: "Holloway paid up. The city is yours to explore." },
-];
-let hud, banner, marker, briefed = false;
-let chase = null;            // { stamina, tired, hiding, lostT, hp }
-let lastPos = null;
+let hud, banner, marker, phoneEl, timerEl;
+let beginT = null;          // counting down to Mission 2's phone call
+let jumped = false;
 
 // ---------------------------------------------------------------- setup
-// opts: { moorings } (the boat jetties, for Mission 1)
+// opts: { moorings, combat }
 export function initMission(opts = {}) {
   injectUI();
-  storyHooks.choices = (c) => (c.def.id === "laxmi" ? toranaChoices(c) : storyChoices(c));
-  initTorana({
-    moorings: opts.moorings,
-    combat: opts.combat || {},
+  initCombat(opts.combat || {});
+  // ?m=<mission>.<stage> — jump straight to a point in the story (for testing)
+  const q = new URLSearchParams(location.search).get("m");
+  if (q === "reset") {
+    for (const k of ["babylon.mission.arch.v1", "babylon.mission.midnight.v1"]) try { localStorage.removeItem(k); } catch { /* ignore */ }
+    archJump(0); midnightJump(0);
+  } else if (q && /^[12]\.\d+$/.test(q)) {
+    const [m, s] = q.split(".").map(Number);
+    if (m === 1) { archJump(s); midnightJump(0); } else { archJump(22, { choice: "home", holloway: "jail" }); midnightJump(s); }
+    jumped = true;
+  }
+  storyHooks.choices = (c) => archChoices(c);
+  const ui = {
     banner: (t, sub, ms) => showBanner(t, sub, ms),
-    subs: (lines) => playSubs(lines),
+    subs: (lines, onDone) => playSubs(lines, onDone),
+    clearSubs: () => clearSubs(),
     choice: (title, options, cb) => showChoice(title, options, cb),
-    onDone: () => { applyStage(); showBanner("MISSION 2: THE HOLLOWAY JOB", STAGES[M.stage < 4 ? M.stage : 4].hint, 4200); },
-  });
-  if (M.stage >= 4) { setGone(TARGET); }
-  applyStage();
+    text: (from, msg, onDone) => showText(from, msg, onDone),
+  };
+  initArch({ ...ui, moorings: opts.moorings, onDone: () => { beginT = 25; } });
+  initMidnight({ ...ui, onDone: () => {} });
+  if (archDone() && !midnightStarted()) beginT = 12;
+}
+// Where to put the player when a ?m= jump starts the game (main.js asks).
+export function missionJumpSpot() {
+  if (!jumped) return null;
+  return !archDone() ? archRespawn() : midnightRespawn();
 }
 // Big map open: the mission card, banner and waypoint get out of the way.
-let uiHidden = false;
 export function setMissionUIHidden(h) {
-  uiHidden = h;
-  if (hud) hud.style.visibility = h ? "hidden" : "";
-  if (subsEl) subsEl.style.visibility = h ? "hidden" : "";
-  if (banner) banner.style.visibility = h ? "hidden" : "";
-  if (marker) marker.style.visibility = h ? "hidden" : "";
+  mapOpen = h;
+  for (const el of [hud, subsEl, banner, marker, phoneEl, timerEl]) if (el) el.style.visibility = h ? "hidden" : "";
 }
-// Things a bullet can hit that aren't ordinary solids (the smugglers' boat).
-export const missionShootables = () => toranaShootables();
+const inM2 = () => archDone() && midnightStarted() && !midnightDone();
+// Things a bullet can hit that aren't ordinary solids (boats, chase cars).
+export function missionShootables() {
+  const a = archDone() ? [] : archShootables();
+  const b = carShootables();
+  return a.length ? a.concat(b) : b;
+}
 // A mission gunman hit by a bullet / punch / kick. dmg in hits.
-export const missionHitGoon = (p, dmg, fx, fz, how = "bullet") => toranaHitGoon(p, dmg, fx, fz, how);
+export function missionHitGoon(p, dmg, fx, fz, how = "bullet") {
+  if (!archDone()) archHitGoon(p, dmg, fx, fz, how);
+  else if (inM2()) midnightHitGoon(p, dmg, fx, fz, how);
+}
 // Where to get back up after going down (null = where you fell).
-export const missionRespawn = () => (toranaDone() ? null : toranaRespawn());
-export const missionOnRespawn = () => { if (!toranaDone()) toranaOnRespawn(); };
+export const missionRespawn = () => (!archDone() ? archRespawn() : inM2() ? midnightRespawn() : null);
+export function missionOnRespawn() {
+  if (!archDone()) archOnRespawn();
+  else if (inM2()) midnightOnRespawn();
+}
 // Slow motion for the big moments.
-export const missionTimeScale = () => toranaTimeScale();
-function setStage(s, bannerText) {
-  M.stage = s;
-  persist();
-  applyStage();
-  showBanner(bannerText || STAGES[s].title, s < 4 ? STAGES[s].hint : "");
-}
-// keep the characters where the story needs them
-function applyStage() {
-  const g = charById(GIVER), v = charById(TARGET);
-  if (!toranaDone()) { if (g) g.forceSlot = null; if (v && M.stage < 4) v.forceSlot = null; return; }   // the Holloway job hasn't started yet
-  if (g) g.forceSlot = M.stage <= 1 ? { spot: "square", pose: "inspect", doing: "waiting for someone at the garden square" } : null;
-  if (v && M.stage < 4) v.forceSlot = M.stage >= 2 ? { spot: "times", pose: "lean", doing: "watching the plaza" } : null;
-}
-
-// ---------------------------------------------------------------- dialogue with Holloway
-function storyChoices(c) {
-  if (c.def.id !== GIVER || !toranaDone()) return [];
-  if (M.stage <= 1) {
-    if (!briefed) return [{
-      label: "Mr. Holloway? You sent for me.",
-      go: () => {
-        briefed = true;
-        speakAs(c, "You're the one. Good. Keep your voice down. Vinnie Sour — Midtown loan shark, flat cap, nice coat. " +
-          "I borrowed from him to buy this city and now he's 'reminding' my family. I want him gone. Permanently. " +
-          "He hangs around Times plaza. Do it and there's five hundred in it for you.", "wary", "Mr. Holloway? You sent for me.");
-      },
-    }];
-    return [
-      { label: "Consider it done.", go: () => { speakAs(c, "Don't call me. I'll know when it's done. Now go — Midtown.", "neutral", "Consider it done."); setTimeout(() => setStage(2, "NEW TARGET: VINNIE SOUR"), 1800); } },
-      { label: "Five hundred? For a man's life?", go: () => speakAs(c, "For a loan shark's life. Market rate. Take it or walk.", "wary", "Five hundred? For a man's life?") },
-    ];
-  }
-  if (M.stage < 4) return [{ label: "About Vinnie…", go: () => speakAs(c, "Why are you still standing here? Midtown. Go.", "angry", "About Vinnie…") }];
-  return [{ label: "It's done.", go: () => speakAs(c, "I heard. ...Good. We never met.", "neutral", "It's done.") }];
-}
-
-// ---------------------------------------------------------------- the target goes down
-// force = how hard they were hit (bullets ~3, cars / blasts much more)
-export function missionOnPedDown(p, force) {
-  if (!toranaDone() || M.stage < 2 || M.stage >= 4) return;
-  const v = charById(TARGET);
-  if (!v || v.p !== p) return;
-  if (!chase) startChase(v);                       // shot before he even saw you
-  chase.hp -= force > 6 ? 99 : 1;
-  if (chase.hp <= 0) {
-    p.dead = true; p.chooser = null; p.route = null;
-    v.scripted = true; p.scripted = true;
-    chase = null;
-    addCash(500);
-    M.stage = 4; persist(); applyStage();
-    showBanner("MISSION COMPLETE", "Vinnie Sour is dead. Holloway wires you $500.");
-  } else showBanner("HE'S HIT", `${chase.hp} more to finish him`, 1600);
-}
-
-// ---------------------------------------------------------------- the chase
-function startChase(v) {
-  const p = v.p;
-  v.scripted = true; p.scripted = true;
-  v.forceSlot = null;
-  chase = { stamina: 6, tired: false, hiding: false, lostT: 0, hp: 3 };
-  p.chooser = chooseEscape;
-  if (p.state === "away") return;
-  runAway(p);
-  if (M.stage === 2) setStage(3, "HE'S SPOTTED YOU — CHASE HIM!");
-}
-function runAway(p) {
-  if (!lastPos || p.state === "down") return;
-  p.state = "walk"; p.route = null; p.roam = true;
-  p.phone.setEnabled(false);
-  // run along the street in the direction away from the player
-  const q = pathAtCurrent(p);
-  p.dir = (p.x - lastPos.x) * q.tx + (p.z - lastPos.z) * q.tz >= 0 ? 1 : -1;
-}
-function pathAtCurrent(p) {
-  const e = p.e, i = Math.min(e.xs.length - 2, Math.max(0, e.cum.findIndex((c) => c > p.s) - 1));
-  const tx = e.xs[i + 1] - e.xs[i], tz = e.zs[i + 1] - e.zs[i], l = Math.hypot(tx, tz) || 1;
-  return { tx: tx / l, tz: tz / l };
-}
-// At a junction: take the street whose far end is furthest from the player,
-// avoiding dead ends and anything that heads back toward them.
-function chooseEscape(p, nd, opts) {
-  if (!lastPos) return opts[0];
-  let best = opts[0], bs = -Infinity;
-  for (const e of opts) {
-    const far = e.a === nd ? e.b : e.a;
-    let s = Math.hypot(far.x - lastPos.x, far.z - lastPos.z) - Math.hypot(nd.x - lastPos.x, nd.z - lastPos.z);
-    if (far.edges.length === 1) s -= 120;             // dead end = cornered
-    s += Math.random() * 30;                          // not perfectly predictable
-    if (s > bs) { bs = s; best = e; }
-  }
-  return best;
-}
-function updateChase(dt, v, ctx) {
-  const p = v.p;
-  if (p.dead) return;
-  if (p.state === "away") return;
-  const d = Math.hypot(p.x - ctx.pos.x, p.z - ctx.pos.z);
-  // don't let ordinary street reactions stop him running
-  if (["annoyed", "surrender", "cower", "watch", "wave", "talk", "act", "chat"].includes(p.state) && !chase.hiding) runAway(p);
-  // sprint in bursts, tire, recover — fast, but a determined player catches him
-  if (!chase.tired) { chase.stamina -= dt; if (chase.stamina <= 0) chase.tired = true; }
-  else { chase.stamina += dt * 0.8; if (chase.stamina >= 4.5) chase.tired = false; }
-  p.walk = chase.hiding ? 1.2 : chase.tired ? 2.6 : 5.1;
-  // lose him and he stops to catch his breath; get close again and he bolts
-  if (!chase.hiding) {
-    chase.lostT = d > 170 ? chase.lostT + dt : 0;
-    if (chase.lostT > 6) {
-      chase.hiding = true;
-      p.state = "work"; p.pose = "lean"; p.route = null;
-      showBanner("YOU LOST HIM", "He's catching his breath somewhere — check the map.", 2500);
-    }
-  } else if (d < 35) {
-    chase.hiding = false; chase.stamina = 5; chase.tired = false;
-    runAway(p);
-    showBanner("THERE HE IS!", "", 1400);
-  }
-}
+export const missionTimeScale = () => Math.min(archTimeScale(), midnightTimeScale());
+// (someone was knocked down — the missions track their own people)
+export function missionOnPedDown() {}
 
 // ---------------------------------------------------------------- per frame
-// ctx: { pos, vehicle }
+// ctx: { pos, vehicle, inside }
 export function updateMission(dt, ctx) {
-  lastPos = ctx.pos;
-  if (!toranaDone()) {
-    updateTorana(dt, ctx);
-    renderHud(ctx);
-    return;
-  }
-  if (M.stage === 0 && districtAt(ctx.pos.x, ctx.pos.z) === "london") setStage(1);
-  const v = charById(TARGET);
-  if (M.stage === 2 && v && v.p.state !== "away" && !v.p.dead) {
-    const d = Math.hypot(v.p.x - ctx.pos.x, v.p.z - ctx.pos.z);
-    if (d < (ctx.vehicle ? 40 : 24)) startChase(v);
-  }
-  if (M.stage === 3 && v && chase) updateChase(dt, v, ctx);
+  trackPlayer(dt, ctx.pos);
+  if (goons.length) updateGoons(dt, ctx);
+  updateCars(dt, ctx);
+  if (!archDone()) updateArch(dt, ctx);
+  else if (!midnightStarted()) {
+    if (beginT !== null && !ctx.inside) { beginT -= dt; if (beginT <= 0) { beginT = null; beginMidnight(); } }
+  } else if (!midnightDone()) updateMidnight(dt, ctx);
   renderHud(ctx);
 }
 
 // Where the current objective is (for the maps and the on-screen marker).
 export function missionObjective() {
-  if (!toranaDone()) return toranaObjective();
-  if (M.stage >= 4) return null;
-  if (M.stage === 0) {
-    const sq = (landmarks.londonSquares || [])[0];
-    return sq ? { x: sq.x, z: sq.z, label: "London" } : null;
-  }
-  const c = charById(M.stage === 1 ? GIVER : TARGET);
-  if (!c) return null;
-  if (c.p.state === "away") {
-    if (M.stage === 1) { const sq = (landmarks.londonSquares || [])[0]; return sq ? { x: sq.x, z: sq.z, label: "Holloway" } : null; }
-    return { x: landmarks.times ? landmarks.times.x : 200, z: landmarks.times ? landmarks.times.z : -100, label: "Vinnie" };
-  }
-  return { x: c.p.x, z: c.p.z, label: M.stage === 1 ? "Holloway" : "Vinnie", target: M.stage >= 2 };
+  if (!archDone()) return archObjective();
+  if (inM2()) return midnightObjective();
+  return null;
 }
 
 // ---------------------------------------------------------------- UI
 function injectUI() {
   const css = document.createElement("style");
   css.textContent = `
-  #missionHud{position:fixed;top:92px;right:32px;width:300px;background:rgba(14,16,22,.82);color:#eee;border-left:4px solid #ffcf4a;
+  #missionHud{position:fixed;top:92px;right:32px;width:310px;background:rgba(14,16,22,.82);color:#eee;border-left:4px solid #ffcf4a;
     padding:10px 14px 11px;border-radius:6px;font-family:"Segoe UI",system-ui,sans-serif;z-index:20;pointer-events:none}
   #missionHud .mt{font-size:11px;letter-spacing:2px;color:#ffcf4a;font-weight:700}
   #missionHud .mo{font-size:16px;font-weight:700;margin-top:3px}
   #missionHud .md{font-size:12.5px;opacity:.75;margin-top:3px;line-height:1.35}
   #missionHud .ms{font-size:12px;margin-top:6px;color:#ffcf4a}
+  #missionHud.m2{border-left-color:#e0475a}
+  #missionHud.m2 .mt,#missionHud.m2 .ms{color:#ff8a96}
   #missionBanner{position:fixed;top:24%;left:50%;transform:translate(-50%,-50%);text-align:center;color:#fff;z-index:25;pointer-events:none;
-    font-family:"Segoe UI",system-ui,sans-serif;opacity:0;transition:opacity .45s;text-shadow:0 2px 12px rgba(0,0,0,.7)}
+    font-family:"Segoe UI",system-ui,sans-serif;opacity:0;transition:opacity .45s;text-shadow:0 2px 12px rgba(0,0,0,.7);max-width:80vw}
   #missionBanner.on{opacity:1}
   #missionBanner b{display:block;font-size:34px;font-weight:900;letter-spacing:3px;color:#ffcf4a}
   #missionBanner span{display:block;font-size:17px;margin-top:6px;opacity:.9}
@@ -248,22 +128,38 @@ function injectUI() {
     text-shadow:0 1px 4px #000;pointer-events:none;z-index:19;display:none}
   #missionMarker i{display:block;font-style:normal;font-size:22px;line-height:18px}
   #missionSubs{position:fixed;left:50%;bottom:118px;transform:translateX(-50%);max-width:780px;width:80%;text-align:center;z-index:24;pointer-events:none;
-    font:600 19px/1.4 "Segoe UI",system-ui,sans-serif;color:#fff;text-shadow:0 2px 6px #000,0 0 2px #000;opacity:0;transition:opacity .25s}
+    font:600 19px/1.4 "Segoe UI",system-ui,sans-serif;color:#fff;text-shadow:0 2px 6px #000,0 0 2px #000;opacity:0;transition:opacity .2s;
+    background:rgba(8,10,14,.55);border-radius:8px;padding:10px 18px 8px}
+  #missionSubs .k,#missionPhone .k{display:block;margin-top:6px;font:600 12px "Segoe UI",system-ui,sans-serif;opacity:.75;letter-spacing:1px;text-shadow:none}
+  #missionSubs .k kbd,#missionPhone .k kbd{display:inline-block;padding:0 6px;margin-right:5px;border-radius:4px;background:#eee;color:#222;font:700 11px/18px monospace}
+  #missionPhone .k{color:#555;text-align:right}
   #missionSubs.on{opacity:1}
   #missionSubs b{color:#ffcf4a;font-weight:800;letter-spacing:1px;margin-right:8px}
-  #missionChoice{position:fixed;left:50%;bottom:150px;transform:translateX(-50%);background:rgba(12,14,20,.88);border-top:3px solid #ffcf4a;border-radius:6px;
+  #missionChoice{position:fixed;left:50%;bottom:150px;transform:translateX(-50%);background:rgba(12,14,20,.9);border-top:3px solid #ffcf4a;border-radius:6px;
     padding:14px 22px;z-index:26;font:15px "Segoe UI",system-ui,sans-serif;color:#eee;display:none;min-width:360px}
   #missionChoice .t{font-size:12px;letter-spacing:2px;color:#ffcf4a;font-weight:700;margin-bottom:8px}
   #missionChoice div.o{margin:5px 0}
   #missionChoice kbd{display:inline-block;min-width:20px;padding:0 6px;margin-right:8px;border-radius:4px;background:#eee;color:#222;font:700 13px/22px monospace;text-align:center}
-  @media (max-width:640px){#missionHud{width:auto;left:16px;right:16px;top:auto;bottom:150px}}`;
+  #missionPhone{position:fixed;right:32px;top:300px;width:280px;background:#f4f2ec;color:#1d1d1f;border-radius:16px;padding:10px 14px 12px;z-index:22;
+    pointer-events:none;font-family:"Segoe UI",system-ui,sans-serif;box-shadow:0 8px 26px rgba(0,0,0,.45);opacity:0;transform:translateX(30px);
+    transition:opacity .35s,transform .35s}
+  #missionPhone.on{opacity:1;transform:none}
+  #missionPhone .f{font-size:11px;font-weight:800;letter-spacing:1.5px;color:#8a1f2c;display:flex;justify-content:space-between}
+  #missionPhone .f small{font-weight:600;color:#777;letter-spacing:0}
+  #missionPhone .b{margin-top:6px;font-size:14.5px;line-height:1.38;background:#e4e1d8;border-radius:12px 12px 12px 3px;padding:8px 11px}
+  #missionTimer{position:fixed;top:22px;left:50%;transform:translateX(-50%);z-index:21;pointer-events:none;text-align:center;display:none;
+    font-family:"Segoe UI",system-ui,sans-serif;color:#fff;text-shadow:0 2px 10px rgba(0,0,0,.8)}
+  #missionTimer small{display:block;font-size:11px;letter-spacing:3px;font-weight:700;color:#ffcf4a}
+  #missionTimer b{display:block;font:800 40px/1.05 "Consolas","Courier New",monospace;letter-spacing:2px}
+  #missionTimer.hot b{color:#ff4a4a}
+  @media (max-width:640px){#missionHud{width:auto;left:16px;right:16px;top:auto;bottom:150px}#missionPhone{top:auto;bottom:260px;right:16px}}`;
   document.head.appendChild(css);
-  hud = document.createElement("div"); hud.id = "missionHud"; document.body.appendChild(hud);
-  banner = document.createElement("div"); banner.id = "missionBanner"; document.body.appendChild(banner);
-  marker = document.createElement("div"); marker.id = "missionMarker"; document.body.appendChild(marker);
-  subsEl = document.createElement("div"); subsEl.id = "missionSubs"; document.body.appendChild(subsEl);
-  choiceEl = document.createElement("div"); choiceEl.id = "missionChoice"; document.body.appendChild(choiceEl);
+  const mk = (id) => { const e = document.createElement("div"); e.id = id; document.body.appendChild(e); return e; };
+  hud = mk("missionHud"); banner = mk("missionBanner"); marker = mk("missionMarker");
+  subsEl = mk("missionSubs"); choiceEl = mk("missionChoice"); phoneEl = mk("missionPhone"); timerEl = mk("missionTimer");
   window.addEventListener("keydown", (e) => {
+    // C: on to the next line of dialogue / close the message
+    if (e.code === "KeyC" && !e.repeat && !mapOpen && cur && cur !== BUSY && performance.now() - shownAt > 250) { nextLine(); return; }
     if (!choiceCb) return;
     const n = { Digit1: 0, Digit2: 1, Digit3: 2, Numpad1: 0, Numpad2: 1, Numpad3: 2 }[e.code];
     if (n === undefined || n >= choiceN) return;
@@ -273,19 +169,46 @@ function injectUI() {
     cb(n);
   });
 }
-// ---- subtitles: [{ who, text, dur }] played one after another
-let subsEl, choiceEl, choiceCb = null, choiceN = 0, subsTimer = null;
-function playSubs(lines) {
-  clearTimeout(subsTimer);
-  const q = lines.slice();
-  const next = () => {
-    const l = q.shift();
-    if (!l) { subsEl.classList.remove("on"); return; }
-    subsEl.innerHTML = l.who ? `<b>${l.who}</b>${l.text}` : l.text;
-    subsEl.classList.add("on");
-    subsTimer = setTimeout(next, (l.dur || Math.max(2.2, l.text.length * 0.055)) * 1000);
-  };
-  next();
+// ---- dialogue: [{ who, text }] lines and phone messages, shown one at a
+// time; each stays up until the player presses C. Everything queues, so
+// nothing is ever cut off, and onDone runs once a batch has been read.
+let subsEl, choiceEl, choiceCb = null, choiceN = 0, mapOpen = false;
+const subQ = [];                 // [{ lines, onDone }]
+const BUSY = {};
+let cur = null, shownAt = 0;
+function playSubs(lines, onDone) {
+  subQ.push({ lines: lines.slice(), onDone });
+  if (!cur) nextLine();
+}
+function nextLine() {
+  phoneEl.classList.remove("on");
+  for (;;) {
+    const b = subQ[0];
+    if (!b) { cur = null; subsEl.classList.remove("on"); return; }
+    if (b.lines.length) { cur = b.lines.shift(); showLine(cur); return; }
+    subQ.shift();
+    if (b.onDone) { cur = BUSY; try { b.onDone(); } catch (err) { console.error(err); } }   // (may queue more lines — they show next)
+  }
+}
+const KEY = `<span class="k"><kbd>C</kbd> continue</span>`;
+function showLine(l) {
+  shownAt = performance.now();
+  if (l.phone) {
+    sfx.phoneBuzz();
+    subsEl.classList.remove("on");
+    phoneEl.innerHTML = `<div class="f"><span>✉ ${l.who}</span><small>now</small></div><div class="b">${l.text}</div>${KEY}`;
+    phoneEl.classList.add("on");
+    return;
+  }
+  subsEl.innerHTML = (l.who ? `<b>${l.who}</b>${l.text}` : l.text) + KEY;
+  subsEl.classList.add("on");
+}
+// a failed attempt: drop whatever was still waiting to be read
+function clearSubs() {
+  subQ.length = 0;
+  cur = null;
+  subsEl.classList.remove("on");
+  phoneEl.classList.remove("on");
 }
 // ---- a decision: number keys pick
 function showChoice(title, options, cb) {
@@ -293,6 +216,10 @@ function showChoice(title, options, cb) {
   choiceEl.style.display = "block";
   choiceCb = cb;
   choiceN = options.length;
+}
+// ---- a message on your phone (in the same queue: it waits for C too)
+function showText(from, msg, onDone) {
+  playSubs([{ phone: true, who: from, text: msg }], onDone);
 }
 let bannerTimer = null;
 function showBanner(title, sub = "", ms = 3200) {
@@ -302,42 +229,42 @@ function showBanner(title, sub = "", ms = 3200) {
   clearTimeout(bannerTimer);
   bannerTimer = setTimeout(() => banner.classList.remove("on"), ms);
 }
-let lastHtml = "", doneHideAt = 0;
+let lastHtml = "", doneHideAt = 0, doneKey = "";
 // DOM writes only when something actually changed (each write can force a re-layout)
 const domCache = new WeakMap();
 function setStyle(el, k, v) {
   let c = domCache.get(el);
   if (!c) domCache.set(el, (c = {}));
-  if (c[k] !== v) { c[k] = v; if (k === "html") el.innerHTML = v; else el.style[k] = v; }
+  if (c[k] !== v) { c[k] = v; if (k === "html") el.innerHTML = v; else if (k === "class") el.className = v; else el.style[k] = v; }
 }
 const V = BABYLON.Vector3, TMP = new V(0, 0, 0);
+const fmt = (t) => { const s = Math.ceil(t); return `${String(Math.floor(s / 60)).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}`; };
 function renderHud(ctx) {
   const obj = missionObjective();
   const dist = obj ? Math.round(Math.hypot(obj.x - ctx.pos.x, obj.z - ctx.pos.z)) : null;
-  let html, done;
-  if (!toranaDone()) {
-    const c = toranaCard();
-    html = `<div class="mt">${c.name}</div><div class="mo">${c.title}</div><div class="md">${c.hint}</div>` +
-      (obj || c.extra ? `<div class="ms">${obj ? obj.label : ""}${c.extra ? (obj ? " · " : "") + c.extra : ""}</div>` : "");
-    done = false;
-  } else {
-    const st = STAGES[Math.min(M.stage, 4)];
-    let extra = "";
-    if (M.stage === 3 && chase) extra = chase.hiding ? "He's stopped to catch his breath." : chase.tired ? "He's tiring — close in!" : "He's sprinting.";
-    if (M.stage === 3 && chase) extra += ` &nbsp;·&nbsp; ${"●".repeat(Math.max(0, chase.hp))}${"○".repeat(3 - Math.max(0, chase.hp))}`;
-    html = M.stage >= 4
-      ? `<div class="mt">MISSION 2 — COMPLETE</div><div class="mo">The Holloway Job</div><div class="md">${st.hint}</div>`
-      : `<div class="mt">MISSION 2 — THE HOLLOWAY JOB</div><div class="mo">${st.title}</div><div class="md">${st.hint}</div>` +
-        (obj ? `<div class="ms">${obj.label}${extra ? " · " + extra : ""}</div>` : "");
-    done = M.stage >= 4;
-  }
+  let card = null, m2 = false;
+  if (!archDone()) card = archCard();
+  else if (inM2()) { card = midnightCard(); m2 = true; }
+  else if (midnightDone()) card = { name: "MISSION 2 — COMPLETE", title: "Midnight Bells", hint: "The story's over — for now. The four cities are yours.", done: true };
+  else card = { name: "MISSION 1 — COMPLETE", title: "The Golden Arch", hint: "The arch is home. Enjoy the city... for now.", done: true };
+  const html = `<div class="mt">${card.name}</div><div class="mo">${card.title}</div><div class="md">${card.hint}</div>` +
+    (obj || card.extra ? `<div class="ms">${obj ? `${obj.label}` : ""}${card.extra ? (obj ? " · " : "") + card.extra : ""}</div>` : "");
   if (html !== lastHtml) { hud.innerHTML = html; lastHtml = html; }
-  if (done && !doneHideAt) doneHideAt = performance.now() + 15000;      // the "complete" card fades after a while
-  setStyle(hud, "display", done && performance.now() > doneHideAt ? "none" : "block");
+  setStyle(hud, "class", m2 || midnightDone() ? "m2" : "");
+  // the "complete" card fades after a while
+  const key = card.done ? card.name : "";
+  if (key !== doneKey) { doneKey = key; doneHideAt = key ? performance.now() + 15000 : 0; }
+  setStyle(hud, "display", card.done && performance.now() > doneHideAt ? "none" : "block");
+  // the countdown
+  if (card.timer !== undefined && card.timer !== null) {
+    setStyle(timerEl, "display", "block");
+    setStyle(timerEl, "class", card.timer <= 30 ? "hot" : "");
+    setStyle(timerEl, "html", `<small>MIDNIGHT IN</small><b>${fmt(card.timer)}</b>`);
+  } else setStyle(timerEl, "display", "none");
   // on-screen waypoint over the objective
   // (no waypoint inside a house: interiors are built far off the map)
   if (!obj || dist < 4 || ctx.inside) { setStyle(marker, "display", "none"); return; }
-  TMP.set(obj.x, obj.y !== undefined ? obj.y + 4.5 : terrainH(obj.x, obj.z) + (obj.target ? 2.6 : 6), obj.z);
+  TMP.set(obj.x, obj.y !== undefined && obj.y !== null ? obj.y + 4.5 : terrainH(obj.x, obj.z) + (obj.target ? 2.6 : 6), obj.z);
   const w = engine.getRenderWidth(), h = engine.getRenderHeight();
   const s = V.Project(TMP, BABYLON.Matrix.IdentityReadOnly, scene.getTransformMatrix(), camera.viewport.toGlobal(w, h));
   if (s.z < 0 || s.z > 1) { setStyle(marker, "display", "none"); return; }

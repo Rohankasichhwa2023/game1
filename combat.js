@@ -264,7 +264,7 @@ export function enemyObjective(me) {
 export function bossBar(kind) {
   const g = goons.find((q) => q.kind === kind && !q.p.dead);
   if (!g) return "";
-  const n = Math.ceil((g.hp / g.max) * 8);
+  const n = Math.max(0, Math.min(8, Math.ceil((g.hp / g.max) * 8)));
   return `${g.label} ${"█".repeat(n)}${"░".repeat(8 - n)}`;
 }
 

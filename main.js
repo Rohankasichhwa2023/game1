@@ -108,6 +108,27 @@ import {
 import { KTM, KTM_CORE } from "./kathmandu.js";
 import { buildSwayambhu } from "./swayambhu.js";
 import { initWildlife, updateWildlife, wildlifeShootables, wildlifeRespawn, wildlifeOnRespawn } from "./wildlife.js";
+import {
+  buildHimalaya,
+  buildHimalayaGateway,
+  tintBackdrop,
+  himAtmosphere,
+  enterHimalaya,
+  leaveHimalaya,
+  himTrigger,
+  altitudeAt,
+  updateHimalaya,
+  showRealmLoading,
+  setRealmProgress,
+  hideRealmLoading,
+  himalayaBuilt,
+  himalayaRoot,
+  himMapData,
+  himObjective,
+  climberSpots,
+  WORLD_GATE,
+} from "./himalaya.js";
+import { HIM, REALM } from "./realm.js";
 import { TERRAIN_BOX } from "./terrain.js";
 import { buildBridges, seaAt, deckAt, landSdf, onBridge } from "./water.js";
 import { buildCoast, buildBridgeStructures, buildDocks, animateSea } from "./coast.js";
@@ -146,6 +167,26 @@ import {
 } from "./people.js";
 import * as sfx from "./sound.js";
 import {
+  initMelee,
+  updateMelee,
+  poseMelee,
+  meleeAttack,
+  meleeCounter,
+  meleeBlock,
+  meleeBlocking,
+  meleeWantsDodge,
+  meleeDodge,
+  meleeLocked,
+  meleeVel,
+  meleeFacing,
+  meleeCam,
+  meleeView,
+  meleeEyeY,
+  meleeTimeScale,
+  meleeStyle,
+  cycleStyle,
+} from "./melee.js";
+import {
   spawnCharacters,
   updateCharacters,
   hideCharacterUI,
@@ -153,6 +194,8 @@ import {
   talkPrompt,
   characterMarkers,
 } from "./characters.js";
+
+let realm = false; // up in the Himalayas (himalaya.js: only the range is drawn)
 
 // ---------------------------------------------------------------- build the world
 // The build is one long piece of work, so it's done in stages with a short
@@ -352,6 +395,8 @@ spawnPeds(300);
 spawnDistrictPeds("kathmandu", 300); // Kathmandu's busy lanes (dormant while you're elsewhere)
 await loadStep(95, "The story");
 spawnCharacters();
+buildHimalayaGateway(); // the pass north of Swayambhu (the range itself is only built when you first walk up it)
+// (no far snow-peak backdrop in the world: the mountains only exist inside the Himalayas)
 initWildlife({
   hurtPlayer: (n, fx, fz) => hurtPlayer(n, fx, fz),
   playerDead: () => playerDead,
@@ -664,7 +709,7 @@ const starTex = canvasTex(
 );
 const skyDome = MB.CreateSphere(
   "sky",
-  { diameter: 2600, segments: 16, sideOrientation: BABYLON.Mesh.BACKSIDE },
+  { diameter: 6300, segments: 16, sideOrientation: BABYLON.Mesh.BACKSIDE }, // (the far Himalayan skyline sits inside it)
   scene,
 );
 const skyMat = new BABYLON.StandardMaterial("skyM", scene);
@@ -692,6 +737,128 @@ moon.billboardMode = BABYLON.Mesh.BILLBOARDMODE_ALL;
 moon.infiniteDistance = true;
 moon.position.set(-700, 520, 650);
 moon.setEnabled(false);
+
+// ---------------------------------------------------------------- sun disc + clouds
+// The daytime sky is the clear colour; on it sit a sun (a glowing billboard
+// where the sun light comes from) and a ring of soft clouds drifting slowly
+// round the horizon. Both are "infinitely far" (they move with the camera),
+// unfogged, and tinted by the time of day: white at noon, gold at sunrise /
+// sunset, dim blue-grey at night.
+const sunTex = radialTex(
+  "sunDisc",
+  [
+    [0, "rgba(255,255,248,1)"],
+    [0.1, "rgba(255,250,225,1)"],
+    [0.14, "rgba(255,236,170,0.75)"],
+    [0.3, "rgba(255,214,140,0.22)"],
+    [0.6, "rgba(255,200,130,0.06)"],
+    [1, "rgba(255,200,130,0)"],
+  ],
+  256,
+);
+const sunDisc = MB.CreatePlane("sunDisc", { size: 260 }, scene);
+const sunDiscMat = new BABYLON.StandardMaterial("sunDiscM", scene);
+sunDiscMat.disableLighting = true;
+sunDiscMat.emissiveTexture = sunTex;
+sunDiscMat.opacityTexture = sunTex;
+sunDiscMat.fogEnabled = false;
+sunDiscMat.disableDepthWrite = true;
+sunDiscMat.backFaceCulling = false;
+sunDisc.material = sunDiscMat;
+sunDisc.billboardMode = BABYLON.Mesh.BILLBOARDMODE_ALL;
+sunDisc.infiniteDistance = true;
+sunDisc.isPickable = false;
+// cloud textures: puffs of soft overlapping blobs, flat-ish underneath and a
+// touch greyer there
+function cloudTex(name, seed) {
+  let s = seed;
+  const R = () => ((s = (s * 16807) % 2147483647) / 2147483647);
+  const t = canvasTex(
+    name,
+    256,
+    (ctx, W, H) => {
+      ctx.clearRect(0, 0, W, H);
+      const n = 11 + Math.floor(R() * 6);
+      for (let i = 0; i < n; i++) {
+        const x = W * (0.18 + R() * 0.64),
+          y = H * (0.42 + R() * 0.3),
+          r = H * (0.17 + R() * 0.2);
+        const g = ctx.createRadialGradient(x, y - r * 0.25, 0, x, y, r);
+        g.addColorStop(0, "rgba(255,255,255,0.95)");
+        g.addColorStop(0.55, "rgba(246,248,252,0.75)");
+        g.addColorStop(1, "rgba(228,233,242,0)");
+        ctx.fillStyle = g;
+        ctx.beginPath();
+        ctx.arc(x, y, r, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      // a soft grey underside
+      ctx.globalCompositeOperation = "source-atop";
+      const u = ctx.createLinearGradient(0, H * 0.45, 0, H);
+      u.addColorStop(0, "rgba(180,188,204,0)");
+      u.addColorStop(1, "rgba(170,178,196,0.6)");
+      ctx.fillStyle = u;
+      ctx.fillRect(0, 0, W, H);
+      ctx.globalCompositeOperation = "source-over";
+    },
+    false,
+    128,
+  );
+  t.hasAlpha = true;
+  t.wrapU = t.wrapV = BABYLON.Texture.CLAMP_ADDRESSMODE;
+  return t;
+}
+const cloudMats = [11, 47, 83].map((seed, i) => {
+  const tex = cloudTex("cloud" + i, seed);
+  const m = new BABYLON.StandardMaterial("cloudM" + i, scene);
+  m.disableLighting = true;
+  m.emissiveTexture = tex;
+  m.opacityTexture = tex;
+  m.fogEnabled = false;
+  m.disableDepthWrite = true;
+  m.backFaceCulling = false;
+  return m;
+});
+const clouds = [];
+for (let i = 0; i < 16; i++) {
+  const w = rr(300, 560);
+  const c = MB.CreatePlane("cloud", { width: w, height: w * 0.5 }, scene);
+  c.material = cloudMats[i % cloudMats.length];
+  c.billboardMode = BABYLON.Mesh.BILLBOARDMODE_ALL;
+  c.infiniteDistance = true;
+  c.isPickable = false;
+  clouds.push({ m: c, a: (i / 16) * Math.PI * 2 + rr(-0.15, 0.15), d: rr(1000, 1180), y: rr(150, 380), sp: rr(0.6, 1.4) });
+}
+let cloudDrift = 0;
+function updateSky(dt) {
+  cloudDrift += dt * 0.0035; // a slow drift round the sky
+  for (const c of clouds) {
+    if (c.m.isEnabled() === realm) c.m.setEnabled(!realm); // (the range has its own clouds)
+    const a = c.a + cloudDrift * c.sp;
+    c.m.position.set(Math.cos(a) * c.d, c.y, Math.sin(a) * c.d);
+  }
+}
+updateSky(0);
+// called from applyTimeOfDay: f = 0 night … 1 day, warmth = golden hour, elev = sun height
+function tintSky(f, warmth, elev) {
+  const d = sun.direction;
+  const far = realm ? 8 : 1; // up in the range the peaks are kilometres off: the sky sits beyond them
+  sunDisc.position.set(-d.x * 1050 * far, -d.y * 1050 * far, -d.z * 1050 * far);
+  sunDisc.scaling.setAll(far);
+  const sv = smooth(-0.04, 0.12, elev);
+  sunDisc.setEnabled(sv > 0.01);
+  sunDiscMat.alpha = sv;
+  sunTex.level = 1;
+  sunDiscMat.emissiveColor = lerpC(new C3(0, 0, 0), new C3(0.25, 0.1, 0.0), warmth);
+  // clouds: bright by day, gold-edged at dusk, dim at night
+  const lvl = 0.14 + 0.86 * f;
+  const tint = lerpC(new C3(0.02, 0.03, 0.06), new C3(0.32, 0.13, 0.03), warmth * (0.4 + 0.6 * f));
+  for (const m of cloudMats) {
+    m.emissiveTexture.level = lvl * (1 - 0.25 * warmth);
+    m.emissiveColor = tint;
+    m.alpha = 0.55 + 0.4 * f;
+  }
+}
 const beamTex = canvasTex(
   "beam",
   256,
@@ -814,7 +981,15 @@ function applyTimeOfDay() {
   skyDome.setEnabled(skyMat.alpha > 0.01);
   moonMat.alpha = skyMat.alpha;
   moon.setEnabled(skyMat.alpha > 0.01);
-  moon.position.set(-sx * 800, Math.max(120, -elev * 700 + 250), 450); // rises opposite the sun
+  {
+    const far = realm ? 8 : 1;
+    moon.position.set(-sx * 800 * far, Math.max(120, -elev * 700 + 250) * far, 450 * far); // rises opposite the sun
+    moon.scaling.setAll(far);
+    skyDome.scaling.setAll(realm ? 2.8 : 1);
+  }
+  tintSky(f, warmth, elev);
+  tintBackdrop(f, warmth);
+  if (realm) himAtmosphere(f, warmth);
   glow.intensity = 0.42 + 0.55 * lit;
   // bloom only once it's getting dark (lamps / windows / headlights matter);
   // in full daylight it was the biggest GPU cost for very little to see
@@ -847,7 +1022,9 @@ function setTime(h) {
 
 // ---------------------------------------------------------------- input
 const keys = {};
-let meleeQueued = false;
+let meleeQueued = false,
+  counterQueued = false,
+  fistRight = false; // right mouse held with fists out (block)
 let interactQueued = false,
   swingQueued = false,
   zipQueued = false;
@@ -866,6 +1043,11 @@ window.addEventListener("keydown", (e) => {
     document.getElementById("controls").classList.toggle("show");
   }
   if (e.code === "Space") e.preventDefault();
+  // in a fist fight Space dodges (flip / cartwheel) instead of jumping
+  if (e.code === "Space" && !e.repeat && !bigMapOpen && meleeWantsDodge()) {
+    meleeDodge();
+    return;
+  }
   // Full map (M) — while it is open the game ignores movement keys.
   if (e.code === "KeyM" && !e.repeat) {
     toggleBigMap();
@@ -882,12 +1064,18 @@ window.addEventListener("keydown", (e) => {
   if (e.code === "KeyQ") meleeQueued = true;
   if (e.code === "KeyF") toggleWeapon();
   if (e.code === "KeyN") skipTime();
+  if (e.code === "KeyV") toggleFirstPerson();
+  if (e.code === "KeyG") cycleStyle();
+  if (e.code === "KeyR") counterQueued = true; // counter (or block while held)
 });
 window.addEventListener("keyup", (e) => {
   keys[e.code] = false;
+  if (e.code === "KeyR") meleeBlock(!!(fistRight && weapon === "fists"));
 });
 window.addEventListener("blur", () => {
   for (const k in keys) keys[k] = false;
+  fistRight = false;
+  meleeBlock(false);
   firing = false;
   aiming = false;
   webHeld = false;
@@ -911,7 +1099,8 @@ const locked = () => document.pointerLockElement === canvas;
 // events). Buttons come from the bitmask so left+right together works.
 // The click that captures the mouse must not also shoot / fire a web: its
 // buttons are ignored until they've been released.
-let swallowClick = false;
+let swallowClick = false,
+  fistLeft = false;
 const syncButtons = (e) => {
   if (!locked()) return;
   if (swallowClick) {
@@ -919,7 +1108,17 @@ const syncButtons = (e) => {
     return;
   }
   const left = (e.buttons & 1) !== 0;
-  if (weapon === "gun") {
+  if (weapon === "fists") {
+    // left: strike · right: counter (press) / block (hold)
+    if (left && !fistLeft) meleeQueued = true;
+    fistLeft = left;
+    const right = (e.buttons & 2) !== 0;
+    if (right && !fistRight) counterQueued = true;
+    fistRight = right;
+    meleeBlock(right || !!keys.KeyR);
+    firing = aiming = false;
+    webHeld = zipHeld = false;
+  } else if (weapon === "gun") {
     firing = left;
     aiming = (e.buttons & 2) !== 0;
   } else {
@@ -933,7 +1132,9 @@ const syncButtons = (e) => {
   }
 };
 function toggleWeapon() {
-  weapon = weapon === "gun" ? "web" : "gun";
+  weapon = weapon === "gun" ? "web" : weapon === "web" ? "fists" : "gun";
+  fistLeft = fistRight = false;
+  meleeBlock(false);
   firing = false;
   aiming = false;
   webHeld = false;
@@ -943,7 +1144,9 @@ function toggleWeapon() {
 const weaponLabel = () =>
   weapon === "gun"
     ? "Gun <small><kbd>F</kbd> switch</small>"
-    : "Web shooter <small><kbd>F</kbd> switch</small>";
+    : weapon === "web"
+      ? "Web shooter <small><kbd>F</kbd> switch</small>"
+      : `Fists · ${meleeStyle()} <small><kbd>G</kbd> style · <kbd>F</kbd> switch</small>`;
 gun.setEnabled(weapon === "gun");
 canvas.addEventListener("pointerdown", (e) => {
   if (!locked()) {
@@ -969,6 +1172,8 @@ document.addEventListener("pointerlockchange", () => {
     aiming = false;
     webHeld = false;
     zipHeld = false;
+    fistLeft = fistRight = false;
+    meleeBlock(!!keys.KeyR);
   }
 });
 document.addEventListener("pointermove", (e) => {
@@ -1515,6 +1720,10 @@ function drawRope(hx, hy, hz, ex, ey, ez, sag, wave, phase) {
 }
 // World position of a hand (forces the arm's matrices so the web starts there this frame).
 function handPos(arm) {
+  if (fpWas) {
+    const a = arm === armL ? vmL : vmR;
+    if (a.sh.isEnabled()) return vmWorld(a.hand);
+  }
   player.computeWorldMatrix(true);
   stuntPivot.computeWorldMatrix(true);
   stuntOff.computeWorldMatrix(true);
@@ -1756,7 +1965,8 @@ function canWeb() {
 }
 // Which hand shoots: the one on the anchor's side.
 function armToward(x, z) {
-  return (x - pos.x) * Math.cos(facing) - (z - pos.z) * Math.sin(facing) >= 0
+  const f = fpActive() ? yaw : facing;
+  return (x - pos.x) * Math.cos(f) - (z - pos.z) * Math.sin(f) >= 0
     ? armR
     : armL;
 }
@@ -2098,10 +2308,7 @@ function updateSwing(dt) {
     }
   }
   if (!swing) return;
-  if (!home) {
-    pos.x = clamp(pos.x, WORLD.x0 + 2, WORLD.x1 - 2);
-    pos.z = clamp(pos.z, WORLD.z0 + 2, WORLD.z1 - 2);
-  }
+  clampToWorld();
   // swung up level with the anchor, or let go → release with a fling
   if (taut && !s.launch && pos.y + HAND > s.ay - 1.2 && s.vy > 0)
     endSwing(true);
@@ -2211,10 +2418,7 @@ function updateZip(dt) {
       if (z.vy < 0) z.vy = 0;
     }
   }
-  if (!home) {
-    pos.x = clamp(pos.x, WORLD.x0 + 2, WORLD.x1 - 2);
-    pos.z = clamp(pos.z, WORLD.z0 + 2, WORLD.z1 - 2);
-  }
+  clampToWorld();
   // stuck behind something, or taking too long: let go with what we have
   if (d < z.best - 0.5) {
     z.best = d;
@@ -2512,6 +2716,7 @@ function easeRot(node, axis, v, k) {
   node.rotation[axis] += (v - node.rotation[axis]) * k;
 }
 function updatePlayer(dt) {
+  slopeMoving = false;
   if (swing || zip) {
     if (swing) updateSwing(dt);
     else updateZip(dt);
@@ -2561,13 +2766,15 @@ function updatePlayer(dt) {
       mz -= rightZ;
     }
   }
+  if (meleeLocked()) mx = mz = 0; // a strike / dodge is moving the body
   const len = Math.hypot(mx, mz);
-  const running = (keys.ShiftLeft || keys.ShiftRight) && !aiming;
+  const blocking = meleeBlocking();
+  const running = (keys.ShiftLeft || keys.ShiftRight) && !aiming && !blocking;
   const speed = swimming
     ? running
       ? 3.6
       : 2.3
-    : aiming
+    : aiming || blocking
       ? 2.6
       : running
         ? 9
@@ -2579,6 +2786,8 @@ function updatePlayer(dt) {
   const flying = !onGround && (airVel.x !== 0 || airVel.z !== 0);
   let dx = 0,
     dz = 0;
+  climbSl = 0;
+  climbMul = 1;
   if (flying) {
     if (len > 0) {
       const cap = Math.max(Math.hypot(airVel.x, airVel.z), 9);
@@ -2608,11 +2817,26 @@ function updatePlayer(dt) {
     dx += airVel.x * dt;
     dz += airVel.z * dt;
   } else if (len > 0) {
-    dx += (mx / len) * speed * dt;
-    dz += (mz / len) * speed * dt;
+    // up in the mountains: hard going up the steep stuff
+    let climb = 1;
+    if (realm && onGround) {
+      const sl = terrainSlope(pos.x, pos.z, mx / len, mz / len);
+      climbSl = sl;
+      if (sl > 0.35) climb = clamp(1 - (sl - 0.35) * 0.55, 0.38, 1);
+      if (sl > 0.9) climb = Math.min(climb, 1.5 / speed); // scrambling on all fours: slow
+      else if (sl < -0.6) climb = 0.7; // picking your way down
+    }
+    climbMul = climb;
+    dx += (mx / len) * speed * dt * climb;
+    dz += (mz / len) * speed * dt * climb;
   }
   dx += pushX * dt;
   dz += pushZ * dt;
+  {
+    const mv = meleeVel(); // lunges, dodges, knock-back in a fist fight
+    dx += mv.x * dt;
+    dz += mv.z * dt;
+  }
   const pk = Math.exp(-4 * dt);
   pushX *= pk;
   pushZ *= pk;
@@ -2679,6 +2903,10 @@ function updatePlayer(dt) {
       angDiff(Math.atan2(airVel.x, airVel.z), facing) * Math.min(1, dt * 6);
   else if (len > 0)
     facing += angDiff(Math.atan2(mx, mz), facing) * Math.min(1, dt * 12);
+  {
+    const mf = meleeFacing();
+    if (mf !== null && (meleeLocked() || !gunUp)) facing = mf;
+  }
   moveAmt +=
     ((len > 0 ? (running ? 1 : 0.6) : 0) - moveAmt) * Math.min(1, dt * 10);
   updateSprintTip(
@@ -2687,7 +2915,7 @@ function updatePlayer(dt) {
     onGround && len > 0 && running && !swimming,
   );
 
-  if (onGround && keys.Space && !downed) {
+  if (onGround && keys.Space && !downed && !meleeLocked()) {
     vy = swimming ? 6.8 : 7.2;
     onGround = false;
   }
@@ -2714,10 +2942,7 @@ function updatePlayer(dt) {
     pos.y = ny;
     onGround = false;
   }
-  if (!home) {
-    pos.x = clamp(pos.x, WORLD.x0 + 2, WORLD.x1 - 2);
-    pos.z = clamp(pos.z, WORLD.z0 + 2, WORLD.z1 - 2);
-  }
+  clampToWorld();
 
   for (const t of traffic) {
     const ddx = pos.x - t.vx,
@@ -2760,7 +2985,7 @@ function updatePlayer(dt) {
   }
   blob.setEnabled(true);
   const stepBefore = Math.floor(walkPhase / Math.PI);
-  walkPhase += dt * (running ? 11 : 7.5) * (len > 0 ? 1 : 0);
+  walkPhase += dt * (running ? 11 : 7.5) * (len > 0 ? 1 : 0) * Math.max(0.5, climbMul);
   if (
     onGround &&
     len > 0 &&
@@ -2840,8 +3065,87 @@ function updatePlayer(dt) {
     armL.sh.rotation.x = -2.4;
     armR.sh.rotation.x = -2.1;
   }
-  if (strikeT > 0) poseStrike(dt);
+  slopeMoving = len > 0 && !downed && onGround && !swimming;
 }
+// Up in the mountains the body follows the ground: leaning into a hike up a
+// slope (high knees, arms pumping), down on all fours scrambling up the steep
+// faces (hands reaching up the rock in turn, knees pushing), crouched and
+// leaning back with arms out for balance coming down. Blended over the walk.
+let climbSl = 0,
+  slopeMoving = false,
+  climbMul = 1,
+  slHike = 0,
+  slCrawl = 0,
+  slDown = 0;
+function poseSlope(dt, moving) {
+  const k = Math.min(1, dt * 6);
+  const sl = moving ? climbSl : 0;
+  slHike += (smooth(0.3, 0.7, sl) - slHike) * k;
+  slCrawl += (smooth(0.8, 1.25, sl) - slCrawl) * k;
+  slDown += (smooth(0.3, 0.85, -sl) - slDown) * k;
+  body.position.z = 0;
+  if (slHike + slCrawl + slDown < 0.01 || slopeGunUp() || strikeLocked()) return;
+  const s = Math.sin(walkPhase),
+    s2 = Math.sin(walkPhase + 1.2);
+  const mix = (node, axis, v, w) => {
+    if (w > 0.001) node.rotation[axis] += (v - node.rotation[axis]) * w;
+  };
+  const H = slHike * (1 - slCrawl),
+    C = slCrawl,
+    D = slDown;
+  if (H > 0.001) {
+    mix(body, "x", 0.34, H);
+    mix(armL.sh, "x", 0.7 * s - 0.35, H);
+    mix(armR.sh, "x", -0.7 * s - 0.35, H);
+    mix(armL.el, "x", -1.0, H);
+    mix(armR.el, "x", -1.0, H);
+    mix(legL.hip, "x", -0.65 * s - 0.25, H);
+    mix(legR.hip, "x", 0.65 * s - 0.25, H);
+    mix(legL.knee, "x", 0.35 + 0.95 * Math.max(0, s2), H);
+    mix(legR.knee, "x", 0.35 + 0.95 * Math.max(0, -s2), H);
+  }
+  if (C > 0.001) {
+    // Flat on your chest along the face (tipped forward from the feet by
+    // 90° minus the slope's angle, so the body lies parallel to it), held off
+    // the snow by the body's thickness along the slope's normal; arms reach
+    // up the slope hand over hand, knees bent and splayed out like a
+    // spider's, drawing up in turn.
+    const a = Math.atan(Math.max(climbSl, 0.7));
+    mix(body, "x", Math.PI / 2 - a, C);
+    body.position.y += 0.3 * Math.cos(a) * C;
+    body.position.z = -0.3 * Math.sin(a) * C;
+    const sl = Math.max(0, s),
+      sr = Math.max(0, -s);
+    mix(armL.sh, "x", -2.85 + 0.5 * s, C);
+    mix(armR.sh, "x", -2.85 - 0.5 * s, C);
+    mix(armL.sh, "z", -0.5, C);
+    mix(armR.sh, "z", 0.5, C);
+    mix(armL.el, "x", -0.45 - 0.5 * sr, C);
+    mix(armR.el, "x", -0.45 - 0.5 * sl, C);
+    mix(legL.hip, "x", -0.3 - 0.25 * sl, C);
+    mix(legR.hip, "x", -0.3 - 0.25 * sr, C);
+    mix(legL.hip, "z", -(0.45 + 0.5 * sl), C);
+    mix(legR.hip, "z", 0.45 + 0.5 * sr, C);
+    mix(legL.knee, "x", 0.55 + 0.7 * sl, C);
+    mix(legR.knee, "x", 0.55 + 0.7 * sr, C);
+  }
+  if (D > 0.001) {
+    mix(body, "x", -0.24, D);
+    body.position.y += -0.14 * D;
+    mix(armL.sh, "x", -0.55, D);
+    mix(armR.sh, "x", -0.55, D);
+    mix(armL.sh, "z", -0.75, D);
+    mix(armR.sh, "z", 0.75, D);
+    mix(armL.el, "x", -0.45, D);
+    mix(armR.el, "x", -0.45, D);
+    mix(legL.hip, "x", -0.4 * s - 0.25, D);
+    mix(legR.hip, "x", 0.4 * s - 0.25, D);
+    mix(legL.knee, "x", 0.65 + 0.4 * Math.max(0, s2), D);
+    mix(legR.knee, "x", 0.65 + 0.4 * Math.max(0, -s2), D);
+  }
+}
+const slopeGunUp = () => aiming || aimTimer > 0;
+const strikeLocked = () => meleeLocked() || meleeBlocking();
 
 // Front crawl: body sunk to the waist and tilted forward (more upright when
 // treading water), arms windmilling in turn, a flutter kick, a gentle bob.
@@ -2919,6 +3223,7 @@ function enterVehicle(v) {
     else player.position.set(0, 0.1, -0.22);
     player.rotation.y = 0;
     body.position.y = 0;
+    body.position.z = 0; // (in case you were crawling up a slope)
     body.rotation.x = 0.28;
     legL.hip.rotation.x = legR.hip.rotation.x = -1.35;
     legL.knee.rotation.x = legR.knee.rotation.x = 1.3;
@@ -3039,12 +3344,17 @@ function nearestUsable() {
   }
   return best;
 }
+let steepToastAt = 0;
 function updateVehicle(dt) {
   const v = vehicle;
   const boat = v.kind === "boat";
   const res = boat
     ? driveBoat(v, dt, keys)
     : driveVehicle(v, dt, keys, enterables, supportHeight);
+  if (res.steep && performance.now() > steepToastAt) {
+    steepToastAt = performance.now() + 5000;
+    toast("TOO STEEP<small>The snowmobile only goes on the flatter ground round base camp</small>", 2200);
+  }
   if (res.impact > 5) {
     onCrash(v, res);
     if (vehicle !== v) return;
@@ -3054,6 +3364,7 @@ function updateVehicle(dt) {
     if (res.impact > 2.5)
       sfx.bump(res.impact, res.traffic || res.vehicle ? "vehicle" : "wall");
   }
+  if (!boat) tyreFx(v, res, dt); // drifting / skidding: smoke off the back tyres
   if (res.scrape && Math.random() < 0.6) {
     // grinding along a wall
     const side = Math.random() < 0.5 ? -1 : 1,
@@ -3085,6 +3396,13 @@ function updateVehicle(dt) {
   }
   if (performance.now() - lastMouseAt > 1200 && Math.abs(v.speed) > 2)
     yaw += angDiff(v.heading, yaw) * Math.min(1, dt * 2.5);
+  if (realm) {
+    // (the snowmobile stays in the walkable part of the range, like you)
+    const p = v.mesh.position,
+      L = HIM.walk;
+    p.x = clamp(p.x, HIM.x - L, HIM.x + L);
+    p.z = clamp(p.z, HIM.z - L, HIM.z + L);
+  }
   pos.copyFrom(v.mesh.position);
   if (state.night) {
     beam.setEnabled(true);
@@ -3299,6 +3617,62 @@ crashDust.gravity = new V3(0, 0.4, 0);
 crashDust.blendMode = BABYLON.ParticleSystem.BLENDMODE_STANDARD;
 crashDust.emitRate = 0;
 crashDust.start();
+// Tyre smoke: puffs off the back wheels while a car drifts / skids (one
+// emitter per back tyre — a particle system emits from wherever its emitter
+// is when the frame is drawn).
+function makeTyreSmoke(name) {
+  const ps = new BABYLON.ParticleSystem(name, 200, scene);
+  ps.particleTexture = smokeTex;
+  ps.emitter = new V3(0, -100, 0);
+  ps.minEmitBox = new V3(-0.15, 0, -0.15);
+  ps.maxEmitBox = new V3(0.15, 0.15, 0.15);
+  ps.color1 = new BABYLON.Color4(0.86, 0.86, 0.86, 0.42);
+  ps.color2 = new BABYLON.Color4(0.72, 0.72, 0.74, 0.34);
+  ps.colorDead = new BABYLON.Color4(0.7, 0.7, 0.7, 0);
+  ps.minSize = 0.7;
+  ps.maxSize = 1.6;
+  ps.addSizeGradient(0, 0.5);
+  ps.addSizeGradient(1, 2.4);
+  ps.minLifeTime = 0.9;
+  ps.maxLifeTime = 1.8;
+  ps.direction1 = new V3(-0.6, 0.4, -0.6);
+  ps.direction2 = new V3(0.6, 1.1, 0.6);
+  ps.minEmitPower = 0.4;
+  ps.maxEmitPower = 1.0;
+  ps.gravity = new V3(0, 0.35, 0);
+  ps.blendMode = BABYLON.ParticleSystem.BLENDMODE_STANDARD;
+  ps.emitRate = 0;
+  ps.start();
+  return ps;
+}
+const tyreSmoke = [makeTyreSmoke("tyreSmokeL"), makeTyreSmoke("tyreSmokeR")];
+let skidAmt = 0,
+  smokeAcc = 0;
+function tyreFx(v, res, dt) {
+  skidAmt += ((res.skid || 0) - skidAmt) * Math.min(1, dt * 10);
+  if (skidAmt < 0.15) return;
+  // a few puffs a second per tyre — more the harder it slides
+  smokeAcc += skidAmt * 18 * dt;
+  const n = Math.floor(smokeAcc);
+  if (!n) return;
+  smokeAcc -= n;
+  const sp = specOf(v),
+    h = v.heading,
+    back = -sp.hd * 0.72,
+    bike = v.kind === "bike",
+    p = v.mesh.position;
+  for (let i = 0; i < (bike ? 1 : 2); i++) {
+    const lx = bike ? 0 : sp.hw * 0.85 * (i ? 1 : -1),
+      ps = tyreSmoke[i];
+    if (!ps.emitter || ps.emitter.y < -50) ps.emitter = new V3();
+    ps.emitter.set(
+      p.x + Math.sin(h) * back + Math.cos(h) * lx,
+      p.y + 0.15,
+      p.z + Math.cos(h) * back - Math.sin(h) * lx,
+    );
+    ps.manualEmitCount = Math.max(ps.manualEmitCount, 0) + n;
+  }
+}
 // Debris chunks + glass shards fly off and fall.
 const debrisT = MB.CreateBox("debris", { size: 1 }, scene);
 debrisT.material = litMat("debrisM", hex("#2a2b2e"), 0.3);
@@ -3339,8 +3713,19 @@ function debris(at, n, power) {
 canvas.addEventListener("pointerdown", () => sfx.unlock());
 // Is (x, z) open water — the sea (unless you're up on a bridge deck over it)
 // or the London river (not on one of its bridges)? y = your height.
+// keep to the map (or, up in the Himalayas, to the walkable part of the range)
+function clampToWorld() {
+  if (home) return;
+  if (realm) {
+    pos.x = clamp(pos.x, HIM.x - HIM.walk, HIM.x + HIM.walk);
+    pos.z = clamp(pos.z, HIM.z - HIM.walk, HIM.z + HIM.walk);
+    return;
+  }
+  pos.x = clamp(pos.x, WORLD.x0 + 2, WORLD.x1 - 2);
+  pos.z = clamp(pos.z, WORLD.z0 + 2, WORLD.z1 - 2);
+}
 function inWater(x, z, y = pos.y) {
-  if (home) return false; // (interiors are built far out in what is now open sea)
+  if (home || realm) return false; // (interiors are built far out in what is now open sea)
   if (seaAt(x, z)) return !(onBridge(x, z) && y >= deckAt(x, z) - 1.6);
   return riverDist(x, z) < RW - 0.3 && roadDist(x, z) > 0;
 }
@@ -3355,7 +3740,7 @@ function panOf(x, z) {
 // up to someone (at most one every few seconds, so a crowd isn't a chorus).
 let nextTalkAt = 0;
 pedHooks.onDown = (p, force) => {
-  sfx.npcDeath(Math.hypot(p.x - pos.x, p.z - pos.z), panOf(p.x, p.z));
+  if (!p.ko) sfx.npcDeath(Math.hypot(p.x - pos.x, p.z - pos.z), panOf(p.x, p.z)); // (a knockout isn't a death)
   missionOnPedDown(p, force);
 };
 pedHooks.onNear = (p, d) => {
@@ -3526,7 +3911,7 @@ function damageTraffic(t) {
 function aimRay() {
   const o = camera.position.clone();
   const d = camera.getDirection(BABYLON.Axis.Z).normalize();
-  const tmin = Math.max(0.3, V3.Dot(camTarget.subtract(o), d) + 0.5);
+  const tmin = fpActive() ? 0.15 : Math.max(0.3, V3.Dot(camTarget.subtract(o), d) + 0.5);
   return { o, d, tmin };
 }
 let aimElev = 0;
@@ -3543,6 +3928,9 @@ function poseToward(x, y, z, dt = 1) {
 }
 
 let shotCooldown = 0;
+function tryFire() {
+  if (firing && locked() && shotCooldown <= 0 && downTimer <= 0) fire();
+}
 function fire() {
   shotCooldown = 0.16;
   sfx.gunshot();
@@ -3568,7 +3956,25 @@ function fire() {
     muzzle,
   ])
     n.computeWorldMatrix(true);
-  const m = muzzle.getAbsolutePosition().clone();
+  let m = muzzle.getAbsolutePosition().clone();
+  if (fpWas) {
+    // first person: the shot goes straight down the line of sight; the tracer
+    // starts at the gun in your hand (raised at once if it was still coming up)
+    vmR.up = 1;
+    if (!vmR.sh.isEnabled()) vmR.sh.setEnabled(true);
+    poseVmArm(vmR);
+    vmGun.setEnabled(true);
+    m = vmWorld(vmMuzzle).clone();
+    vmKick = 1;
+    tracer(m, aimPt);
+    spark(m, 0.12, 0.05);
+    scare(pos.x, pos.z, 45);
+    if (aim.hit) {
+      spark(aimPt.subtract(d.scale(0.05)));
+      shotHit(aim.hit, d);
+    }
+    return;
+  }
   // 3) the bullet travels from the muzzle to that point; a wall or car in
   //    between (e.g. shooting round a corner) stops it first
   const toAim = aimPt.subtract(m);
@@ -3589,12 +3995,270 @@ function fire() {
   scare(pos.x, pos.z, 45);
   if (hit) {
     spark(end.subtract(dir.scale(0.05)));
-    if (hit.solid && hit.solid.vehicle) damageVehicle(hit.solid.vehicle);
-    else if (hit.traffic) damageTraffic(hit.traffic);
-    else if (hit.mission) hit.mission.onHit();
-    else if (hit.ped && hit.ped.goon) missionHitGoon(hit.ped, 1, dir.x, dir.z);
-    else if (hit.ped) knockDown(hit.ped, dir.x * 3, dir.z * 3);
+    shotHit(hit, dir);
   }
+}
+function shotHit(hit, dir) {
+  if (hit.solid && hit.solid.vehicle) damageVehicle(hit.solid.vehicle);
+  else if (hit.traffic) damageTraffic(hit.traffic);
+  else if (hit.mission) hit.mission.onHit();
+  else if (hit.ped && hit.ped.goon) missionHitGoon(hit.ped, 1, dir.x, dir.z);
+  else if (hit.ped) knockDown(hit.ped, dir.x * 3, dir.z * 3);
+}
+
+// ---------------------------------------------------------------- first-person view
+// V toggles it (on foot only: vehicles keep the chase camera). The camera sits
+// at the eyes and the body is hidden; the arms only show while they're doing
+// something: the gun arm comes up to shoot / aim, the web arm reaches up the
+// line while swinging or zipping, a fist jabs out for a punch. They're a
+// separate "view model" fixed to the camera and drawn on top of the world (own
+// rendering group, depth cleared first), so they never poke into a wall.
+const FP_STORE = "firstPerson";
+let firstPerson = false;
+try {
+  firstPerson = localStorage.getItem(FP_STORE) === "1";
+} catch (e) {}
+const fpActive = () => firstPerson && !vehicle;
+const VM_GROUP = 2; // reticles use 1; the hands go over everything
+const vmRoot = new BABYLON.TransformNode("vmRoot", scene);
+vmRoot.parent = camera;
+const vmPart = (m, mat, parent, x, y, z) => {
+  m.material = mat;
+  m.parent = parent;
+  m.position.set(x, y, z);
+  m.renderingGroupId = VM_GROUP;
+  m.layerMask = BOTH_MASK;
+  m.isPickable = false;
+  return m;
+};
+// Built pointing along +z (forward, in camera space): shoulder → elbow → fist.
+function makeVmArm(side) {
+  const sh = pivot(vmRoot, side * 0.2, -0.24, 0);
+  const upper = vmPart(
+    MB.CreateCapsule("vmSleeve", { radius: 0.075, height: 0.36, tessellation: 12, subdivisions: 2 }, scene),
+    jacketMat, sh, 0, 0, 0.14,
+  );
+  upper.rotation.x = Math.PI / 2;
+  const el = pivot(sh, 0, 0, 0.3);
+  const fore = vmPart(
+    MB.CreateCapsule("vmFore", { radius: 0.062, height: 0.32, tessellation: 12, subdivisions: 2 }, scene),
+    jacketMat, el, 0, 0, 0.13,
+  );
+  fore.rotation.x = Math.PI / 2;
+  const cuff = vmPart(
+    MB.CreateCylinder("vmCuff", { diameter: 0.135, height: 0.05, tessellation: 14 }, scene),
+    trimMat, el, 0, 0, 0.26,
+  );
+  cuff.rotation.x = Math.PI / 2;
+  const fist = vmPart(MB.CreateSphere("vmFist", { diameter: 0.115, segments: 12 }, scene), gloveMat, el, 0, -0.005, 0.32);
+  fist.scaling.set(0.88, 0.8, 1.15);
+  // knuckle ridge so the fist reads as a hand, not a ball
+  const kn = vmPart(MB.CreateCapsule("vmKnuckle", { radius: 0.024, height: 0.1, tessellation: 8 }, scene), gloveMat, el, 0, 0.012, 0.365);
+  kn.rotation.z = Math.PI / 2;
+  const hand = pivot(el, 0, 0, 0.36); // where a web leaves the wrist
+  sh.setEnabled(false);
+  // cur: the pose it's easing through; up: 0 lowered out of view … 1 raised
+  return { side, sh, el, hand, up: 0, cur: { yaw: 0, pitch: 0, bend: 0, x: 0, y: 0, z: 0 } };
+}
+const vmL = makeVmArm(-1),
+  vmR = makeVmArm(1);
+// pistol in the right fist (slide above the hand, grip down into it)
+const vmGun = pivot(vmR.el, 0, 0, 0);
+for (const [w, h, d, x, y, z, rx] of [
+  [0.048, 0.072, 0.25, 0, 0.068, 0.38, 0],
+  [0.044, 0.13, 0.058, 0, 0.0, 0.31, 0.22],
+  [0.02, 0.018, 0.03, 0, 0.11, 0.48, 0], // front sight
+]) {
+  const b = vmPart(MB.CreateBox("vmGunPart", { width: w, height: h, depth: d }, scene), gunMat, vmGun, x, y, z);
+  b.rotation.x = rx;
+}
+const vmMuzzle = pivot(vmGun, 0, 0.068, 0.52);
+let vmKick = 0, // recoil (1 on a shot, decays)
+  fpEye = 1.66,
+  fpSwayX = 0,
+  fpSwayY = 0,
+  fpLastYaw = 0,
+  fpLastPitch = 0,
+  fpWas = false;
+const _vmd = new V3(),
+  _vmc = new V3();
+// World position of a view-model node this frame (camera + chain forced current).
+function vmWorld(node) {
+  camera.computeWorldMatrix(true);
+  for (const n of [vmRoot, vmR.sh, vmR.el, vmL.sh, vmL.el, vmGun, node]) n.computeWorldMatrix(true);
+  return node.getAbsolutePosition();
+}
+// Pose that reaches from the shoulder toward a world point (clamped so the arm
+// stays roughly in front of you, coming in from its own side of the screen).
+function vmReach(arm, x, y, z, out) {
+  _vmd.set(x - camera.position.x, y - camera.position.y, z - camera.position.z);
+  V3.TransformNormalToRef(_vmd, camera.getViewMatrix(), _vmc);
+  const cz = Math.max(_vmc.z, 0.35 * Math.hypot(_vmc.x, _vmc.y, _vmc.z));
+  out.yaw = clamp(Math.atan2(_vmc.x, cz), arm.side > 0 ? -0.25 : -0.95, arm.side > 0 ? 0.95 : 0.25);
+  out.pitch = clamp(Math.atan2(_vmc.y, Math.hypot(_vmc.x, cz)), -0.35, 1.2);
+  out.bend = 0;
+  out.x = arm.side * 0.22;
+  out.y = -0.25;
+  out.z = 0;
+  return out;
+}
+const vmPose = (o, yaw, pitch, bend, x, y, z) => {
+  o.yaw = yaw;
+  o.pitch = pitch;
+  o.bend = bend;
+  o.x = x;
+  o.y = y;
+  o.z = z;
+  return o;
+};
+function poseVmArm(a) {
+  const c = a.cur,
+    down = 1 - a.up;
+  const kick = a === vmR ? vmKick : 0;
+  a.sh.position.set(c.x, c.y - down * 0.5, c.z - kick * 0.07 - down * 0.1);
+  a.sh.rotation.set(-(c.pitch - down * 0.7 + kick * 0.16), c.yaw, 0);
+  a.el.rotation.x = c.bend;
+}
+const _tL = {},
+  _tR = {};
+// A body arm pose (shoulder swing / spread, elbow) as a view-model pose.
+function vmFromBody(a, sx, sz, el, mv, o) {
+  return vmPose(
+    o,
+    a.side * (sz - 0.15) * 0.6 - a.side * 0.08,
+    clamp(-sx - Math.PI / 2, -1.1, 1.2),
+    clamp(el, -2.3, 0),
+    a.side * 0.2,
+    -0.24 + clamp(mv.y, -0.3, 0.3) * 0.3,
+    -a.side * mv.twist * 0.22 + mv.lean * 0.12 - 0.04,
+  );
+}
+function updateViewModel(dt) {
+  const fp = fpActive() && !homeBusy;
+  if (fp !== fpWas) {
+    fpWas = fp;
+    for (const m of player.getChildMeshes(false)) m.isVisible = !fp;
+    if (!fp) {
+      vmL.sh.setEnabled(false);
+      vmR.sh.setEnabled(false);
+      vmL.up = vmR.up = 0;
+    }
+  }
+  if (!fp) return;
+  vmKick *= Math.exp(-dt * 14);
+  // what each hand is doing this frame (null = lowered out of view)
+  let tL = null,
+    tR = null;
+  const w = swing || zip;
+  const gunUp = weapon === "gun" && !swimming && downTimer <= 0 && (aiming || firing || aimTimer > 0);
+  if (w) {
+    if (w.arm === armL) tL = vmReach(vmL, w.ax, w.ay, w.az, _tL);
+    else tR = vmReach(vmR, w.ax, w.ay, w.az, _tR);
+  } else if (ropeFx && ropeFx.kind === "miss") {
+    // missed web: the right wrist flicks up and forward
+    const c = camera.position;
+    tR = vmReach(vmR, c.x + ropeFx.dx * 20, c.y + ropeFx.dy * 20, c.z + ropeFx.dz * 20, _tR);
+  }
+  const mv = !w && !gunUp ? meleeView() : null;
+  if (mv) {
+    // fists: the same pose as the body's (guard, punches, blocks), seen from the eyes
+    tL = vmFromBody(vmL, mv.aLx, mv.aLz, mv.eL, mv, _tL);
+    tR = vmFromBody(vmR, mv.aRx, mv.aRz, mv.eR, mv, _tR);
+  } else if (gunUp && !tR) {
+    // hip: low on the right; aiming: brought in under the crosshair
+    tR = aiming
+      ? vmPose(_tR, -0.13, 0.0, 0, 0.095, -0.165, -0.05)
+      : vmPose(_tR, -0.12, -0.04, -0.06, 0.2, -0.22, 0);
+  }
+  vmGun.setEnabled(weapon === "gun" && !w && !mv);
+  // sway: the hands trail the view a touch as you turn; bob as you walk
+  const kS = 1 - Math.exp(-dt * 9);
+  const dYaw = angDiff(yaw, fpLastYaw),
+    dPitch = pitch - fpLastPitch;
+  fpLastYaw = yaw;
+  fpLastPitch = pitch;
+  fpSwayX += (clamp(-dYaw * 0.35, -0.05, 0.05) - fpSwayX) * kS;
+  fpSwayY += (clamp(dPitch * 0.35, -0.04, 0.04) - fpSwayY) * kS;
+  const walk = onGround && !swing && !zip ? moveAmt : 0;
+  vmRoot.position.set(
+    fpSwayX + Math.cos(walkPhase) * 0.012 * walk,
+    fpSwayY - Math.abs(Math.sin(walkPhase)) * 0.016 * walk,
+    0,
+  );
+  const kP = 1 - Math.exp(-dt * 18);
+  for (const [a, t] of [
+    [vmL, tL],
+    [vmR, tR],
+  ]) {
+    const want = t ? 1 : 0;
+    // the gun snaps up fast; everything lowers a little slower
+    a.up += (want - a.up) * (1 - Math.exp(-dt * (want ? 22 : 9)));
+    if (!t && a.up < 0.02) {
+      a.up = 0;
+      if (a.sh.isEnabled()) a.sh.setEnabled(false);
+      continue;
+    }
+    if (t) {
+      const c = a.cur;
+      if (!a.sh.isEnabled()) Object.assign(c, t); // rise straight into the new pose
+      else {
+        c.yaw += (t.yaw - c.yaw) * kP;
+        c.pitch += (t.pitch - c.pitch) * kP;
+        c.bend += (t.bend - c.bend) * kP;
+        c.x += (t.x - c.x) * kP;
+        c.y += (t.y - c.y) * kP;
+        c.z += (t.z - c.z) * kP;
+      }
+    }
+    if (!a.sh.isEnabled()) a.sh.setEnabled(true);
+    poseVmArm(a);
+  }
+}
+function toggleFirstPerson() {
+  firstPerson = !firstPerson;
+  try {
+    localStorage.setItem(FP_STORE, firstPerson ? "1" : "0");
+  } catch (e) {}
+  fpLastYaw = yaw;
+  fpLastPitch = pitch;
+  toast(
+    firstPerson
+      ? "FIRST-PERSON VIEW<small>V for third person</small>"
+      : "THIRD-PERSON VIEW<small>V for first person</small>",
+  );
+}
+// Camera at the eyes, looking where the mouse points.
+function updateFirstPersonCamera(dt) {
+  const v = playerVel(),
+    hs = Math.hypot(v.x, v.z),
+    sp = Math.hypot(hs, v.y);
+  const airborne = !home && (!!swing || !!zip || !onGround);
+  let eye = 1.66;
+  if (swimming) eye = 0.55;
+  if (downTimer > 0) eye = 0.35;
+  eye -= landT * 0.32; // landing crouch
+  fpEye += (eye - fpEye) * (1 - Math.exp(-dt * 10));
+  const footY = airborne || visY === null || Math.abs(visY - pos.y) > 1 ? pos.y : visY;
+  const bob = airborne || swimming ? 0 : Math.abs(Math.cos(walkPhase)) * 0.04 * moveAmt;
+  camera.position.set(pos.x, footY + fpEye + bob + meleeEyeY(), pos.z);
+  camTarget.copyFrom(camera.position);
+  // keep the chase camera's state in step, so V back out blends smoothly
+  camBase.copyFrom(camera.position);
+  camOff.set(0, 0, 0);
+  camPivotY = camPrevY = pos.y;
+  // never any roll: the horizon stays level (see keepCameraLevel)
+  camera.rotation.set(clamp(pitch - vmKick * 0.025, -1.5, 1.5), yaw, 0);
+  if (shake > 0.001) {
+    const s = shake * shake * 0.18;
+    camera.position.addInPlaceFromFloats(
+      (Math.random() - 0.5) * s,
+      (Math.random() - 0.5) * s,
+      (Math.random() - 0.5) * s,
+    );
+    shake = Math.max(0, shake - dt * 1.6);
+  }
+  const fovT = aiming ? 0.62 : 1.05 + clamp((airborne ? sp : 0) / SWING_MAX, 0, 1) * 0.25;
+  camera.fov += (fovT - camera.fov) * Math.min(1, dt * 10);
 }
 
 // ---------------------------------------------------------------- camera
@@ -3658,10 +4322,38 @@ const camLook = { x: 0, z: 0 },
 const ORBIT_MIN = -0.45; // lowest the camera orbits (looking up past this tilts the view instead)
 const SWING_ORBIT = 0.2; // while web-swinging the camera rides a little above, looking along the street
 let lookUp = 0;
+// The camera never rolls. (Babylon re-aims the camera's up vector whenever its
+// roll changes, baking the pitch / yaw of that moment into it — an earlier
+// first-person swing lean did that and left the whole world tilted.)
+function keepCameraLevel() {
+  const u = camera.upVector;
+  if (u.x !== 0 || u.y !== 1 || u.z !== 0) u.set(0, 1, 0);
+  if (camera.rotation.z !== 0) camera.rotation.z = 0;
+}
+// how far back the camera arm (from the pivot, at pitch tp) runs before it
+// meets the ground (dist = all the way clear)
+let terrRaise = 0;
+function armClear(tp, dist) {
+  const c = Math.cos(tp),
+    dx = -Math.sin(yaw) * c,
+    dy = Math.sin(tp),
+    dz = -Math.cos(yaw) * c;
+  for (let s = 0.8; s <= dist + 0.01; s += 0.6) {
+    const x = camTarget.x + dx * s,
+      z = camTarget.z + dz * s;
+    if (camTarget.y + dy * s < terrainH(x, z) + 0.7) return Math.max(0, s - 0.6);
+  }
+  return dist;
+}
 function updateCamera(dt) {
+  keepCameraLevel();
   if (!camInit) {
     camInit = true;
     camBase.copyFrom(camera.position);
+  }
+  if (fpActive()) {
+    updateFirstPersonCamera(dt);
+    return;
   }
   // On foot the camera sits over the right shoulder so the crosshair (screen
   // centre) is never hidden behind the player; aiming pulls it in tighter.
@@ -3707,6 +4399,7 @@ function updateCamera(dt) {
     ((free ? clamp((sp - 8) / 30, 0, 1) * 2 : 0) - camExtra) *
     Math.min(1, dt * 2.5);
   dist += camExtra + SWING_EXTRA_DIST * swingCam; // swinging: sit further back to see more of the city
+  if (free) dist += 1.6 * meleeCam(); // fist fight: back a little to see who's coming
   const la = free && airborne && hs > 0.5 ? Math.min(hs * 0.08, 2.4) / hs : 0;
   const kl = Math.min(1, dt * 3);
   camLook.x += (v.x * la - camLook.x) * kl;
@@ -3826,16 +4519,33 @@ function updateCamera(dt) {
     slopeT = terrainSlope(pos.x, pos.z, Math.sin(hd) * 3, Math.cos(hd) * 3) / 3;
   }
   camSlope += (slopeT - camSlope) * Math.min(1, dt * 2.5);
-  const p = clamp(
+  let p = clamp(
     p0 + camRaise * swingCam - Math.atan(camSlope) * (vehicle ? 0.85 : 0.6),
     -0.35,
     1.25,
   );
+  // up in the mountains: if the hillside is in the way of the camera, swing
+  // it up over the slope (rather than into the ground, or right into you)
+  let terrD = Infinity;
+  if (realm && !vehicle) {
+    // swing up a little over the slope (not more than ~25°)...
+    let want = 0;
+    for (let i = 0; i <= 4; i++) {
+      const tp = Math.min(1.1, p + i * 0.11);
+      want = tp - p;
+      if (armClear(tp, dist) >= dist) break;
+    }
+    terrRaise += (want - terrRaise) * Math.min(1, dt * (want > terrRaise ? 9 : 2));
+    p = Math.min(1.1, p + terrRaise);
+    // ...and come in closer if the snow's still in the way
+    terrD = armClear(p, dist);
+  } else terrRaise = 0;
   const cp = Math.cos(p);
   const dx = -Math.sin(yaw) * cp,
     dy = Math.sin(p),
     dz = -Math.cos(yaw) * cp;
   let d = camProbe(dx, dy, dz, dist, m, big);
+  if (terrD < d) d = Math.max(1.4, terrD);
   // (the swing camera used to be held at least 3 m back even when a wall was
   // closer than that — which parked it inside the building)
   // zoom in quickly when something gets in the way (instantly if the camera would
@@ -3899,7 +4609,7 @@ function updateCamera(dt) {
     camOcc = Math.min(camOcc, d);
   }
   {
-    const gy = landH(camera.position.x, camera.position.z) + 0.15; // last-resort only
+    const gy = landH(camera.position.x, camera.position.z) + (realm ? 0.6 : 0.15); // last-resort only
     if (camera.position.y < gy) camera.position.y = gy;
   }
   // remember where the camera sits before the shake is added, so next frame
@@ -3934,6 +4644,7 @@ function updateCamera(dt) {
     );
     camera.setTarget(lookAt);
   } else camera.setTarget(camTarget);
+  keepCameraLevel();
   const airSpeed = airborne ? sp : 0;
   const fovT =
     aiming && !vehicle
@@ -3970,6 +4681,7 @@ const DISTRICTS = {
   kathmandu: ["KATHMANDU", "Alleys, temples and the old Palace Square"],
   swayambhu: ["SWAYAMBHU", "The great stupa on the forest hill — keep to the stairs"],
   river: ["THE THAMES", "Crossing the river"],
+  himalaya: ["THE HIMALAYAS", "Everest base camp — yetis roam the ice beyond the camp"],
 };
 let curDistrict = null,
   districtTimer = null,
@@ -4034,6 +4746,11 @@ function updateSound(dt) {
     const v = playerVel();
     windSpeed = Math.hypot(v.x, v.y, v.z);
   }
+  // up in the mountains the wind never stops (gusting)
+  if (realm) {
+    const t = performance.now() / 1000;
+    windSpeed = Math.max(windSpeed, 13 + 7 * Math.sin(t * 0.37) * Math.sin(t * 0.13 + 1));
+  }
   let traf = null;
   if (!home) {
     let bd = 45;
@@ -4052,7 +4769,7 @@ function updateSound(dt) {
     windSpeed,
     horn: !!(vehicle && keys.KeyH),
     night: state.night,
-    inside: !!home,
+    inside: !!home || realm,
     traffic: traf,
     swim,
   });
@@ -4071,6 +4788,16 @@ function updateHud(dt) {
       loc = `${e.name} · ${fl === 0 ? "Lobby" : fl >= e.F ? "Roof" : "Floor " + fl}`;
       break;
     }
+  }
+  if (realm) {
+    const o = himObjective(pos),
+      dx = o.x - pos.x,
+      dz = o.z - pos.z,
+      d = Math.hypot(dx, dz);
+    let rel = Math.atan2(dx, dz) - yaw;
+    rel = Math.atan2(Math.sin(rel), Math.cos(rel));
+    const arrow = ["↑", "↗", "→", "↘", "↓", "↙", "←", "↖"][(Math.round(rel / (Math.PI / 4)) + 8) % 8];
+    loc = `Altitude ${altitudeAt(pos.y).toLocaleString()} m · ${o.label} ${arrow} ${d > 1000 ? (d / 1000).toFixed(1) + " km" : Math.round(d) + " m"}`;
   }
   if (!loc && !vehicle && aboveGround() > 8 && onGround) loc = "Rooftop";
   if (!loc && !vehicle && swimming)
@@ -4100,6 +4827,8 @@ function updateHud(dt) {
   // out on the water (or on a bridge over it) the islands' names don't apply
   const dname = home
     ? curDistrict
+    : realm
+      ? "himalaya"
     : seaAt(pos.x, pos.z)
       ? onBridge(pos.x, pos.z) && !vehicleIsBoat()
         ? "bridge"
@@ -4149,7 +4878,11 @@ const mctx = mm.getContext("2d");
 const baked = document.createElement("canvas");
 baked.width = WORLD.x1 - WORLD.x0;
 baked.height = WORLD.z1 - WORLD.z0;
-const toMap = (x, z) => [x - WORLD.x0, WORLD.z1 - z];
+const toMapCity = (x, z) => [x - WORLD.x0, WORLD.z1 - z];
+// (up in the Himalayas the minimap and the full map show the range instead)
+let toMap = toMapCity,
+  mapImg = baked,
+  himMap = null;
 {
   const c = baked.getContext("2d");
   c.fillStyle = "#1c2a1f";
@@ -4259,6 +4992,7 @@ const toMap = (x, z) => [x - WORLD.x0, WORLD.z1 - z];
 function drawMinimap() {
   mm.style.display = home ? "none" : "";
   if (home) return;
+  const msc = realm ? 1.5 : 0.9; // (the mountain map is 8 m to a pixel: zoomed in)
   const W = mm.width,
     R = W / 2;
   mctx.save();
@@ -4270,14 +5004,14 @@ function drawMinimap() {
   mctx.fillRect(0, 0, W, W);
   mctx.translate(R, R);
   mctx.rotate(-yaw);
-  mctx.scale(0.9, 0.9);
+  mctx.scale(msc, msc);
   const [px, pz] = toMap(pos.x, pos.z);
   // only the patch of the baked map around the player (not the whole image every frame)
   {
-    const r = Math.ceil((R / 0.9) * 1.42) + 2;
+    const r = Math.ceil((R / msc) * 1.42) + 2;
     const sx0 = Math.max(0, Math.floor(px - r)), sz0 = Math.max(0, Math.floor(pz - r));
-    const sx1 = Math.min(baked.width, Math.ceil(px + r)), sz1 = Math.min(baked.height, Math.ceil(pz + r));
-    if (sx1 > sx0 && sz1 > sz0) mctx.drawImage(baked, sx0, sz0, sx1 - sx0, sz1 - sz0, sx0 - px, sz0 - pz, sx1 - sx0, sz1 - sz0);
+    const sx1 = Math.min(mapImg.width, Math.ceil(px + r)), sz1 = Math.min(mapImg.height, Math.ceil(pz + r));
+    if (sx1 > sx0 && sz1 > sz0) mctx.drawImage(mapImg, sx0, sz0, sx1 - sx0, sz1 - sz0, sx0 - px, sz0 - pz, sx1 - sx0, sz1 - sz0);
   }
   const dot = (x, z, r, col) => {
     const [tx, tz] = toMap(x, z);
@@ -4290,20 +5024,60 @@ function drawMinimap() {
     mctx.fill();
   };
   // story characters: pink dots with a white ring
-  for (const m of characterMarkers()) {
+  for (const m of realm ? [] : characterMarkers()) {
     dot(m.x, m.z, 5.2, "#ffffff");
     dot(m.x, m.z, 3.8, "#ff4fb8");
+  }
+  if (!realm) {
+    // the Himalaya pass: a little blue mountain (pinned to the rim when it's off the map)
+    const [qx, qz] = toMap(WORLD_GATE.x, WORLD_GATE.z);
+    let dx = qx - px,
+      dz = qz - pz;
+    const d = Math.hypot(dx, dz),
+      rim = R / msc - 12;
+    if (d > rim) {
+      dx *= rim / d;
+      dz *= rim / d;
+    }
+    mctx.save();
+    mctx.translate(dx, dz);
+    mctx.rotate(yaw); // (keep it upright on the rotating map)
+    mctx.beginPath();
+    mctx.moveTo(0, -9);
+    mctx.lineTo(9, 7);
+    mctx.lineTo(-9, 7);
+    mctx.closePath();
+    mctx.lineWidth = 3;
+    mctx.strokeStyle = "#1a1a1a";
+    mctx.stroke();
+    mctx.fillStyle = "#7fc4ff";
+    mctx.fill();
+    mctx.fillStyle = "#ffffff";
+    mctx.beginPath();
+    mctx.moveTo(0, -9);
+    mctx.lineTo(4, -2);
+    mctx.lineTo(-4, -2);
+    mctx.closePath();
+    mctx.fill();
+    mctx.restore();
+  }
+  if (realm && himMap) {
+    // base camp, and the climbing teams (orange)
+    dot(himMap.camp.x, himMap.camp.z, 4.2, "#1a1a1a");
+    dot(himMap.camp.x, himMap.camp.z, 3, "#ffffff");
+    for (const c of climberSpots()) dot(c.x, c.z, 2.6, "#ff8a2a");
   }
   // mission objective: a navigation arrow on the line from you to it, pointing the
   // way to go (its tip on the objective, or pinned to the rim when it's off the map),
   // with a dashed guide line from you; a pulsing ring once you're right there
-  const obj = missionObjective();
+  // (up in the range: the way to Everest's summit)
+  const obj = realm ? himObjective(pos) : missionObjective();
   if (obj) {
     const [ox, oz] = toMap(obj.x, obj.z);
     const dx = ox - px,
       dz = oz - pz,
       d = Math.hypot(dx, dz),
-      rim = R / 0.9 - 16;
+      rim = R / msc - 16;
     const pulse = 1 + 0.1 * Math.sin(performance.now() / 170);
     if (d < 16) {
       mctx.lineWidth = 3;
@@ -4391,7 +5165,65 @@ const MAP_LABELS = [
   { x: 1470, z: -260, t: "THE THAMES", s: "" },
   { x: KTM_CORE.x, z: KTM.z1 - 40, t: "KATHMANDU", s: "Old Newar town" },
   { x: 190, z: 1430, t: "SWAYAMBHU", s: "The great stupa" },
+  { x: WORLD_GATE.x, z: WORLD_GATE.z - 40, t: "HIMALAYA PASS", s: "Walk north: Everest" },
 ];
+// up in the range: the peaks (Everest with a gold star), base camp, the gate, the climbers
+function drawHimLabels(r) {
+  bctx.textAlign = "center";
+  bctx.textBaseline = "middle";
+  const z = bigZoom;
+  for (const c of climberSpots()) {
+    const [sx, sy] = bigToScreen(c.x, c.z);
+    bctx.fillStyle = "#1a1a1a";
+    bctx.beginPath();
+    bctx.arc(sx, sy, r + 2.5, 0, Math.PI * 2);
+    bctx.fill();
+    bctx.fillStyle = "#ff8a2a";
+    bctx.beginPath();
+    bctx.arc(sx, sy, r + 1.2, 0, Math.PI * 2);
+    bctx.fill();
+  }
+  const mark = (x, zz, label, col) => {
+    const [sx, sy] = bigToScreen(x, zz);
+    bctx.fillStyle = "#1a1a1a";
+    bctx.fillRect(sx - 6, sy - 6, 12, 12);
+    bctx.fillStyle = col;
+    bctx.fillRect(sx - 4, sy - 4, 8, 8);
+    bctx.font = "700 13px Segoe UI, sans-serif";
+    bctx.fillStyle = "rgba(0,0,0,.7)";
+    bctx.fillText(label, sx + 1, sy + 17);
+    bctx.fillStyle = "#fff";
+    bctx.fillText(label, sx, sy + 16);
+  };
+  mark(himMap.camp.x, himMap.camp.z, "BASE CAMP", "#fff");
+  mark(himMap.gate.x, himMap.gate.z, "TRAIL HOME", "#7fd0ff");
+  for (const l of himMap.labels) {
+    const [sx, sy] = bigToScreen(l.x, l.z);
+    const big1 = l.everest,
+      fs = Math.round(clamp(z * (big1 ? 20 : 13), big1 ? 20 : 12, big1 ? 34 : 20));
+    // a summit triangle
+    bctx.fillStyle = big1 ? "#ffcf4a" : "#f4f1ea";
+    bctx.strokeStyle = "#1a1a1a";
+    bctx.lineWidth = 2;
+    const t = big1 ? 11 : 7;
+    bctx.beginPath();
+    bctx.moveTo(sx, sy - t);
+    bctx.lineTo(sx + t, sy + t * 0.7);
+    bctx.lineTo(sx - t, sy + t * 0.7);
+    bctx.closePath();
+    bctx.stroke();
+    bctx.fill();
+    bctx.font = `800 ${fs}px Segoe UI, sans-serif`;
+    const name = big1 ? "★ " + l.t : l.t;
+    bctx.fillStyle = "rgba(0,0,0,.6)";
+    bctx.fillText(name, sx + 2, sy - t - fs * 0.6 + 2);
+    bctx.fillStyle = big1 ? "#ffcf4a" : "#f4f1ea";
+    bctx.fillText(name, sx, sy - t - fs * 0.6);
+    bctx.font = `600 ${Math.round(fs * 0.62)}px Segoe UI, sans-serif`;
+    bctx.fillStyle = big1 ? "#ffe9a8" : "rgba(244,241,234,.85)";
+    bctx.fillText(big1 ? l.s + " · the highest point on Earth" : l.s, sx, sy + t + fs * 0.55);
+  }
+}
 function bigToScreen(x, z) {
   const [mx, mz] = toMap(x, z);
   return [
@@ -4405,6 +5237,8 @@ function centerBigMap() {
 }
 function toggleBigMap(force) {
   bigMapOpen = force ?? !bigMapOpen;
+  bigEl.classList.toggle("realm", realm);
+  bigEl.querySelector(".bm-title").textContent = realm ? "THE HIMALAYAS" : "MAP";
   bigEl.classList.toggle("show", bigMapOpen);
   setMissionUIHidden(bigMapOpen); // the mission card / waypoint shouldn't sit over the map
   if (!bigMapOpen) return;
@@ -4416,10 +5250,10 @@ function toggleBigMap(force) {
   if (locked()) document.exitPointerLock();
   big.width = window.innerWidth;
   big.height = window.innerHeight;
-  bigFit = Math.min(big.width / baked.width, big.height / baked.height) * 0.94;
+  bigFit = Math.min(big.width / mapImg.width, big.height / mapImg.height) * 0.94;
   bigZoom = bigFit;
-  bigCx = baked.width / 2;
-  bigCz = baked.height / 2;
+  bigCx = mapImg.width / 2;
+  bigCz = mapImg.height / 2;
   drawBigMap();
 }
 function drawBigMap() {
@@ -4433,7 +5267,7 @@ function drawBigMap() {
   bctx.scale(z, z);
   bctx.translate(-bigCx, -bigCz);
   bctx.imageSmoothingEnabled = z < 2;
-  bctx.drawImage(baked, 0, 0);
+  bctx.drawImage(mapImg, 0, 0);
   bctx.restore();
 
   const dot = (x, zz, r, col) => {
@@ -4446,7 +5280,7 @@ function drawBigMap() {
   };
   const r = clamp(z * 1.6, 1.5, 5);
   // story characters: pink dots, named once zoomed in a little
-  for (const m of characterMarkers()) {
+  for (const m of realm ? [] : characterMarkers()) {
     dot(m.x, m.z, r * 1.5 + 1.5, "#ffffff");
     dot(m.x, m.z, r * 1.5, "#ff4fb8");
     if (z > bigFit * 1.4) {
@@ -4459,8 +5293,8 @@ function drawBigMap() {
       bctx.fillText(m.label, sx, sy - 12);
     }
   }
-  // mission objective
-  const obj = missionObjective();
+  // mission objective (up in the range: Everest's summit)
+  const obj = realm ? himObjective(pos) : missionObjective();
   if (obj) {
     dot(obj.x, obj.z, r * 2.4 + 3, "#1a1a1a");
     dot(obj.x, obj.z, r * 2.4, "#ffcf4a");
@@ -4475,8 +5309,9 @@ function drawBigMap() {
 
   bctx.textAlign = "center";
   bctx.textBaseline = "middle";
+  if (realm && himMap) drawHimLabels(r);
   // enterable buildings — names once zoomed in a little
-  for (const e of enterables) {
+  for (const e of realm ? [] : enterables) {
     const [x, zz] = xfp(e.xf, 0, e.minZ);
     const [sx, sy] = bigToScreen(x, zz);
     bctx.fillStyle = "#ffe08a";
@@ -4492,7 +5327,7 @@ function drawBigMap() {
     }
   }
   // district labels
-  for (const l of MAP_LABELS) {
+  for (const l of realm ? [] : MAP_LABELS) {
     const [sx, sy] = bigToScreen(l.x, l.z);
     bctx.font = `800 ${Math.round(clamp(z * 30, 16, 34))}px Segoe UI, sans-serif`;
     bctx.fillStyle = "rgba(0,0,0,.55)";
@@ -4664,6 +5499,113 @@ function homeTransition(entering, h) {
   }, 380);
 }
 
+// ---------------------------------------------------------------- the Himalayas
+// Up the pass (or down the trail home): fade out, a loading screen (the range is built the first
+// time — a few seconds), switch it on, move you to base camp, give the
+// shaders a moment to compile, fade in. Back: the reverse, and the range is
+// switched off again. While you're up there the city's systems sleep.
+const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+// While you're up in the range the city is switched off, not just out of
+// sight: otherwise the renderer still frustum-tests every one of its meshes
+// (the static scenery, ~600 people of ~7 parts each, the traffic) every frame.
+// Only what this switches off is switched back on when you come down.
+let citySlept = null;
+function sleepCity(on) {
+  if (!on) {
+    if (citySlept) for (const n of citySlept) n.setEnabled(true);
+    citySlept = null;
+    return;
+  }
+  if (citySlept) return;
+  citySlept = [];
+  const off = (n) => {
+    if (n && n.isEnabled(false)) {
+      n.setEnabled(false);
+      citySlept.push(n);
+    }
+  };
+  for (const p of peds) off(p.root);
+  for (const t of traffic) off(t.mesh);
+  // static scenery (frozen in place) that lies wholly outside the range's box;
+  // never a template other meshes are instanced from (yetis etc. share some)
+  const x0 = HIM.x - HIM.ext,
+    x1 = HIM.x + HIM.ext,
+    z0 = HIM.z - HIM.ext,
+    z1 = HIM.z + HIM.ext;
+  const hr = himalayaRoot();
+  for (const m of scene.meshes) {
+    if (!m.isWorldMatrixFrozen || m.infiniteDistance || (m.instances && m.instances.length)) continue;
+    if (hr && m.isDescendantOf(hr)) continue;
+    const b = m.getBoundingInfo().boundingBox,
+      lo = b.minimumWorld,
+      hi = b.maximumWorld;
+    if (hi.x > x0 && lo.x < x1 && hi.z > z0 && lo.z < z1) continue;
+    off(m);
+  }
+}
+async function himalayaTransition(entering) {
+  if (homeBusy) return;
+  // riding something: you step off and it stays where it is (at the top of
+  // the pass, or by the trail home) for when you come back
+  if (vehicle) exitVehicle();
+  homeBusy = true;
+  sfx.door();
+  for (const k in keys) keys[k] = false;
+  firing = false;
+  aiming = false;
+  if (swing) endSwing(false);
+  zip = null;
+  fadeEl.classList.add("on");
+  await wait(380);
+  if (entering) {
+    showRealmLoading("THE HIMALAYAS", himalayaBuilt() ? "Sagarmatha · the roof of the world" : "Sagarmatha · the roof of the world · building the range");
+    await wait(60);
+    await buildHimalaya((p, label) => setRealmProgress(p * 0.9, label));
+  } else {
+    showRealmLoading("KATHMANDU", "Down from the mountains");
+    setRealmProgress(0.5, "");
+    await wait(60);
+  }
+  if (bigMapOpen) toggleBigMap(false);
+  const at = entering ? enterHimalaya() : leaveHimalaya();
+  sleepCity(entering);
+  realm = entering;
+  REALM.on = entering;
+  himMap = entering ? himMapData() : null;
+  toMap = entering ? himMap.toMap : toMapCity;
+  mapImg = entering ? himMap.canvas : baked;
+  // the range is huge: see further up there (and the near plane a touch
+  // further out, for depth precision over those distances)
+  camera.maxZ = entering ? 9000 : 3200;
+  camera.minZ = entering ? 0.2 : 0.12;
+  pos.set(at.x, terrainH(at.x, at.z) + 0.05, at.z);
+  vy = 0;
+  onGround = true;
+  airVel.x = airVel.z = 0;
+  pushX = pushZ = 0;
+  yaw = facing = at.yaw;
+  camera.position.set(pos.x - Math.sin(yaw) * 5, pos.y + 2.5, pos.z - Math.cos(yaw) * 5);
+  applyTimeOfDay();
+  updateCamera(1);
+  // let everything up there compile before showing it
+  const t0 = performance.now();
+  while (!scene.isReady() && performance.now() - t0 < 9000) {
+    setRealmProgress(0.9 + 0.1 * Math.min(1, (performance.now() - t0) / 9000), entering ? "Catching your breath" : "");
+    await wait(120);
+  }
+  setRealmProgress(1, entering ? "Catching your breath" : "");
+  await wait(150);
+  hideRealmLoading();
+  requestAnimationFrame(() =>
+    requestAnimationFrame(() => {
+      fadeEl.classList.remove("on");
+      homeBusy = false;
+      if (entering)
+        toast("THE HIMALAYAS<small>Base camp is safe — beyond it, yetis and snow leopards hunt. The trail south of camp takes you home.</small>", 4200);
+    }),
+  );
+}
+
 // ---------------------------------------------------------------- health, getting hurt, going down
 // 100 health; it comes back after a few seconds out of the fire. A vehicle
 // takes half the sting out of bullets. At zero: down, a fade, and back on
@@ -4731,7 +5673,7 @@ function die() {
   if (span) span.textContent = "YOU WERE TAKEN DOWN";
   fadeEl.classList.add("on");
   setTimeout(() => {
-    const r = missionRespawn() || wildlifeRespawn(pos) || { x: pos.x, z: pos.z, yaw };
+    const r = (realm && wildlifeRespawn(pos)) || missionRespawn() || wildlifeRespawn(pos) || { x: pos.x, z: pos.z, yaw };
     pos.set(r.x, terrainH(r.x, r.z) + 0.05, r.z);
     if (r.yaw !== undefined) yaw = facing = r.yaw;
     vy = 0;
@@ -4778,67 +5720,43 @@ function shotClear(a, b) {
   return true;
 }
 
-// ---- melee: Q — jab, cross, then a knock-down kick
-let strikeT = 0,
-  strikeN = 0,
-  strikeKind = 0,
-  lastStrikeAt = 0;
-const STRIKE_LEN = 0.28;
-function melee() {
-  const now = performance.now();
-  if (strikeT > STRIKE_LEN * 0.45) return; // still mid-swing
-  strikeN = now - lastStrikeAt < 750 ? (strikeN + 1) % 3 : 0;
-  lastStrikeAt = now;
-  strikeKind = strikeN; // 0 jab (left), 1 cross (right), 2 kick
-  strikeT = STRIKE_LEN * (strikeKind === 2 ? 1.35 : 1);
-  // face where you're looking and hit whoever's in front
-  facing = yaw;
-  const fx = Math.sin(yaw),
-    fz = Math.cos(yaw);
-  let best = null,
-    bd = strikeKind === 2 ? 2.6 : 2.3;
-  for (const p of peds) {
-    if (p.state === "down" || p.state === "away" || p.dormant) continue;
-    const dx = p.x - pos.x,
-      dz = p.z - pos.z,
-      d = Math.hypot(dx, dz);
-    if (d > bd || (dx * fx + dz * fz) / (d || 1) < 0.3) continue;
-    bd = d;
-    best = p;
-  }
-  sfx.punch(!!best);
-  if (!best) return;
-  const kick = strikeKind === 2;
-  if (best.goon) missionHitGoon(best, kick ? 2 : 1, fx, fz, kick ? "kick" : "punch");
-  else if (kick) knockDown(best, fx * 6, fz * 6);
-  else {
-    best.state = "annoyed";
-    best.timer = 1.2;
-  }
-  shake = Math.max(shake, kick ? 0.12 : 0.06);
-  pushX += fx * 0.6;
-  pushZ += fz * 0.6;
-}
-function poseStrike(dt) {
-  const len = STRIKE_LEN * (strikeKind === 2 ? 1.35 : 1);
-  const k = 1 - strikeT / len; // 0 → 1 through the strike
-  const out = Math.sin(Math.min(1, k * 1.6) * Math.PI); // snap out, pull back
-  if (strikeKind === 2) {
-    legR.hip.rotation.x = -1.55 * out;
-    legR.knee.rotation.x = 0.9 * (1 - out);
-    body.rotation.x = -0.25 * out;
-    armL.sh.rotation.x = -0.9;
-    armR.sh.rotation.x = -0.9;
-  } else {
-    const arm = strikeKind === 0 ? armL : armR,
-      other = strikeKind === 0 ? armR : armL;
-    arm.sh.rotation.x = -1.2 - 0.45 * out;
-    arm.el.rotation.x = -1.4 * (1 - out);
-    other.sh.rotation.x = -1.0;
-    other.el.rotation.x = -1.6;
-  }
-  strikeT = Math.max(0, strikeT - dt);
-}
+
+// ---- hand-to-hand (melee.js): what it needs from the player
+initMelee({
+  pos,
+  rig: { body, stuntPivot, armL, armR, legL, legR },
+  yaw: () => yaw,
+  facing: () => facing,
+  // where WASD is pushing (world space, not normalised)
+  input: () => {
+    const fx = Math.sin(yaw),
+      fz = Math.cos(yaw);
+    let x = 0,
+      z = 0;
+    if (keys.KeyW || keys.ArrowUp) (x += fx), (z += fz);
+    if (keys.KeyS || keys.ArrowDown) (x -= fx), (z -= fz);
+    if (keys.KeyD || keys.ArrowRight) (x += fz), (z -= fx);
+    if (keys.KeyA || keys.ArrowLeft) (x -= fz), (z += fx);
+    return { x, z };
+  },
+  canFight: () =>
+    !vehicle && !home && !homeBusy && !swing && !zip && !swimming && !playerDead && downTimer <= 0 && !inConversation() && aboveGround() < 1.2,
+  onGround: () => onGround,
+  swimming: () => swimming,
+  fists: () => weapon === "fists",
+  gunUp: () => weapon === "gun" && (aiming || firing || aimTimer > 0),
+  speed: () => {
+    const v = playerVel();
+    return Math.hypot(v.x, v.z);
+  },
+  dead: () => playerDead,
+  hurtPlayer: (n, fx, fz) => hurtPlayer(n, fx, fz),
+  hitGoon: (p, dmg, fx, fz, how) => missionHitGoon(p, dmg, fx, fz, how),
+  spark: (x, y, z, size, life) => spark(new V3(x, y, z), size, life),
+  shake: (a) => (shake = Math.max(shake, a)),
+  pan: (x, z) => panOf(x, z),
+  toast: (html, ms) => toast(html, ms),
+});
 
 // ---------------------------------------------------------------- loop
 let mapTimer = 0;
@@ -4867,7 +5785,8 @@ function frameDt() {
   return Math.min(Math.max(d, 0), 0.1);
 }
 engine.runRenderLoop(() => {
-  const dt = frameDt() * missionTimeScale();
+  const rdt = frameDt();
+  const dt = rdt * missionTimeScale() * meleeTimeScale(rdt);
   const now = performance.now();
   if (interactQueued) {
     interactQueued = false;
@@ -4887,7 +5806,12 @@ engine.runRenderLoop(() => {
   }
   if (meleeQueued) {
     meleeQueued = false;
-    if (!vehicle && !home && !homeBusy && !swing && !zip && !swimming && downTimer <= 0) melee();
+    meleeAttack();
+  }
+  if (counterQueued) {
+    counterQueued = false;
+    // nobody winding up on you: it's a block for as long as it's held
+    if (!meleeCounter()) meleeBlock(!!keys.KeyR || (fistRight && weapon === "fists"));
   }
   updateHealth(dt);
   if (swingQueued) {
@@ -4899,24 +5823,31 @@ engine.runRenderLoop(() => {
     if (!vehicle && !homeBusy) startZip();
   }
 
+  // up the pass north of Swayambhu → the Himalayas; down the trail from base camp → home
+  if (!homeBusy && !playerDead && !(vehicle && vehicleIsBoat())) {
+    const t = himTrigger(pos.x, pos.z, realm);
+    if (t) himalayaTransition(t === "enter");
+  }
   // in a conversation: stand still and listen (number keys pick replies)
   if (inConversation()) {
     for (const k in keys) keys[k] = false;
     firing = false;
     aiming = false;
   }
-  if (!home) updateTraffic(dt, now, { pos, vehicle, peds });
+  if (!home && !realm) updateTraffic(dt, now, { pos, vehicle, peds });
+  if (!homeBusy) updateMelee(dt); // fist fights (before the player moves: it drives lunges)
   if (homeBusy) {
     /* frozen while the screen is black */
   } else if (vehicle) updateVehicle(dt);
   else {
     updatePlayer(dt);
     updateStunts(dt);
-    updateRope(dt);
+    poseMelee(dt);
+    poseSlope(dt, slopeMoving);
     shotCooldown -= dt;
-    if (firing && locked() && shotCooldown <= 0 && downTimer <= 0) fire();
+    if (!fpActive()) tryFire();
   }
-  if (!home)
+  if (!home && !realm)
     updatePeds(dt, {
       pos,
       vehicle,
@@ -4925,7 +5856,7 @@ engine.runRenderLoop(() => {
       armed: !vehicle && weapon === "gun" && (aiming || firing),
       aimYaw: yaw,
     });
-  if (!home)
+  if (!home && !realm)
     updateCharacters(dt, tod, {
       pos,
       vehicle,
@@ -4933,15 +5864,24 @@ engine.runRenderLoop(() => {
       shove: shovePlayer,
     });
   else hideCharacterUI();
-  updateMission(dt, { pos, vehicle, inside: !!home });
+  updateMission(dt, { pos, vehicle, inside: !!home || realm });
   if (!home) updateWildlife(dt, { pos, vehicle });
   if (!homeBusy) trackVelocity(dt);
   updateCamera(dt);
+  // first person: the hands hang off the camera, so they (and the shot / web
+  // that leaves them) are placed after it has moved this frame
+  updateViewModel(dt);
+  if (!homeBusy && !vehicle) {
+    if (fpActive()) tryFire();
+    updateRope(dt);
+  }
   updateWebTargets(dt);
   updateTimeOfDay(dt);
+  updateSky(dt);
+  updateHimalaya(dt, camera, realm);
   updateEffects(dt);
   updateHud(dt);
-  if (!home) {
+  if (!home && !realm) {
     animateBillboards(dt);
     updateLondon(dt, tod);
     updateKathmandu(dt, camera);

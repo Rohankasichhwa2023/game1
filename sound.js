@@ -148,6 +148,8 @@ const SAMPLE = {
   supercar: { rec: "car", rate: 1.22, bright: 7000, vol: 0.75 },
   bike: { rec: "bike", rate: 1.0, bright: 6500, vol: 0.7 },
   superbike: { rec: "bike", rate: 1.15, bright: 9000, vol: 0.72 },
+  // a snowmobile's buzzy two-stroke
+  snowmobile: { rec: "bike", rate: 1.28, bright: 5200, vol: 0.62 },
   // outboard motor: the bike recording, lower and muffled (heard over the water)
   boat: { rec: "bike", rate: 0.74, bright: 2400, vol: 0.62 },
 };
@@ -376,6 +378,29 @@ export function punch(landed) {
   if (!live()) return;
   burst({ type: "bandpass", f: 2200, q: 0.8, peak: 0.18, attack: 0.01, decay: 0.08, sweepTo: 900 });
   if (landed) burst({ type: "lowpass", f: 700, peak: 0.7, attack: 0.001, decay: 0.09, at: 0.04 });
+}
+// Hand-to-hand: the swish of a strike (heavier = lower, longer), the thud of
+// it landing (with a low body thump), a guard taking a hit, and a knockout.
+export function swish(heavy = false, pan = 0) {
+  if (!live()) return;
+  burst({ type: "bandpass", f: heavy ? 1500 : 2400, q: 0.9, peak: heavy ? 0.24 : 0.16, attack: 0.012, decay: heavy ? 0.16 : 0.09, sweepTo: heavy ? 500 : 900, pan });
+}
+export function impact(heavy = false, pan = 0) {
+  if (!live()) return;
+  burst({ type: "lowpass", f: heavy ? 900 : 1300, peak: heavy ? 0.85 : 0.6, attack: 0.001, decay: heavy ? 0.12 : 0.07, pan });
+  burst({ type: "highpass", f: 2500, peak: heavy ? 0.22 : 0.14, attack: 0.001, decay: 0.03, pan });   // the slap of contact
+  tone({ f: heavy ? 110 : 150, to: 50, peak: heavy ? 0.55 : 0.3, attack: 0.002, decay: heavy ? 0.16 : 0.09, pan });
+}
+export function blockHit(pan = 0) {
+  if (!live()) return;
+  burst({ type: "bandpass", f: 1100, q: 1.4, peak: 0.5, attack: 0.001, decay: 0.06, pan });
+  tone({ type: "triangle", f: 230, to: 140, peak: 0.18, attack: 0.002, decay: 0.07, pan });
+}
+export function knockout(pan = 0) {
+  if (!live()) return;
+  impact(true, pan);
+  tone({ f: 70, to: 32, peak: 0.6, attack: 0.004, decay: 0.45, pan, at: 0.02 });
+  burst({ type: "lowpass", f: 400, peak: 0.4, attack: 0.01, decay: 0.3, pan, at: 0.32 });   // body hits the ground
 }
 export function bump(impact, what = "wall") {
   if (!live()) return;

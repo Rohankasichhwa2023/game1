@@ -155,7 +155,7 @@ export function releaseCar(c) {
 }
 export const shootables = () => cars.filter((c) => c.state !== "wrecked").map((c) => c.shoot);
 export const healthBar = (c) => {
-  const n = Math.max(0, Math.ceil((c.hp / c.max) * 8));
+  const n = Math.max(0, Math.min(8, Math.ceil((c.hp / c.max) * 8)));
   return `${c.label} ${"█".repeat(n)}${"░".repeat(8 - n)}`;
 };
 

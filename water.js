@@ -9,6 +9,7 @@
 //   deckAt(x, z)    height of a bridge deck over the water here (0 = none)
 //   bridgeSpans     the over-water stretches of every road (for bridges.js)
 import { KTM } from "./kathmandu.js";
+import { inHimBox } from "./realm.js";
 
 // ---------------------------------------------------------------- islands
 // (kept as plain numbers: roads.js / london.js import the engine, and the
@@ -18,6 +19,7 @@ const ISLANDS = [
   { kind: "box", x0: -150, x1: 722, z0: -566, z1: 566, r: 26 },                      // Midtown
   { kind: "box", x0: 758, x1: 1600, z0: -600, z1: 600, r: 30 },                      // London
   { kind: "box", x0: KTM.x0 - 70, x1: KTM.x1 + 70, z0: KTM.z0, z1: KTM.z1 + 640, r: 60 }, // Kathmandu + its hillside + Swayambhu
+  { kind: "box", x0: 190 - 700, x1: 190 + 700, z0: 1600, z1: 3600, r: 80 },                 // the pass north to the Himalayas (terrain.js NORTH)
 ];
 function sdBox(x, z, b) {
   // rounded rectangle
@@ -34,6 +36,7 @@ export function landSdf(x, z) {
 // The same without the wandering shoreline: a smooth field for shaping the
 // hills down to the sea (the wobble's tight bends made the slopes lumpy).
 export function landSdfSmooth(x, z) {
+  if (x < -4000 && inHimBox(x, z)) return -500;     // the Himalayas: all land
   let d = Math.hypot(x - PARIS.x, z - PARIS.z) - PARIS.R;
   for (const b of ISLANDS) d = Math.min(d, sdBox(x, z, b));
   return d;

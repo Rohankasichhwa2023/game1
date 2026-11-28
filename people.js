@@ -18,7 +18,8 @@
 //
 // Public API is unchanged: peds[], spawnPeds, updatePeds, knockDown, scare.
 // A ped's state is one of: walk, act, chat, follow, cross, wave, annoyed,
-// dodge, surrender, cower, flee, watch, down, away.
+// dodge, surrender, cower, flee, watch, down, away — or brawl (in a fist
+// fight with the player: melee.js moves and poses them, we just animate).
 import { scene, rand, rr, pick, clamp, hex, litMat, colorTemplate, angDiff, terrainH, state as world } from "./engine.js";
 import { edges, pathAt } from "./roads.js";
 
@@ -316,6 +317,7 @@ const crossable = (e) => !["roundabout", "circus", "bridge", "parkway", "plaza"]
 // ---------------------------------------------------------------- reactions (public)
 export function knockDown(p, fx = 0, fz = 0) {
   if (p.dead || p.state === "away") return;
+  if (p.brawl) clearBrawl(p);
   if (p.state === "down") { if (pedHooks.onDown && p.scripted) pedHooks.onDown(p, Math.hypot(fx, fz)); return; }   // a target can still be finished off
   if (p.char && pedHooks.onHurt) pedHooks.onHurt(p);
   if (pedHooks.onDown) pedHooks.onDown(p, Math.hypot(fx, fz));
@@ -330,7 +332,7 @@ export function knockDown(p, fx = 0, fz = 0) {
 // and film it.
 export function scare(x, z, r) {
   for (const p of peds) {
-    if (p.state === "down" || p.state === "away" || p.scripted) continue;
+    if (p.state === "down" || p.state === "away" || p.scripted || p.brawl) continue;
     const d = Math.hypot(p.x - x, p.z - z);
     if (d > r * 1.6) continue;
     if (p.char && pedHooks.onScare) pedHooks.onScare(p, x, z, d / r);
@@ -346,6 +348,30 @@ export function scare(x, z, r) {
     if (p.state !== "flee" && p.persona.brave < 0.3 && d < r * 0.6 && rand() < 0.6) { p.state = "cower"; p.timer = rr(1.5, 3.5); continue; }
     startFlee(p, rr(5, 9));
   }
+}
+// ---------------------------------------------------------------- fist fights (driven by melee.js)
+// While brawling, p.x / p.z / p.heading / p.speed are set by melee.js, and
+// these shape the pose: bArms [axL, axR, azL, azR], bLean, bTwist (upper-body
+// turn), bRoll, bLift (lying on the ground), bKick (right leg raised), bCrouch.
+export function enterBrawl(p) {
+  endSocial(p);
+  p.cross = null; p.crossAt = undefined; p.act = null; p.threat = null;
+  p.phone.setEnabled(false);
+  if (p.lod) setLod(p, 0);
+  p.state = "brawl"; p.brawl = true; p.speed = 0;
+}
+function clearBrawl(p) {
+  p.brawl = false;
+  p.bArms = null; p.bLean = p.bTwist = p.bRoll = p.bLift = p.bKick = p.bCrouch = 0;
+  p.root.rotation.z = 0;
+}
+// how: "flee" (run off), "annoyed" (shake a fist, then go about their day)
+export function leaveBrawl(p, how = "annoyed", x = 0, z = 0) {
+  if (!p.brawl) return;
+  clearBrawl(p);
+  if (p.state === "down" || p.dead) return;
+  if (how === "flee") { p.threat = { x, z }; startFlee(p, rr(5, 8)); }
+  else { p.state = "annoyed"; p.timer = rr(1.5, 2.5); }
 }
 function startFlee(p, t) {
   p.state = "flee"; p.timer = t;
@@ -447,6 +473,11 @@ export function updatePeds(dtFrame, ctx) {
   for (const p of peds) {
     if (p.goon && p.state !== "down") {                 // mission gunmen: the mission moves them, we animate
       animate(p, dtFrame, 0);                           // (places the body at x / z / heading too)
+      continue;
+    }
+    if (p.brawl && p.state !== "down") {                // in a fist fight: melee.js moves them
+      p.state = "brawl";
+      animate(p, dtFrame, 0);
       continue;
     }
     const far = Math.abs(p.x - pos.x) > 70 || Math.abs(p.z - pos.z) > 70;
@@ -796,6 +827,11 @@ function animate(p, dt, d) {
     case "surrender": L = [2.9, 2.9, 0.35, 0.35]; lean = -0.05; break;
     case "aim": L = [1.42, 1.58, -0.14, 0.06]; lean = moving ? 0.06 : -0.02; break;          // pistol up, two hands
     case "stagger": L = [0.7, 0.5, 0.6, 0.5]; lean = -0.28; legSw = 0; break;
+    case "brawl":
+      L = p.bArms || [1.25, 1.35, -0.25, -0.25];        // fists up
+      lean = p.bLean || 0; crouch = p.bCrouch || 0;
+      if (!moving) legSw = 0.22;                          // staggered fighting stance
+      break;
     case "cower": L = [2.5, 2.5, -0.9, -0.9]; crouch = 0.45; lean = 0.35; legSw = 0; break;
     case "flee": L = [sw * 1.2 + 0.4, -sw * 1.2 + 0.4, 0.5 + Math.sin(t * 9) * 0.2, 0.5 + Math.cos(t * 9) * 0.2]; break;
     case "dodge": L = [1.8, 1.8, 0.8, 0.8]; lean = -0.25; break;
@@ -863,18 +899,21 @@ function animate(p, dt, d) {
 
   // only bother with fine arm/head animation near the player
   if (d < 90) {
-    poseArms(p, dt, ...L);
+    poseArms(p, dt, ...L, p.state === "brawl" ? 26 : 10);   // punches are quick
     p.headPivot.rotation.y = p.look;
     p.headPivot.rotation.x = p.nod;
     if (p.state === "cower") p.headPivot.rotation.x = 0.5;
   }
   p.crouch += (crouch - p.crouch) * Math.min(1, dt * 8);
-  p.lean += (lean - p.lean) * Math.min(1, dt * 6);
+  const brawl = p.state === "brawl";
+  p.lean += (lean - p.lean) * Math.min(1, dt * (brawl ? 16 : 6));
   if (p.crouch > 0.2) { p.legs[0].rotation.x = -1.3 * p.crouch / 0.55; p.legs[1].rotation.x = 0.5; }
   else { p.legs[0].rotation.x = legSw; p.legs[1].rotation.x = -legSw; }
+  if (brawl && p.bKick) p.legs[1].rotation.x = -p.bKick;
   const bob = moving ? Math.abs(Math.cos(p.phase)) * (run ? 0.07 : 0.04) : 0;
   // (yOff: standing on something that isn't the ground — a boat's deck)
-  p.root.position.set(p.x, (p.yOff ?? terrainH(p.x, p.z)) + bob - p.crouch * 0.6, p.z);
-  p.root.rotation.y = p.heading;
+  p.root.position.set(p.x, (p.yOff ?? terrainH(p.x, p.z)) + bob - p.crouch * 0.6 + (brawl ? p.bLift || 0 : 0), p.z);
+  p.root.rotation.y = p.heading + (brawl ? p.bTwist || 0 : 0);
   p.root.rotation.x = p.lean;
+  if (brawl) p.root.rotation.z = p.bRoll || 0;
 }

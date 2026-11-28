@@ -234,6 +234,30 @@ export const SPECS = {
     hits: 3,
     label: "Ride superbike",
   },
+  // Up at Everest base camp: ridden like a bike (sits you on it), skis in
+  // front, a track behind. maxSlope: it won't climb (or drop down) anything
+  // steeper than that — it stays on the valley floor round camp.
+  snowmobile: {
+    name: "snowmobile",
+    kind: "bike",
+    hw: 0.58,
+    hd: 1.4,
+    ht: 1.15,
+    circles: [-0.75, 0, 0.75],
+    r: 0.6,
+    accel: 13,
+    max: 85 * KMH,
+    boost: 1.25,
+    rev: 4,
+    brake: 22,
+    turn: 2.1,
+    camDist: 6.5,
+    camH: 1.7,
+    hits: 4,
+    label: "Ride snowmobile",
+    maxSlope: 0.42,
+    lean: 0.45,
+  },
 };
 export const VEH = SPECS; // back-compat alias
 // A template for a mission vehicle: sedan, grey, suv, van, truck, supercar.
@@ -1628,6 +1652,57 @@ export function initVehicleTemplates() {
   );
 }
 
+// ---- snowmobile: two skis up front on struts, a rubber track behind, a
+// painted hood and side panels, a windscreen, bars, a long seat, a rack
+function snowmobileParts(P) {
+  for (const s of [-1, 1]) {
+    P.box(0.13, 0.04, 1.25, s * 0.5, 0.05, 0.72, "chrome");
+    P.box(0.13, 0.04, 0.3, s * 0.5, 0.14, 1.42, "chrome", -0.65);
+    P.strut("dark", [s * 0.5, 0.09, 0.7], [s * 0.34, 0.46, 0.55], 0.05);
+    P.strut("dark", [s * 0.5, 0.09, 0.85], [s * 0.3, 0.46, 0.8], 0.04);
+    P.box(0.16, 0.04, 0.85, s * 0.38, 0.32, -0.35, "dark");
+    P.box(0.04, 0.26, 0.95, s * 0.47, 0.5, 0.5, "accent");
+  }
+  // the track
+  P.box(0.56, 0.3, 1.45, 0, 0.2, -0.48, "tyre");
+  for (const z of [0.2, -1.18]) P.cyl(0.32, 0.58, 0, 0.2, z, "tyre", 0, Math.PI / 2);
+  for (let i = 0; i < 7; i++) P.box(0.58, 0.035, 0.06, 0, 0.36, 0.12 - i * 0.2, "dark");
+  // hood, nose to dash
+  P.loft("body", [
+    [1.22, 0.34, 0.5, 0.2, 0.16, 0.07],
+    [0.85, 0.3, 0.74, 0.42, 0.36, 0.12],
+    [0.4, 0.3, 0.86, 0.47, 0.42, 0.14],
+    [0.05, 0.3, 0.84, 0.44, 0.4, 0.12],
+  ]);
+  P.box(0.62, 0.34, 0.03, 0, 1.02, 0.2, "glass", -0.55);
+  P.box(0.3, 0.08, 0.04, 0, 0.62, 1.02, "light", -0.45);
+  // bars and grips
+  P.strut("chrome", [-0.4, 1.0, 0.0], [0.4, 1.0, 0.0], 0.03);
+  P.strut("dark", [0, 0.84, 0.08], [0, 1.0, 0.0], 0.05);
+  for (const s of [-1, 1]) P.cyl(0.05, 0.12, s * 0.42, 1.0, 0, "dark", 0, Math.PI / 2);
+  // seat, rack, tail light
+  P.loft("dark", [
+    [-0.02, 0.66, 0.9, 0.22, 0.2, 0.06],
+    [-0.7, 0.66, 0.92, 0.24, 0.22, 0.07],
+    [-1.18, 0.66, 0.88, 0.22, 0.2, 0.06],
+  ]);
+  P.box(0.5, 0.06, 0.06, 0, 0.62, -1.25, "accent");
+  P.strut("chrome", [-0.28, 0.7, -1.3], [0.28, 0.7, -1.3], 0.035);
+  P.box(0.2, 0.05, 0.03, 0, 0.6, -1.3, "tail");
+}
+let sledTpls = null;
+// A few snowmobiles parked at base camp (spots: [x, z, heading] in world coordinates)
+export function spawnSnowmobiles(spots) {
+  if (!sledTpls)
+    sledTpls = [
+      ["#c62828", "#111111"],
+      ["#f2c12e", "#1b1b1b"],
+      ["#1e5fbf", "#f1f1ee"],
+      ["#111214", "#e8742a"],
+    ].map(([b, a], i) => model("snowmobile", "snowmobile" + i, { body: b, accent: a }, snowmobileParts));
+  return spots.map(([x, z, h], i) => makeVehicle(sledTpls[i % sledTpls.length], x, z, h));
+}
+
 // ---------------------------------------------------------------- parked / usable
 export function vehicleSolid(v) {
   const c = specOf(v),
@@ -2281,6 +2356,15 @@ function separateFromTraffic(v, dt) {
 // Arcade handling. keys: KeyboardEvent.code → bool. Returns impact speed.
 export function driveVehicle(v, dt, keys, enterables, supportHeight) {
   const c = specOf(v);
+  const steer0 = (keys.KeyD || keys.ArrowRight ? 1 : 0) - (keys.KeyA || keys.ArrowLeft ? 1 : 0);
+  // DRIFT: handbrake (Space) + gas + steering at speed. The back steps out:
+  // the body swings round faster than the car changes direction, so it slides
+  // sideways (v.travel = the direction it's actually moving). Let go and the
+  // tyres grip again and it straightens up.
+  // (a car just taken over / knocked about: start from where it points)
+  if (v.travel === undefined || Math.abs(angDiff(v.heading, v.travel)) > 1.2) v.travel = v.heading;
+  const drifting = !!keys.Space && !!(keys.KeyW || keys.ArrowUp) && steer0 !== 0 && v.speed > 8;
+  v.drifting = drifting;
   const throttle = keys.KeyW || keys.ArrowUp,
     back = keys.KeyS || keys.ArrowDown;
   const steer =
@@ -2294,9 +2378,13 @@ export function driveVehicle(v, dt, keys, enterables, supportHeight) {
       v.speed = Math.min(top, v.speed + c.accel * (boosting ? 1.35 : 1) * dt);
   }
   if (back) v.speed -= (v.speed > 0.5 ? c.brake : c.accel * 0.7) * dt;
-  if (keys.Space)
+  if (keys.Space && !drifting)
     v.speed -=
       Math.sign(v.speed) * Math.min(Math.abs(v.speed), c.brake * 1.3 * dt);
+  // sliding sideways scrubs off speed (more the further it's out of line)
+  const slip0 = angDiff(v.heading, v.travel);
+  if (drifting || Math.abs(slip0) > 0.05)
+    v.speed -= Math.sign(v.speed) * Math.min(Math.abs(v.speed), (1.2 + 7 * Math.abs(Math.sin(slip0))) * dt);
   // coasting drag, plus a gentle slow-down when above the current top speed (boost released)
   if (!throttle && !back)
     v.speed -=
@@ -2308,7 +2396,13 @@ export function driveVehicle(v, dt, keys, enterables, supportHeight) {
   const sf =
     clamp(Math.abs(v.speed) / 6, 0, 1) *
     (1 - 0.45 * clamp(Math.abs(v.speed) / c.max, 0, 1));
-  const totalTurn = steer * c.turn * sf * Math.sign(v.speed) * dt;
+  // drifting: the body swings round harder; steering against the slide
+  // (counter-steer) catches it
+  const counter = steer !== 0 && Math.sign(steer) !== Math.sign(slip0) && Math.abs(slip0) > 0.1;
+  const totalTurn = steer * c.turn * sf * Math.sign(v.speed) * dt * (drifting ? 1.75 : counter ? 0.6 : 1);
+  // how fast the direction of travel catches up with where the car points:
+  // drifting it lags well behind, otherwise the tyres grip (a quick recovery)
+  const gripK = drifting ? 2.4 : Math.abs(slip0) > 0.04 ? (counter ? 7 : 4.5) : 14;
   const p = v.mesh.position;
   // Sub-step so fast vehicles can't tunnel through posts and thin walls.
   const n = Math.max(1, Math.ceil(Math.abs(v.speed * dt) / 0.4));
@@ -2326,8 +2420,25 @@ export function driveVehicle(v, dt, keys, enterables, supportHeight) {
   for (let i = 0; i < n; i++) {
     const newH = v.heading + totalTurn / n;
     const step = (v.speed * dt) / n;
-    const nx = p.x + Math.sin(newH) * step,
-      nz = p.z + Math.cos(newH) * step;
+    // travel direction: follows the body (instantly in reverse / at a crawl)
+    if (v.speed < 2) v.travel = newH;
+    else {
+      v.travel += angDiff(newH, v.travel) * Math.min(1, (gripK * dt) / n);
+      const sl = clamp(angDiff(newH, v.travel), -0.95, 0.95);   // never more than ~55° sideways
+      v.travel = newH - sl;
+    }
+    const nx = p.x + Math.sin(v.travel) * step,
+      nz = p.z + Math.cos(v.travel) * step;
+    // a snowmobile can't take the steep stuff (up or down): it bogs down and stops
+    if (c.maxSlope) {
+      const run = Math.hypot(nx - p.x, nz - p.z);
+      if (run > 1e-3 && Math.abs(terrainH(nx, nz) - terrainH(p.x, p.z)) / run > c.maxSlope) {
+        v.speed *= 0.4;
+        if (Math.abs(v.speed) < 1.5) v.speed = 0;
+        res.steep = true;
+        break;
+      }
+    }
     // A move is OK if it doesn't dig deeper into anything than we already are.
     const cur = vehicleOverlap(v, p.x, p.z, v.heading, p.y, enterables).depth;
     const ok = (x, z, h) =>
@@ -2363,8 +2474,16 @@ export function driveVehicle(v, dt, keys, enterables, supportHeight) {
     if (hit.traffic) hit.traffic.stopUntil = performance.now() + 3000;
     v.speed = -v.speed * 0.25;
     if (ok(p.x, p.z, newH)) v.heading = newH; // still allow steering out
+    v.travel = v.heading;                       // a crash kills the slide
     break;
   }
+  // how hard the tyres are sliding (0..1) — main.js turns it into smoke + squeal
+  const slip = Math.abs(angDiff(v.heading, v.travel));
+  res.skid = Math.abs(v.speed) < 3 ? 0
+    : drifting || slip > 0.12 ? clamp(0.35 + slip * 1.1, 0, 1)
+    : keys.Space && Math.abs(v.speed) > 9 ? 0.45     // handbrake stop: a straight skid
+    : 0;
+  res.slip = slip;
   separateFromTraffic(v, dt);
   const gy = supportHeight(p.x, p.z, p.y + 0.1);
   const ground = terrainH(p.x, p.z);
@@ -2381,11 +2500,14 @@ export function driveVehicle(v, dt, keys, enterables, supportHeight) {
       : 0;
   v.pitch = (v.pitch || 0) + (pitchT - (v.pitch || 0)) * Math.min(1, dt * 10);
   v.mesh.rotation.x = v.pitch;
-  p.x = clamp(p.x, WORLD.x0 + 5, WORLD.x1 - 5);
-  p.z = clamp(p.z, WORLD.z0 + 5, WORLD.z1 - 5);
+  if (p.x > -4000) {
+    // (not up in the Himalayas, far out west: main.js keeps you in the range there)
+    p.x = clamp(p.x, WORLD.x0 + 5, WORLD.x1 - 5);
+    p.z = clamp(p.z, WORLD.z0 + 5, WORLD.z1 - 5);
+  }
   v.mesh.rotation.y = v.heading;
   if (v.kind === "bike") {
-    const leanT = -steer * clamp(Math.abs(v.speed) / 14, 0, 1) * 0.42;
+    const leanT = -steer * clamp(Math.abs(v.speed) / 14, 0, 1) * (drifting ? 0.6 : 0.42) * (c.lean ?? 1);
     v.lean += (leanT - v.lean) * Math.min(1, dt * 6);
     v.mesh.rotation.z = v.lean;
   }

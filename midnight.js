@@ -15,7 +15,7 @@
 //  12  Done (three endings)
 //
 // The twist: every text from "A Friend" in Mission 1 was hers.
-import { hex, terrainH, makeAcc, litMat, addBox, addSolid, setXF, clearXF, makeXF, xfp } from "./engine.js";
+import { scene, hex, terrainH, makeAcc, litMat, addBox, addSolid, setXF, clearXF, makeXF, xfp } from "./engine.js";
 import { landmarks } from "./roads.js";
 import { addCash, setGone, setBack } from "./characters.js";
 import { removeGoon, knockDown } from "./people.js";
@@ -152,6 +152,7 @@ function setStage(s, title, sub, ms = 3600) {
   ui.banner(title || STAGES[s].title.toUpperCase(), sub ?? (s < DONE ? STAGES[s].hint : ""), ms);
 }
 function enterStage(s, loading) {
+  if (bomb && s !== 5 && s !== 6) bomb.root.setEnabled(false);
   events.alert = null;
   events.kill = null;
   events.vipHit = onVipHit;
@@ -340,9 +341,85 @@ function spawnTowerGuns() {
     addGoon(x, z, k, { combat: true, roam: 22 });
   }
 }
+// Where the bomb sits: on the ledge round the belfry (the belfry itself is a
+// solid block, 4.8 m each way from the centre), on the front side, facing out.
+const BOMB_OUT = 5.35;
+const bombAt = () => ({ x: tower.x + Math.sin(tower.yaw) * BOMB_OUT, y: tower.base + 54.2, z: tower.z + Math.cos(tower.yaw) * BOMB_OUT });
+// The bomb: a case strapped to pipe charges on the clock-stage ledge, wires
+// trailing, a red timer read-out and a light that blinks faster as midnight
+// nears (with a big soft glow so it can be spotted from the street).
+// Disarmed, the light goes steady green.
+let bomb = null;
+function makeBomb() {
+  if (bomb || !tower) return bomb;
+  const MB = BABYLON.MeshBuilder;
+  const root = new BABYLON.TransformNode("bomb", scene);
+  const at = bombAt();
+  root.position.set(at.x, at.y, at.z);
+  root.rotation.y = tower.yaw;            // read-out facing out over the street
+  const part = (m, mat, x, y, z) => { m.material = mat; m.parent = root; m.position.set(x, y, z); m.isPickable = false; return m; };
+  const glowMat = (name, col, alpha = 1) => {
+    const m = new BABYLON.StandardMaterial(name, scene);
+    m.disableLighting = true;
+    m.diffuseColor = new BABYLON.Color3(0, 0, 0);
+    m.emissiveColor = col.clone();
+    m.alpha = alpha;
+    m.fogEnabled = false;
+    return m;
+  };
+  const caseM = litMat("bombCaseM", hex("#3a3f35"), 0.25);
+  const pipeM = litMat("bombPipeM", hex("#8a7457"), 0.3);
+  const tapeM = litMat("bombTapeM", hex("#222222"), 0.1);
+  part(MB.CreateBox("bombCase", { width: 0.75, height: 0.42, depth: 0.5 }, scene), caseM, 0, 0.21, 0);
+  // three pipe charges lying behind the case, taped together
+  for (const [y, z] of [[0.09, -0.3], [0.09, -0.47], [0.24, -0.385]]) {
+    const pipe = part(MB.CreateCylinder("bombPipe", { diameter: 0.17, height: 0.66, tessellation: 12 }, scene), pipeM, 0, y, z);
+    pipe.rotation.z = Math.PI / 2;
+  }
+  for (const x of [-0.2, 0.2]) part(MB.CreateBox("bombTape", { width: 0.07, height: 0.36, depth: 0.38 }, scene), tapeM, x, 0.165, -0.385);
+  // wires from the case to the pipes
+  const wires = [["#c0392b", -0.2], ["#2c6fd1", 0], ["#e6c229", 0.2]];
+  for (const [col, x] of wires) {
+    const w = part(MB.CreateCylinder("bombWire", { diameter: 0.025, height: 0.42, tessellation: 6 }, scene), litMat("bombWire" + col, hex(col), 0.2), x, 0.4, -0.2);
+    w.rotation.x = -1.1;
+  }
+  const red = new BABYLON.Color3(1, 0.08, 0.04);
+  const screenMat = glowMat("bombScreenM", red);
+  part(MB.CreateBox("bombScreen", { width: 0.34, height: 0.12, depth: 0.02 }, scene), screenMat, 0, 0.26, 0.26);
+  const ledMat = glowMat("bombLedM", red);
+  part(MB.CreateSphere("bombLed", { diameter: 0.13, segments: 8 }, scene), ledMat, 0.27, 0.45, 0.12);
+  const haloMat = glowMat("bombHaloM", red, 0.35);
+  haloMat.disableDepthWrite = true;
+  const halo = part(MB.CreatePlane("bombHalo", { size: 1 }, scene), haloMat, 0, 0.7, 0);
+  halo.billboardMode = BABYLON.Mesh.BILLBOARDMODE_ALL;
+  bomb = { root, ledMat, screenMat, haloMat, halo, red };
+  return bomb;
+}
+function updateBomb() {
+  const show = tower && (M.stage === 5 || M.stage === 6);
+  if (!show) { if (bomb) bomb.root.setEnabled(false); return; }
+  const b = makeBomb();
+  if (!b.root.isEnabled()) b.root.setEnabled(true);
+  if (defused) {
+    b.ledMat.emissiveColor.set(0.1, 1, 0.25);
+    b.screenMat.emissiveColor.set(0.15, 0.05, 0.03);
+    b.halo.setEnabled(false);
+    return;
+  }
+  // blinks faster as the clock runs down
+  const period = Math.max(0.18, Math.min(1, M.timer / 40));
+  const on = (performance.now() / 1000) % period < period * 0.5;
+  const k = on ? 1 : 0.12;
+  b.ledMat.emissiveColor.set(b.red.r * k, b.red.g * k, b.red.b * k);
+  b.screenMat.emissiveColor.set(0.6 + 0.4 * k, 0.05, 0.03);
+  b.halo.setEnabled(true);
+  b.haloMat.alpha = on ? 0.45 : 0.12;
+  b.halo.scaling.setAll(on ? 2.6 : 2.0);
+}
 function updateTower(dt, ctx) {
   const pos = ctx.pos;
   if (!tower) return;
+  updateBomb();
   // countdown
   M.timer -= dt;
   const sec = Math.ceil(M.timer);
@@ -356,7 +433,7 @@ function updateTower(dt, ctx) {
   if (M.stage === 6) {
     const dy = pos.y - (tower.base + BELL_Y);
     const near = Math.hypot(d, dy) < 11 && pos.y > tower.base + 44;
-    progress = near ? progress + dt : Math.max(0, progress - dt * 0.25);
+    progress = defused ? 6 : near ? Math.min(6, progress + dt) : Math.max(0, progress - dt * 0.25);
     if (progress >= 6 && !defused) { defused = true; disarmed(); return; }
   }
   if (M.timer <= 0 && !defused) {
@@ -673,7 +750,7 @@ export function midnightObjective() {
     return square && { x: square.x, z: square.z, label: "Palace Square" };
   }
   if (s === 5) return tower && { x: tower.x, z: tower.z, label: "Clock tower" };
-  if (s === 6) return tower && { x: tower.x, z: tower.z, y: tower.base + BELL_Y, label: "The bomb" };
+  if (s === 6 && tower) { const b = bombAt(); return { x: b.x, z: b.z, y: b.y + 0.6, label: "The bomb" }; }
   if (s === 7 && van) { const p = van.v.mesh.position; return { x: p.x, z: p.z, label: "Grey van", target: true }; }
   if (s === 11 && martha) return { x: martha.p.x, z: martha.p.z, label: "Martha", target: true };
   return null;
@@ -691,7 +768,10 @@ export function midnightCard() {
   }
   if (s === 5 || s === 6) {
     timer = defused ? null : Math.max(0, M.timer);
-    if (s === 6) extra = progress > 0 ? `Disarming ${"█".repeat(Math.round(progress / 6 * 10))}${"░".repeat(10 - Math.round(progress / 6 * 10))}` : "Get up to the belfry";
+    if (s === 6) {
+      const n = Math.max(0, Math.min(10, Math.round((progress / 6) * 10)));
+      extra = defused ? "Disarmed" : progress > 0 ? `Disarming ${"█".repeat(n)}${"░".repeat(10 - n)}` : "Get up to the belfry";
+    }
   }
   if (s === 7 && van) extra = van.state === "parked" ? "Parked — they're waiting for something" : healthBar(van) + (escort && escort.state !== "wrecked" ? " · escort on you" : "");
   return { name: "MISSION 2 — MIDNIGHT BELLS", title: st.title, hint: st.hint, extra, timer, done: M.stage >= DONE };

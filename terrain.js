@@ -10,6 +10,7 @@
 // it, and the player, cars and people walk and drive on it.
 import { KTM } from "./kathmandu.js";
 import { landSdfSmooth, deckAt } from "./water.js";
+import { inHimBox, himH } from "./realm.js";
 
 const RISE = 30;          // height at the north edge of town
 const SOUTH_FLAT = 30;    // the first metres inside the south edge stay level
@@ -133,6 +134,24 @@ function swayHeight(x, z) {
   return a + (b - a) * tz;
 }
 
+// ---------------------------------------------------------------- the pass north
+// North of Swayambhu's hill the land no longer drops into the sea: a pass
+// climbs gently north (the way to the Himalayas — walk up it far enough and
+// you're there), between rocky foothills that rise on both sides and fall
+// back to the sea at the far east and west edges. (Only gentle shapes, so
+// the drawn ground — himalaya.js — and this agree to within centimetres.)
+export const NPASS = { x: SWAY.x, z0: SWAY.z + SWAY.RW - 8, half: 720, z1: 3400 };
+export function northH(x, z) {
+  const d = Math.max(0, z - NPASS.z0),
+    ax = Math.abs(x - NPASS.x);
+  const floor = 25 + d * 0.055;                             // (starts level with the foot of the hill)
+  const w = 45 + d * 0.06;                                   // the pass widens as it climbs
+  const side = sstep(w, w + 260, ax) * (70 + d * 0.42);
+  const crag = side * 0.08 * Math.sin(x / 41 + 0.7) * Math.sin(z / 37) + 2.2 * Math.sin(x / 53 + 1.1) * Math.cos(z / 47);
+  return (floor + side + crag) * (1 - sstep(NPASS.half - 260, NPASS.half, ax));
+}
+const inNorthBox = (x, z) => z > NPASS.z0 && z < NPASS.z1 && x > NPASS.x - NPASS.half && x < NPASS.x + NPASS.half;
+
 // levelled terraces: { x, z, r, R, h } — flat within r, blending out to r + R
 const flats = [];
 export function addTerrainFlat(x, z, r, R = 30) {
@@ -153,6 +172,15 @@ export function groundAt(x, z, y) {
 }
 // The bare land (no bridges): for ground meshes, the camera, trees.
 export function landH(x, z) {
+  // the Himalayas (far out west / north, only reachable by the pass)
+  if (x < -4000) return inHimBox(x, z) ? himH(x, z) : 0;
+  const h = landH0(x, z);
+  if (!inNorthBox(x, z)) return h;
+  // the pass, blended in from the foot of Swayambhu's hill
+  const w = sstep(NPASS.z0, NPASS.z0 + 110, z);
+  return h + (northH(x, z) - h) * w;
+}
+function landH0(x, z) {
   if (x <= BX0 || x >= BX1 || z <= BZ0 || z >= BZ1) return 0;
   const sx = x - SWAY.x, sz = z - SWAY.z;
   let h = sx * sx + sz * sz < (SWAY.RB + 1) * (SWAY.RB + 1) ? swayHeight(x, z) : raw(x, z);
@@ -166,6 +194,7 @@ export function landH(x, z) {
 }
 // Slope (rise per metre) along the unit direction (dx, dz).
 export function terrainSlope(x, z, dx, dz) {
+  if (x < -4000 || inNorthBox(x, z)) return (landH(x + dx, z + dz) - landH(x - dx, z - dz)) / 2;   // the Himalayas, the pass
   // flat everywhere except Kathmandu's hills and the bridge ramps
   if ((x <= BX0 - 2 || x >= BX1 + 2 || z <= BZ0 - 2 || z >= BZ1 + 2) && !deckAt(x, z) && !deckAt(x + dx, z + dz) && !deckAt(x - dx, z - dz)) return 0;
   return (terrainH(x + dx, z + dz) - terrainH(x - dx, z - dz)) / 2;

@@ -1152,7 +1152,7 @@ export function archCard() {
     extra = `${hostiles().length} left`;
     for (const b of ["rocco", "vinnie"]) { const bar = bossBar(b); if (bar) extra += ` · ${bar}`; }
   }
-  if (s === 5 && boat) extra = boat.state === "moored" ? "Get in the other boat" : `Their hull ${"●".repeat(Math.max(0, boat.hp))}${"○".repeat(HULL - Math.max(0, boat.hp))}`;
+  if (s === 5 && boat) extra = boat.state === "moored" ? "Get in the other boat" : `Their hull ${"●".repeat(Math.max(0, Math.min(HULL, boat.hp)))}${"○".repeat(HULL - Math.max(0, Math.min(HULL, boat.hp)))}`;
   if (s === 10 && lucienCar) extra = healthBar(lucienCar);
   if (s === 12) extra = `${hunters.filter((c) => c.state !== "wrecked").length} cars left`;
   if (s === 15 && truck) extra = healthBar(truck) + (escort && escort.state !== "wrecked" ? " · escort on you" : "");
